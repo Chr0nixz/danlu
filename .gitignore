@@ -1,0 +1,9 @@
+/dist/
+web/node_modules/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+
+# impeccable 的临时文件（评审截图、方向选择页）
+.impeccable/review/
+.impeccable/questions/
+.impeccable/config.local.json

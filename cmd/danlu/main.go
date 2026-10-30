@@ -1,0 +1,515 @@
+// danlu：GPU 服务器训练任务管理面板。
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"danlu/internal/api"
+	"danlu/internal/auth"
+	"danlu/internal/config"
+	"danlu/internal/gpu"
+	"danlu/internal/runner"
+	"danlu/internal/scheduler"
+	"danlu/internal/snapshot"
+	"danlu/internal/store"
+	"danlu/internal/tlsutil"
+	"danlu/internal/webui"
+
+	"golang.org/x/term"
+)
+
+var version = "dev" // 构建时通过 -ldflags "-X main.version=..." 注入
+
+const usage = `danlu — GPU 服务器训练任务管理面板
+
+用法: danlu <命令> [参数]
+
+  init              初始化：生成端口、安全入口、密码和证书
+  serve             启动服务
+  info              显示访问地址等信息
+  passwd            修改登录密码
+  entrance          查看安全入口；--reset 重新生成
+  port <端口>       修改端口
+  cert --regen      重新生成本地 CA 和证书（公网 IP 变化后使用）
+  install-service   安装为 systemd 用户服务（开机自启、退出 SSH 后继续运行）
+  version           显示版本
+
+数据目录默认是 ~/.danlu，可以用环境变量 DANLU_HOME 指定。
+`
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Print(usage)
+		os.Exit(2)
+	}
+	args := os.Args[2:]
+	var err error
+	switch os.Args[1] {
+	case "init":
+		err = cmdInit(args)
+	case "serve":
+		err = cmdServe(args)
+	case "info":
+		err = cmdInfo()
+	case "passwd":
+		err = cmdPasswd(args)
+	case "entrance":
+		err = cmdEntrance(args)
+	case "port":
+		err = cmdPort(args)
+	case "cert":
+		err = cmdCert(args)
+	case "install-service":
+		err = cmdInstallService()
+	case "version", "--version", "-v":
+		fmt.Println("danlu", version)
+	case "help", "--help", "-h":
+		fmt.Print(usage)
+	default:
+		fmt.Fprintf(os.Stderr, "未知命令 %q\n\n%s", os.Args[1], usage)
+		os.Exit(2)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "错误:", err)
+		os.Exit(1)
+	}
+}
+
+func paths() config.Paths { return config.PathsFor(config.Home()) }
+
+// ---------- 交互输入 ----------
+
+var stdin = bufio.NewReader(os.Stdin)
+
+func ask(label, def string) string {
+	if def != "" {
+		fmt.Printf("  %s [%s]: ", label, def)
+	} else {
+		fmt.Printf("  %s: ", label)
+	}
+	line, _ := stdin.ReadString('\n')
+	if line = strings.TrimSpace(line); line == "" {
+		return def
+	}
+	return line
+}
+
+func askPassword(label string) string {
+	fmt.Printf("  %s: ", label)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		b, _ := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		return strings.TrimSpace(string(b))
+	}
+	line, _ := stdin.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+// ---------- init ----------
+
+func cmdInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	port := fs.Int("port", 0, "端口（默认随机）")
+	ip := fs.String("public-ip", "", "公网 IP（默认自动检测）")
+	userName := fs.String("user", "", "用户名（默认 admin）")
+	password := fs.String("password", "", "密码（默认随机生成）")
+	tlsMode := fs.String("tls", config.TLSLocalCA, "local-ca | off")
+	conda := fs.String("conda", "", "conda 安装目录（默认自动检测）")
+	yes := fs.Bool("yes", false, "不提问，全部使用默认值")
+	force := fs.Bool("force", false, "覆盖已有配置")
+	fs.Parse(args)
+
+	p := paths()
+	if config.Exists(p) && !*force {
+		return fmt.Errorf("已经初始化过了（%s）。查看访问地址用 danlu info；要重新初始化请加 --force", p.Config)
+	}
+	c := config.Default()
+	c.Server.Port = *port
+	if c.Server.Port == 0 {
+		c.Server.Port = config.RandomPort()
+	}
+	c.Server.PublicIP = *ip
+	if c.Server.PublicIP == "" {
+		c.Server.PublicIP = config.DetectIP()
+	}
+	if *userName != "" {
+		c.Auth.Username = *userName
+	}
+	c.Runtime.CondaBase = *conda
+	if c.Runtime.CondaBase == "" {
+		c.Runtime.CondaBase = config.DetectConda()
+	}
+	c.TLS.Mode = *tlsMode
+	pw := *password
+
+	if !*yes {
+		fmt.Println("初始化 danlu（直接回车使用括号里的默认值）")
+		c.Server.Port, _ = strconv.Atoi(ask("面板端口", strconv.Itoa(c.Server.Port)))
+		c.Server.PublicIP = ask("公网 IP", c.Server.PublicIP)
+		c.Auth.Username = ask("用户名", c.Auth.Username)
+		if pw == "" {
+			pw = askPassword("密码（回车自动生成）")
+		}
+		c.Runtime.CondaBase = ask("conda 安装目录（没有就留空）", c.Runtime.CondaBase)
+	}
+	if net.ParseIP(c.Server.PublicIP) == nil {
+		return fmt.Errorf("公网 IP %q 无效", c.Server.PublicIP)
+	}
+	generated := false
+	if pw == "" {
+		pw, generated = config.RandomPassword(), true
+	} else if len(pw) < 8 {
+		return errors.New("密码至少 8 位")
+	}
+	hash, err := auth.HashPassword(pw)
+	if err != nil {
+		return err
+	}
+	c.Auth.PasswordHash = hash
+	c.Server.Entrance = config.RandomEntrance()
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if err := p.MkdirAll(); err != nil {
+		return err
+	}
+	if _, err := config.EnsureSecret(p); err != nil {
+		return err
+	}
+	if c.TLS.Mode == config.TLSLocalCA {
+		if err := tlsutil.Generate(p.TLS, tlsutil.IPs(c.Server.PublicIP)); err != nil {
+			return fmt.Errorf("生成证书失败: %w", err)
+		}
+	}
+	if err := config.Save(p, c); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("  ✔ 已写入配置", p.Config)
+	if c.TLS.Mode == config.TLSLocalCA {
+		fmt.Printf("  ✔ 已生成本地 CA 和服务器证书（只对 %s 有效）\n", c.Server.PublicIP)
+	}
+	fmt.Println("  ──────────────────────────────────────────")
+	fmt.Println("  访问地址 ", c.URL())
+	fmt.Println("  用户名   ", c.Auth.Username)
+	if generated {
+		fmt.Println("  密码     ", pw, "（只显示这一次）")
+	}
+	fmt.Printf("  ⚠ 请在防火墙 / 云安全组放行 TCP %d\n", c.Server.Port)
+	if c.TLS.Mode == config.TLSOff {
+		fmt.Println("  ⚠ 没有启用 HTTPS，密码会以明文传输，只能用于本地测试")
+	}
+	fmt.Println("  ──────────────────────────────────────────")
+	fmt.Println("  下一步：danlu install-service（或直接 danlu serve 先试试）")
+	return nil
+}
+
+// ---------- serve ----------
+
+func cmdServe(args []string) error {
+	p := paths()
+	c, err := config.Load(p)
+	if err != nil {
+		return err
+	}
+	if err := p.MkdirAll(); err != nil {
+		return err
+	}
+	secret, err := config.EnsureSecret(p)
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(p.DB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	mon := gpu.NewMonitor(gpu.NewSource())
+	go mon.Run(ctx, 2*time.Second)
+
+	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, CondaBase: c.Runtime.CondaBase}
+	mgr := scheduler.New(st, mon, run, scheduler.Options{
+		SnapshotDir: p.Snapshots,
+		Snapshot: snapshot.Options{
+			MaxFile:  int64(c.Runtime.SnapshotMaxFileMB) << 20,
+			MaxTotal: int64(c.Runtime.SnapshotMaxTotalMB) << 20,
+		},
+		SnapshotTimeout: 10 * time.Second,
+		KillGrace:       c.Runtime.KillGrace.Duration,
+	})
+	mgr.Recover()
+	go mgr.Run(ctx)
+
+	au := auth.New(st, auth.Options{
+		Entrance: c.Server.Entrance, Secret: secret, Secure: c.TLS.Mode != config.TLSOff,
+		Username: c.Auth.Username, PasswordHash: c.Auth.PasswordHash, SessionTTL: c.Auth.SessionTTL.Duration,
+		MaxFailures: c.Auth.MaxFailures, Lockout: c.Auth.Lockout.Duration,
+	})
+	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, Auth: au, Runner: run,
+		Static: webui.FS(), Version: version}
+
+	httpSrv := &http.Server{
+		Addr:              net.JoinHostPort(c.Server.Bind, strconv.Itoa(c.Server.Port)),
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		// 公网上扫描器很多，TLS 握手失败的日志直接丢掉
+		ErrorLog: log.New(filteredWriter{}, "", log.LstdFlags),
+	}
+	go func() {
+		<-ctx.Done()
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		httpSrv.Shutdown(sctx)
+	}()
+
+	log.Printf("danlu %s 启动，数据目录 %s", version, p.Home)
+	log.Printf("访问地址 %s", c.URL())
+	switch c.TLS.Mode {
+	case config.TLSLocalCA:
+		if err := tlsutil.EnsureServer(p.TLS, tlsutil.IPs(c.Server.PublicIP)); err != nil {
+			return err
+		}
+		f := tlsutil.FilesIn(p.TLS)
+		err = httpSrv.ListenAndServeTLS(f.Cert, f.Key)
+	case config.TLSFile:
+		err = httpSrv.ListenAndServeTLS(c.TLS.CertFile, c.TLS.KeyFile)
+	default:
+		log.Printf("⚠ 没有启用 HTTPS，只能用于本地测试")
+		err = httpSrv.ListenAndServe()
+	}
+	if errors.Is(err, http.ErrServerClosed) {
+		log.Printf("danlu 已停止（正在运行的训练任务不受影响）")
+		return nil
+	}
+	return err
+}
+
+type filteredWriter struct{}
+
+func (filteredWriter) Write(b []byte) (int, error) {
+	if strings.Contains(string(b), "TLS handshake error") {
+		return len(b), nil
+	}
+	return os.Stderr.Write(b)
+}
+
+// ---------- 管理命令 ----------
+
+func loadForEdit() (config.Paths, *config.Config, error) {
+	p := paths()
+	c, err := config.Load(p)
+	return p, c, err
+}
+
+const restartHint = "重启服务后生效：systemctl --user restart danlu"
+
+func cmdInfo() error {
+	p, c, err := loadForEdit()
+	if err != nil {
+		return err
+	}
+	fmt.Println("访问地址 ", c.URL())
+	fmt.Println("用户名   ", c.Auth.Username, "（密码不会再显示，忘记了用 danlu passwd 重设）")
+	fmt.Println("HTTPS    ", c.TLS.Mode)
+	if c.TLS.Mode == config.TLSLocalCA {
+		if fp, err := tlsutil.Fingerprint(tlsutil.FilesIn(p.TLS).CACert); err == nil {
+			fmt.Println("CA 指纹  ", fp)
+		}
+	}
+	fmt.Println("conda    ", orDash(c.Runtime.CondaBase))
+	fmt.Println("数据目录 ", p.Home)
+	return nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func cmdPasswd(args []string) error {
+	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
+	pw := fs.String("password", "", "新密码（不填则交互输入）")
+	fs.Parse(args)
+	p, c, err := loadForEdit()
+	if err != nil {
+		return err
+	}
+	if *pw == "" {
+		*pw = askPassword("新密码（至少 8 位）")
+		if again := askPassword("再输入一次"); again != *pw {
+			return errors.New("两次输入不一致")
+		}
+	}
+	if len(*pw) < 8 {
+		return errors.New("密码至少 8 位")
+	}
+	hash, err := auth.HashPassword(*pw)
+	if err != nil {
+		return err
+	}
+	c.Auth.PasswordHash = hash
+	if err := config.Save(p, c); err != nil {
+		return err
+	}
+	// 让所有已登录的会话失效
+	if st, err := store.Open(p.DB); err == nil {
+		st.DeleteSessionsExcept("")
+		st.Close()
+	}
+	fmt.Println("密码已修改，所有已登录的会话已注销。" + restartHint)
+	return nil
+}
+
+func cmdEntrance(args []string) error {
+	fs := flag.NewFlagSet("entrance", flag.ExitOnError)
+	reset := fs.Bool("reset", false, "重新生成安全入口")
+	fs.Parse(args)
+	p, c, err := loadForEdit()
+	if err != nil {
+		return err
+	}
+	if *reset {
+		c.Server.Entrance = config.RandomEntrance()
+		if err := config.Save(p, c); err != nil {
+			return err
+		}
+		fmt.Println("已生成新的安全入口，旧入口失效。" + restartHint)
+	}
+	fmt.Println("访问地址 ", c.URL())
+	return nil
+}
+
+func cmdPort(args []string) error {
+	if len(args) != 1 {
+		return errors.New("用法: danlu port <端口>")
+	}
+	port, err := strconv.Atoi(args[0])
+	if err != nil {
+		return err
+	}
+	p, c, err := loadForEdit()
+	if err != nil {
+		return err
+	}
+	c.Server.Port = port
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if err := config.Save(p, c); err != nil {
+		return err
+	}
+	fmt.Printf("端口已改为 %d，记得在防火墙放行。%s\n访问地址  %s\n", port, restartHint, c.URL())
+	return nil
+}
+
+func cmdCert(args []string) error {
+	fs := flag.NewFlagSet("cert", flag.ExitOnError)
+	regen := fs.Bool("regen", false, "重新生成本地 CA 和服务器证书")
+	ip := fs.String("public-ip", "", "新的公网 IP（默认沿用配置）")
+	fs.Parse(args)
+	if !*regen {
+		return errors.New("用法: danlu cert --regen [--public-ip IP]")
+	}
+	p, c, err := loadForEdit()
+	if err != nil {
+		return err
+	}
+	if *ip != "" {
+		if net.ParseIP(*ip) == nil {
+			return fmt.Errorf("IP %q 无效", *ip)
+		}
+		c.Server.PublicIP = *ip
+	}
+	if err := tlsutil.Generate(p.TLS, tlsutil.IPs(c.Server.PublicIP)); err != nil {
+		return err
+	}
+	if err := config.Save(p, c); err != nil {
+		return err
+	}
+	fmt.Println("已重新生成 CA 和证书。之前安装过 CA 的设备需要删掉旧 CA、重新安装新的。" + restartHint)
+	return nil
+}
+
+const serviceUnit = `[Unit]
+Description=danlu GPU 训练任务管理面板
+After=network-online.target
+
+[Service]
+ExecStart=%s serve
+Environment=DANLU_HOME=%s
+Environment=PATH=%s
+Restart=on-failure
+RestartSec=3
+# 关键：停止或重启 danlu 时只结束 danlu 自己，不要连带杀掉正在跑的训练进程
+KillMode=process
+
+[Install]
+WantedBy=default.target
+`
+
+func cmdInstallService() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	p := paths()
+	if !config.Exists(p) {
+		return errors.New("请先运行 danlu init")
+	}
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	unit := filepath.Join(dir, "danlu.service")
+	// 把当前 PATH 写进服务里，训练脚本才能找到你平时用的命令
+	content := fmt.Sprintf(serviceUnit, exe, p.Home, os.Getenv("PATH"))
+	if err := os.WriteFile(unit, []byte(content), 0o644); err != nil {
+		return err
+	}
+	fmt.Println("✔ 已写入", unit)
+	steps := [][]string{
+		{"systemctl", "--user", "daemon-reload"},
+		{"systemctl", "--user", "enable", "--now", "danlu"},
+	}
+	for _, s := range steps {
+		if out, err := exec.Command(s[0], s[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s 失败: %v\n%s", strings.Join(s, " "), err, out)
+		}
+	}
+	fmt.Println("✔ 服务已启动：systemctl --user status danlu")
+	if u, err := user.Current(); err == nil {
+		if out, err := exec.Command("loginctl", "enable-linger", u.Username).CombinedOutput(); err != nil {
+			fmt.Printf("⚠ loginctl enable-linger 失败（%v %s）。\n  不开启的话，退出 SSH 后服务可能被停止。请执行: sudo loginctl enable-linger %s\n",
+				err, strings.TrimSpace(string(out)), u.Username)
+		} else {
+			fmt.Println("✔ 已开启 linger：退出 SSH 后服务继续运行")
+		}
+	}
+	fmt.Println("查看日志：journalctl --user -u danlu -f")
+	return nil
+}

@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-31T00:00:00Z",
+  "title": "Design System: 丹炉 Danlu",
+  "extensions": {
+    "colorMeta": {
+      "inv": { "role": "primary", "displayName": "反色墨 Inverted Ink", "canonical": "#171717", "note": "深色模式为 #ededed（inv-dark），字色互换", "tonalRamp": ["#0a0a0a", "#171717", "#2a2a2a", "#4d4d4d", "#6b6b6b", "#a8a8a8", "#d6d6d6", "#fafafa"] },
+      "run": { "role": "secondary", "displayName": "运行蓝 Run Blue", "canonical": "#0b6bcb", "note": "深色模式 #52a8ff", "tonalRamp": ["#0a2540", "#0d3d73", "#0b6bcb", "#2f8ae6", "#52a8ff", "#86c2ff", "#bcdcff", "#e8f3ff"] },
+      "ok": { "role": "secondary", "displayName": "成功绿 OK Green", "canonical": "#18794e", "note": "深色模式 #3dd68c", "tonalRamp": ["#0b2e1e", "#114d33", "#18794e", "#22a36a", "#3dd68c", "#7ee5b2", "#b8f0d4", "#e9faf1"] },
+      "fail": { "role": "secondary", "displayName": "失败红 Fail Red", "canonical": "#cd2b31", "note": "深色模式 #ff6369", "tonalRamp": ["#3d0f11", "#7a1a1e", "#cd2b31", "#ec454b", "#ff6369", "#ff989c", "#ffc8ca", "#fff0f0"] },
+      "warn": { "role": "secondary", "displayName": "琥珀 Warn Amber", "canonical": "#a35200", "note": "深色模式 #f1a10d", "tonalRamp": ["#3a1d00", "#6b3600", "#a35200", "#cf7a05", "#f1a10d", "#f7c463", "#fbe0a8", "#fff6e6"] },
+      "brand": { "role": "tertiary", "displayName": "朱砂 Cinnabar", "canonical": "#e5482d", "note": "只用于火焰标志，两种主题不变", "tonalRamp": ["#3d120b", "#7a2416", "#b83621", "#e5482d", "#ee7360", "#f4a194", "#f9cec7", "#fdf0ee"] },
+      "bg": { "role": "neutral", "displayName": "页面底 Page", "canonical": "#fafafa", "note": "深色 #0a0a0a" },
+      "surface": { "role": "neutral", "displayName": "面板 Surface", "canonical": "#ffffff", "note": "深色 #111111" },
+      "subtle": { "role": "neutral", "displayName": "衬底 Subtle", "canonical": "#f4f4f4", "note": "深色 #171717" },
+      "raised": { "role": "neutral", "displayName": "浮起 Raised", "canonical": "#ffffff", "note": "深色 #2a2a2a" },
+      "hover": { "role": "neutral", "displayName": "悬停 Hover", "canonical": "#efefef", "note": "深色 #1f1f1f" },
+      "line": { "role": "neutral", "displayName": "边线 Line", "canonical": "#e8e8e8", "note": "深色 #242424" },
+      "line-strong": { "role": "neutral", "displayName": "强边线 Line Strong", "canonical": "#d6d6d6", "note": "深色 #363636" },
+      "fg": { "role": "neutral", "displayName": "主文字 Ink", "canonical": "#171717", "note": "深色 #ededed" },
+      "fg-2": { "role": "neutral", "displayName": "次文字 Ink 2", "canonical": "#4d4d4d", "note": "深色 #b4b4b4" },
+      "fg-3": { "role": "neutral", "displayName": "弱文字 Ink 3", "canonical": "#6b6b6b", "note": "深色 #8f8f8f" },
+      "fg-4": { "role": "neutral", "displayName": "最弱文字 Ink 4", "canonical": "#a8a8a8", "note": "深色 #5a5a5a" },
+      "term-bg": { "role": "neutral", "displayName": "终端底 Terminal", "canonical": "#0b0b0b", "note": "两种主题都用" },
+      "term-fg": { "role": "neutral", "displayName": "终端字 Terminal Ink", "canonical": "#d9d9d9", "note": "两种主题都用" }
+    },
+    "ansiPalette": {
+      "fg": { "black": "#7a7a7a", "red": "#ff7b72", "green": "#56d364", "yellow": "#e3b341", "blue": "#79c0ff", "magenta": "#d2a8ff", "cyan": "#56d4dd", "white": "#e6e6e6", "bright-black": "#9e9e9e", "bright-red": "#ffa198", "bright-green": "#7ee787", "bright-yellow": "#f2cc60", "bright-blue": "#a5d6ff", "bright-magenta": "#e2c5ff", "bright-cyan": "#b3f0ff", "bright-white": "#fafafa" },
+      "bg": { "black": "#262626", "red": "#6e1b1b", "green": "#12432a", "yellow": "#5c4410", "blue": "#143d6b", "magenta": "#4e2369", "cyan": "#0f4a52", "white": "#8a8a8a" },
+      "selection": "rgb(82 168 255 / 0.35)"
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Headline", "purpose": "任务详情页的任务名，全站最大字级。" },
+      "title": { "displayName": "Title", "purpose": "页面标题。" },
+      "body": { "displayName": "Body", "purpose": "任务名、输入框、中号按钮、标签页。" },
+      "ui": { "displayName": "UI (text-ui)", "purpose": "主力字级：导航、分组标题、摘要、表单标签、小按钮、提示框。" },
+      "label": { "displayName": "Label", "purpose": "说明、时长、相对时间、GPU 指标、最后一行日志。" },
+      "mono": { "displayName": "Mono", "purpose": "终端、路径、命令、环境变量。" },
+      "micro": { "displayName": "Micro", "purpose": "GPU 卡号小方块、快捷键提示、底部导航标签。" }
+    },
+    "shadows": [
+      { "name": "segmented-thumb", "value": "0 1px 2px rgb(0 0 0 / 0.08)", "purpose": "分段控件选中格。" },
+      { "name": "popover", "value": "0 8px 24px rgb(0 0 0 / 0.12)", "purpose": "自动补全等浮层菜单。" },
+      { "name": "terminal-float", "value": "0 4px 12px rgb(0 0 0 / 0.4)", "purpose": "终端里的回到底部浮钮。" },
+      { "name": "tab-rail", "value": "inset 0 -1px 0 var(--line)", "purpose": "下划线标签页的轨道线。" }
+    ],
+    "focus": [
+      { "name": "focus-ring", "value": "outline: 2px solid color-mix(in oklab, var(--run) 70%, transparent); outline-offset: 2px", "purpose": "全局键盘焦点。" },
+      { "name": "field-focus", "value": "border-color: var(--fg-3); box-shadow: 0 0 0 3px color-mix(in oklab, var(--run) 15%, transparent)", "purpose": "输入框聚焦。" },
+      { "name": "selection", "value": "color-mix(in oklab, var(--run) 28%, transparent)", "purpose": "文字选区。" }
+    ],
+    "motion": [
+      { "name": "color-transition", "value": "150ms (Tailwind 默认 cubic-bezier(0.4, 0, 0.2, 1))", "purpose": "背景、边线、文字、透明度的状态过渡；除下面两项外唯一的动效。" },
+      { "name": "row-flash", "value": "flash 1.2s ease-out; 0–15% 为 color-mix(in oklab, var(--flash) 14%, transparent)，然后淡出", "purpose": "任务状态变化时整行闪一次，--flash 取新状态色：成功 ok、失败 fail、取消 fg-3、其余 run。" },
+      { "name": "running-spin", "value": "spin 1.6s linear infinite", "purpose": "运行中状态图标匀速旋转。" },
+      { "name": "meter-width", "value": "width 500ms ease-out", "purpose": "利用率和进度细条的宽度变化。" },
+      { "name": "reduced-motion", "value": "animation/transition-duration: 0.01ms", "purpose": "prefers-reduced-motion 下关闭所有动效。" }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px", "purpose": "底部导航换顶栏导航；GPU 从行变面板（两列）。" },
+      { "name": "md", "value": "768px", "purpose": "任务行变固定列；表单变左右两栏。" },
+      { "name": "lg", "value": "1024px", "purpose": "GPU 面板四列；显示快捷键提示。" }
+    ],
+    "layout": {
+      "containerMaxWidth": "1200px",
+      "topbarHeight": "48px",
+      "bottomNavHeight": "56px",
+      "theme": "默认跟随 prefers-color-scheme；<html data-theme=\"light|dark\"> 手动覆盖，localStorage 键 danlu-theme，index.html 内联脚本首屏前应用。",
+      "shortcuts": ["N 新建任务", "/ 聚焦搜索（Esc 清空）", "Ctrl/⌘ + Enter 提交新任务"]
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary-sm",
+      "description": "反色实心主按钮，顶栏的“新建任务”，带快捷键提示。",
+      "html": "<button class=\"ds-btn ds-btn-primary\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 12h14\"/><path d=\"M12 5v14\"/></svg>新建任务<kbd class=\"ds-kbd\">N</kbd></button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 10px; border-radius: 6px; font: 500 13px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; white-space: nowrap; border: 0; cursor: pointer; transition: background-color 150ms, border-color 150ms, color 150ms, opacity 150ms; } .ds-btn svg { width: 16px; height: 16px; } .ds-btn-primary { background: var(--inv, #171717); color: var(--inv-fg, #fafafa); } .ds-btn-primary:hover { opacity: 0.85; } .ds-btn-primary:active { opacity: 0.75; } .ds-btn:focus-visible { outline: 2px solid color-mix(in oklab, var(--run, #0b6bcb) 70%, transparent); outline-offset: 2px; } .ds-kbd { display: inline-flex; align-items: center; justify-content: center; height: 20px; min-width: 20px; padding: 0 4px; border: 1px solid color-mix(in oklab, currentColor 25%, transparent); border-radius: 4px; font: 11px/1 inherit; opacity: 0.7; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "默认按钮：面板底、强边线。",
+      "html": "<button class=\"ds-btn2\">返回</button>",
+      "css": ".ds-btn2 { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fg, #171717); font: 500 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; cursor: pointer; transition: background-color 150ms, border-color 150ms, color 150ms; } .ds-btn2:hover { background: var(--hover, #efefef); } .ds-btn2:active { background: var(--line, #e8e8e8); } .ds-btn2:focus-visible { outline: 2px solid color-mix(in oklab, var(--run, #0b6bcb) 70%, transparent); outline-offset: 2px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "取消任务等破坏性动作：次按钮外形，失败红文字。",
+      "html": "<button class=\"ds-btn-danger\">取消任务</button>",
+      "css": ".ds-btn-danger { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fail, #cd2b31); font: 500 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; cursor: pointer; transition: background-color 150ms, border-color 150ms; } .ds-btn-danger:hover { border-color: color-mix(in oklab, var(--fail, #cd2b31) 40%, transparent); background: color-mix(in oklab, var(--fail, #cd2b31) 8%, transparent); } .ds-btn-danger:focus-visible { outline: 2px solid color-mix(in oklab, var(--run, #0b6bcb) 70%, transparent); outline-offset: 2px; }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "36px 输入框，聚焦时边线加深并带运行蓝 15% 光晕。",
+      "html": "<input class=\"ds-input\" placeholder=\"搜索任务名、命令、目录\" />",
+      "css": ".ds-input { width: 100%; height: 36px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fg, #171717); font: 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; outline: none; transition: border-color 150ms, box-shadow 150ms; } .ds-input::placeholder { color: var(--fg-3, #6b6b6b); } .ds-input:hover { border-color: var(--fg-4, #a8a8a8); } .ds-input:focus { border-color: var(--fg-3, #6b6b6b); box-shadow: 0 0 0 3px color-mix(in oklab, var(--run, #0b6bcb) 15%, transparent); }"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "topbar",
+      "description": "48px 顶栏：火焰标志、主机名、下划线导航。",
+      "html": "<header class=\"ds-top\"><span class=\"ds-brand\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.25\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z\"/></svg></span><b>丹炉</b><span class=\"ds-sep\">/</span><span class=\"ds-host\">gpu-01</span><nav><a class=\"on\">总览</a><a>任务</a><a>设置</a></nav></header>",
+      "css": ".ds-top { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 24px; background: var(--surface, #fff); border-bottom: 1px solid var(--line, #e8e8e8); font: 13px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; color: var(--fg, #171717); } .ds-top b { font-size: 14px; font-weight: 600; letter-spacing: -0.025em; } .ds-brand { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; background: var(--brand, #e5482d); color: #fff; } .ds-brand svg { width: 14px; height: 14px; } .ds-sep { color: var(--fg-4, #a8a8a8); } .ds-host { color: var(--fg-2, #4d4d4d); } .ds-top nav { display: flex; align-self: stretch; gap: 4px; margin-left: 12px; } .ds-top nav a { display: flex; align-items: center; padding: 0 8px; margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--fg-3, #6b6b6b); cursor: pointer; transition: color 150ms; } .ds-top nav a:hover { color: var(--fg, #171717); } .ds-top nav a.on { border-color: var(--fg, #171717); color: var(--fg, #171717); font-weight: 500; }"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "chip",
+      "refersTo": "segmented",
+      "description": "衬底轨道 + 浮起选中格，用于状态筛选。",
+      "html": "<div class=\"ds-seg\"><button class=\"on\">全部</button><button>运行中</button><button>失败</button></div>",
+      "css": ".ds-seg { display: inline-flex; gap: 2px; height: 32px; padding: 2px; border-radius: 6px; border: 1px solid var(--line, #e8e8e8); background: var(--subtle, #f4f4f4); } .ds-seg button { padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-3, #6b6b6b); font: 500 13px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; cursor: pointer; transition: color 150ms; } .ds-seg button:hover { color: var(--fg, #171717); } .ds-seg button.on { background: var(--raised, #fff); color: var(--fg, #171717); box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }"
+    },
+    {
+      "name": "Job Row",
+      "kind": "custom",
+      "refersTo": "job-row",
+      "description": "Linear 式任务行：状态图标、#编号、名称、GPU 卡号、进度细条、最后一行日志、时长、commit。",
+      "html": "<div class=\"ds-row\"><svg class=\"ds-spin\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M21 12a9 9 0 1 1-6.219-8.56\"/></svg><span class=\"ds-id\">#14</span><span class=\"ds-name\">eval-ckpt-e40-r3</span><span class=\"ds-chip\">0</span><span class=\"ds-meter\"><i style=\"width:75%\"></i></span><span class=\"ds-log\">epoch 1/3: 75% · 75/100 [loss=1.4286]</span><span class=\"ds-time\">6秒</span><span class=\"ds-sha\">8d7d38e<i></i></span></div>",
+      "css": ".ds-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line, #e8e8e8); background: var(--surface, #fff); font: 13px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; font-variant-numeric: tabular-nums; transition: background-color 150ms; } .ds-row:hover { background: var(--subtle, #f4f4f4); } .ds-spin { width: 16px; height: 16px; color: var(--run, #0b6bcb); animation: ds-spin 1.6s linear infinite; } @keyframes ds-spin { to { transform: rotate(360deg); } } .ds-id { color: var(--fg-3, #6b6b6b); } .ds-name { font-size: 14px; font-weight: 500; color: var(--fg, #171717); width: 180px; } .ds-chip { display: grid; place-items: center; height: 18px; min-width: 18px; padding: 0 4px; border: 1px solid var(--line-strong, #d6d6d6); border-radius: 4px; font: 11px/1 ui-monospace, Menlo, Consolas, monospace; color: var(--fg-2, #4d4d4d); } .ds-meter { width: 40px; height: 4px; border-radius: 9999px; background: var(--hover, #efefef); overflow: hidden; } .ds-meter i { display: block; height: 100%; background: var(--run, #0b6bcb); border-radius: 9999px; } .ds-log { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/16px ui-monospace, Menlo, Consolas, monospace; color: var(--fg-3, #6b6b6b); } .ds-time { font-size: 12px; color: var(--fg-3, #6b6b6b); width: 5.5rem; text-align: right; } .ds-sha { display: inline-flex; align-items: center; gap: 4px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--fg-2, #4d4d4d); } .ds-sha i { width: 6px; height: 6px; border-radius: 9999px; background: var(--warn, #a35200); }"
+    },
+    {
+      "name": "GPU Panel",
+      "kind": "card",
+      "refersTo": "gpu-panel",
+      "description": "每张卡一块面板：标题行、利用率和显存细条、占卡者。",
+      "html": "<div class=\"ds-gpu\"><div class=\"ds-gpu-h\"><b>GPU 3</b><span>35°C · 60W</span></div><div class=\"ds-gpu-m\"><div><p><span>利用率</span><b>0%</b></p><div class=\"ds-bar\"><i style=\"width:2%\"></i></div></div><div><p><span>显存</span><b>0.3 / 24 GB</b></p><div class=\"ds-bar\"><i style=\"width:2%\"></i></div></div></div><div class=\"ds-gpu-o\"><i></i>外部进程 900003 · someone · 2.0 GB</div></div>",
+      "css": ".ds-gpu { width: 260px; padding: 12px; border: 1px solid var(--line, #e8e8e8); border-radius: 8px; background: var(--surface, #fff); font: 13px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; font-variant-numeric: tabular-nums; color: var(--fg, #171717); } .ds-gpu-h { display: flex; justify-content: space-between; align-items: baseline; } .ds-gpu-h b { font-weight: 600; } .ds-gpu-h span { font-size: 12px; color: var(--fg-3, #6b6b6b); } .ds-gpu-m { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; } .ds-gpu-m p { display: flex; justify-content: space-between; margin: 0 0 6px; font-size: 12px; line-height: 16px; } .ds-gpu-m p span { color: var(--fg-3, #6b6b6b); } .ds-gpu-m p b { font-weight: 500; } .ds-bar { height: 4px; border-radius: 9999px; background: var(--hover, #efefef); overflow: hidden; } .ds-bar i { display: block; height: 100%; border-radius: 9999px; background: var(--warn, #a35200); } .ds-gpu-o { display: flex; align-items: center; gap: 6px; margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line, #e8e8e8); color: var(--warn, #a35200); } .ds-gpu-o i { width: 6px; height: 6px; border-radius: 9999px; background: var(--warn, #a35200); }"
+    },
+    {
+      "name": "Terminal Pane",
+      "kind": "custom",
+      "refersTo": "terminal",
+      "description": "日志和代码面板，两种主题下都是深色终端。",
+      "html": "<div class=\"ds-term\"><div class=\"ds-term-bar\"><i></i>直播中<span class=\"ds-term-btn\">换行</span><span class=\"ds-term-btn\">下载</span></div><pre><span style=\"color:#56d364\">[ok]</span> epoch 1/3: 75% · 75/100 [loss=1.4286]\n<span style=\"color:#e3b341\">[warn]</span> grad norm 12.4\n<span style=\"color:#ff7b72\">[err]</span> CUDA out of memory</pre></div>",
+      "css": ".ds-term { border: 1px solid var(--line, #e8e8e8); border-radius: 8px; overflow: hidden; background: #0b0b0b; } .ds-term-bar { display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 12px; border-bottom: 1px solid rgb(255 255 255 / 0.1); font: 12px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", sans-serif; color: #8f8f8f; } .ds-term-bar i { width: 6px; height: 6px; border-radius: 9999px; background: #3dd68c; } .ds-term-btn { margin-left: auto; height: 28px; display: inline-flex; align-items: center; padding: 0 8px; border-radius: 4px; color: #a1a1a1; transition: background-color 150ms, color 150ms; } .ds-term-btn + .ds-term-btn { margin-left: 0; } .ds-term-btn:hover { background: rgb(255 255 255 / 0.1); color: #fff; } .ds-term pre { margin: 0; padding: 10px 12px; color: #d9d9d9; font: 12.5px/1.6 ui-monospace, \"SFMono-Regular\", \"Cascadia Mono\", Menlo, Consolas, monospace; tab-size: 4; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "值班台（The Quiet Console）",
+    "overview": "丹炉的界面是一块安静、密集的控制台，做工对标 Vercel 控制台、Linear 和 GitHub Actions（类别标准 canon 方向，用户在两轮方向选择后主动选定）。整个画面由中性灰阶构成：页面底、面板、1px 边线、四级文字灰。颜色从不用来装饰，只用来说状态：蓝色是在跑，绿色是成功或空闲，红色是失败，琥珀是外部进程或需要注意，灰色是排队和取消。朱砂色只属于火焰标志。\n\n密度是这个系统的底线。列表和表格优先，一行里同时给出状态图标、#编号、名称、GPU 卡号、最后一行日志、时长、结束时间和 commit；卡片只留给 GPU 这类本身就是\"一台设备一块\"的数据。所有数字等宽（tabular-nums），刷新时不跳。字体只用系统字体栈，不打包字体，也不从外部 CDN 加载任何资源。\n\n深浅两套主题共用同一套语义变量，默认跟随系统，可以在设置里强制浅色或深色。日志和代码面板在两种主题下都是深色终端。明确拒绝的样子：粗圆角大卡片加橙色按钮的模板面板。",
+    "keyCharacteristics": [
+      "中性灰阶 + 状态色，颜色即语义",
+      "状态同时用形状和颜色区分（lucide 图标）",
+      "反色实心主按钮，朱砂色只给火焰标志",
+      "系统字体栈，全局 tabular-nums",
+      "控件圆角 6px，面板圆角 8px，1px 边线，几乎没有阴影",
+      "日志和代码是深色终端，两种主题都一样",
+      "信息密度只能升不能降"
+    ],
+    "rules": [
+      { "name": "The Color-Is-Status Rule", "body": "颜色只表达状态或注意事项。没有状态含义的地方一律用灰阶；不加装饰色、不加渐变、不给分区上色。", "section": "colors" },
+      { "name": "The One Flame Rule", "body": "朱砂色 `brand` 只出现在火焰标志上。主按钮用反色墨，绝不用朱砂或任何橙色。", "section": "colors" },
+      { "name": "The Paired Theme Rule", "body": "新增颜色必须作为语义变量同时定义浅色和深色两个值，并同时写进 `prefers-color-scheme: dark` 块和 `[data-theme=\"dark\"]` 块；组件里只引用变量，不写裸色值（终端面板除外）。", "section": "colors" },
+      { "name": "The Tabular Rule", "body": "全局 `font-variant-numeric: tabular-nums`。任何会刷新的数字（利用率、显存、时长、计数）都必须等宽对齐，不能在刷新时抖动。", "section": "typography" },
+      { "name": "The System Stack Rule", "body": "只用 `--font-sans` 和 `--font-mono` 两个系统栈。不引入网络字体，不打包字体文件。", "section": "typography" },
+      { "name": "The Narrow Ramp Rule", "body": "字号不超过 20px。需要强调时先用字重和文字灰，而不是加大字号。", "section": "typography" },
+      { "name": "The Density Floor Rule", "body": "信息密度只能升不能降。这是用户明确的回归判据：任何改版如果让一屏可读的任务、GPU 或字段变少，就是退步。", "section": "layout" },
+      { "name": "The Flat-At-Rest Rule", "body": "面板、卡片、列表静止时只有边线没有阴影。只有覆盖在其他内容之上的浮层才允许投影。", "section": "elevation" },
+      { "name": "The Two Radii Rule", "body": "控件 6px、面板 8px，不出现更大的圆角。", "section": "shapes" }
+    ],
+    "dos": [
+      "**Do** 只通过语义变量取色（`bg`、`surface`、`line`、`fg-2`、`run`…），新颜色同时定义深浅两套值。",
+      "**Do** 用反色墨 (`inv` / `inv-fg`) 做页面上唯一的主按钮。",
+      "**Do** 让每个任务状态同时有形状和颜色：虚线圈、旋转弧、对勾圈、叉圈、斜杠圈。",
+      "**Do** 所有数字等宽；会刷新的数值给固定列宽右对齐。",
+      "**Do** 状态变化时让该行按新状态的颜色闪一次（1.2s）；运行图标匀速 1.6s 一圈；其他交互只有 150ms 的颜色过渡。尊重 `prefers-reduced-motion`。",
+      "**Do** 日志、代码、命令、路径、commit 用系统等宽栈；日志和代码放进深色终端面板，两种主题都一样。",
+      "**Do** 在手机上保留同样多的信息：改排版、改短格式，不删字段。",
+      "**Do** 主题默认跟随系统，允许用 `<html data-theme>` 手动覆盖，并在首屏前由内联脚本提前应用以免闪烁。"
+    ],
+    "donts": [
+      "**Don't** 让信息密度比现在低：不加大行高、不把列表换成大卡片、不把字段藏进展开层。",
+      "**Don't** 用朱砂色或任何橙色做按钮、链接、强调或背景；朱砂只属于火焰标志。",
+      "**Don't** 用没有状态含义的颜色装饰分区、图标或标题。",
+      "**Don't** 引入网络字体、打包字体或任何外部 CDN 资源。",
+      "**Don't** 使用大于 8px 的圆角或粗圆角大卡片加橙色按钮的模板面板样式。",
+      "**Don't** 给静止的面板加阴影；阴影只属于浮层。",
+      "**Don't** 让日志或代码面板跟随浅色主题变白。"
+    ]
+  }
+}
