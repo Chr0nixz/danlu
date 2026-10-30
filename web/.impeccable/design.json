@@ -40,7 +40,7 @@
     },
     "shadows": [
       { "name": "segmented-thumb", "value": "0 1px 2px rgb(0 0 0 / 0.08)", "purpose": "分段控件选中格。" },
-      { "name": "popover", "value": "0 8px 24px rgb(0 0 0 / 0.12)", "purpose": "自动补全等浮层菜单。" },
+      { "name": "popover", "value": "0 8px 24px rgb(0 0 0 / 0.12)", "purpose": "自动补全等浮层菜单、确认框（另加 40% 黑色遮罩）。" },
       { "name": "terminal-float", "value": "0 4px 12px rgb(0 0 0 / 0.4)", "purpose": "终端里的回到底部浮钮。" },
       { "name": "tab-rail", "value": "inset 0 -1px 0 var(--line)", "purpose": "下划线标签页的轨道线。" }
     ],
@@ -53,7 +53,7 @@
       { "name": "color-transition", "value": "150ms (Tailwind 默认 cubic-bezier(0.4, 0, 0.2, 1))", "purpose": "背景、边线、文字、透明度的状态过渡；除下面两项外唯一的动效。" },
       { "name": "row-flash", "value": "flash 1.2s ease-out; 0–15% 为 color-mix(in oklab, var(--flash) 14%, transparent)，然后淡出", "purpose": "任务状态变化时整行闪一次，--flash 取新状态色：成功 ok、失败 fail、取消 fg-3、其余 run。" },
       { "name": "running-spin", "value": "spin 1.6s linear infinite", "purpose": "运行中状态图标匀速旋转。" },
-      { "name": "meter-width", "value": "width 500ms ease-out", "purpose": "利用率和进度细条的宽度变化。" },
+      { "name": "meter-scale", "value": "transform: scaleX() 500ms ease-out", "purpose": "利用率和进度细条的数值变化；用 transform 不用 width，避免每次轮询触发重新布局。" },
       { "name": "reduced-motion", "value": "animation/transition-duration: 0.01ms", "purpose": "prefers-reduced-motion 下关闭所有动效。" }
     ],
     "breakpoints": [

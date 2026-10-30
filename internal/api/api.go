@@ -325,8 +325,9 @@ func (s *Server) recentWorkdirs(w http.ResponseWriter, r *http.Request) {
 
 type jobView struct {
 	*store.Job
-	LastLine string `json:"last_line,omitempty"`
-	QueuePos int    `json:"queue_pos,omitempty"`
+	LastLine  string `json:"last_line,omitempty"`
+	ErrorLine string `json:"error_line,omitempty"`
+	QueuePos  int    `json:"queue_pos,omitempty"`
 }
 
 func (s *Server) views(jobs []*store.Job) []jobView {
@@ -344,6 +345,10 @@ func (s *Server) views(jobs []*store.Job) []jobView {
 		if j.StartedAt != nil {
 			v.LastLine = logs.LastLine(s.Runner.LogPath(j.ID))
 		}
+		// 失败的任务再找一条报错行：最后一行常常是 torchrun 的汇总或空白分隔线，不是原因
+		if j.Status == store.StatusFailed && j.StartedAt != nil {
+			v.ErrorLine = logs.ErrorLine(s.Runner.LogPath(j.ID))
+		}
 		out[i] = v
 	}
 	return out
@@ -355,6 +360,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	if st := q.Get("status"); st != "" {
 		f.Statuses = strings.Split(st, ",")
 	}
+	f.EndedAfter, _ = strconv.ParseInt(q.Get("ended_after"), 10, 64)
 	size, _ := strconv.Atoi(q.Get("size"))
 	if size <= 0 || size > 200 {
 		size = 20

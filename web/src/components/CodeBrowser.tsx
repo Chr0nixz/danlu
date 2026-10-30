@@ -88,6 +88,7 @@ export function CodeBrowser({ jobId }: { jobId: number }) {
       {note && <div className="text-xs text-warn">{note}</div>}
 
       <Segmented
+        label="快照内容"
         value={tab}
         onChange={setTab}
         options={[
@@ -196,6 +197,12 @@ function FileView({ jobId, path }: { jobId: number; path: string }) {
     if (!q.data || q.data.binary) return ''
     return highlight(q.data.content, langByExt[path.split('.').pop()?.toLowerCase() ?? ''])
   }, [q.data, path])
+  // 行号：traceback 里引用的就是行号
+  const lines = useMemo(() => {
+    const c = q.data && !q.data.binary ? q.data.content : ''
+    const n = c ? c.split('\n').length - (c.endsWith('\n') ? 1 : 0) : 0
+    return Array.from({ length: n }, (_, i) => i + 1).join('\n')
+  }, [q.data])
   return (
     <div className="term min-w-0">
       <div className="sticky top-0 border-b border-white/10 px-3 py-2 font-mono text-xs text-[#8f8f8f]">{path || '选择一个文件'}</div>
@@ -207,8 +214,11 @@ function FileView({ jobId, path }: { jobId: number; path: string }) {
         ) : q.data?.binary ? (
           <span className="text-[#8f8f8f]">二进制文件，不显示内容（{bytes(q.data.size)}）</span>
         ) : (
-          <pre>
-            <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+          <pre className="flex">
+            <span className="shrink-0 select-none pr-4 text-right text-[#5a5a5a]" aria-hidden>
+              {lines}
+            </span>
+            <code className="hljs min-w-0 flex-1" dangerouslySetInnerHTML={{ __html: html }} />
           </pre>
         )}
       </div>

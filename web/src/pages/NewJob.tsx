@@ -1,9 +1,10 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Check, FolderOpen, History, Minus, Plus } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import { gpuBusy, useGpus } from '../components/GpuGrid'
-import { Alert, Button, Card, cx, ErrorBox, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
+import { failText } from '../components/JobRow'
+import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
 import { api, type GPU, type Job } from '../lib/api'
 
 function rerunName(name: string) {
@@ -17,9 +18,9 @@ function parseEnv(text: string): Record<string, string> {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
     const i = line.indexOf('=')
-    if (i <= 0) throw new Error(`环境变量格式应为 KEY=VALUE：${line}`)
+    if (i <= 0) throw new Error(`格式应为 KEY=VALUE：${line}`)
     const k = line.slice(0, i).trim()
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`环境变量名不合法：${k}`)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`变量名只能用字母、数字和下划线，且不能以数字开头：${k}`)
     env[k] = line.slice(i + 1)
   }
   return env
@@ -41,12 +42,16 @@ export function NewJob() {
   return <JobForm key={fromId ?? 'new'} source={source.data ?? null} />
 }
 
+type Field = 'workdir' | 'cmd' | 'gpu' | 'env'
+
 function JobForm({ source }: { source: Job | null }) {
   const nav = useNavigate()
   const gpus = useGpus()
   const conda = useQuery({ queryKey: ['conda'], queryFn: api.condaEnvs, staleTime: 60_000 })
   const recent = useQuery({ queryKey: ['recentWorkdirs'], queryFn: api.recentWorkdirs })
   const formRef = useRef<HTMLFormElement>(null)
+  const uid = useId()
+  const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, env: `${uid}-env` }
 
   const [name, setName] = useState(source ? rerunName(source.name) : '')
   const [workdir, setWorkdir] = useState(source?.workdir ?? '')
@@ -56,7 +61,15 @@ function JobForm({ source }: { source: Job | null }) {
   const [count, setCount] = useState(source?.gpus_req ?? 1)
   const [pinned, setPinned] = useState<number[]>(source?.gpus_pinned ?? [])
   const [envText, setEnvText] = useState(source ? Object.entries(source.env).map(([k, v]) => `${k}=${v}`).join('\n') : '')
-  const [formError, setFormError] = useState<unknown>(null)
+  const [errors, setErrors] = useState<Partial<Record<Field, string>>>({})
+
+  // 改了哪个字段就清掉哪个字段的错误
+  const edit =
+    <T,>(field: Field, set: (v: T) => void) =>
+    (v: T) => {
+      set(v)
+      if (errors[field]) setErrors((e) => ({ ...e, [field]: undefined }))
+    }
 
   // 没选过 conda 环境时，默认选第一个非 base 的环境
   useEffect(() => {
@@ -76,16 +89,21 @@ function JobForm({ source }: { source: Job | null }) {
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
-    setFormError(null)
-    let env: Record<string, string>
+    const errs: Partial<Record<Field, string>> = {}
+    if (!workdir.trim()) errs.workdir = '请填写工作目录'
+    if (!cmd.trim()) errs.cmd = '请填写要运行的命令'
+    if (mode === 'pinned' && !pinned.length) errs.gpu = '请至少选择一张卡'
+    let env: Record<string, string> = {}
     try {
       env = parseEnv(envText)
     } catch (err) {
-      setFormError(err)
-      return
+      errs.env = (err as Error).message
     }
-    if (mode === 'pinned' && !pinned.length) {
-      setFormError(new Error('请至少选择一张卡'))
+    setErrors(errs)
+    // 焦点移到第一个出错的字段，读屏会读出它的错误说明
+    const first = (['workdir', 'cmd', 'gpu', 'env'] as Field[]).find((f) => errs[f])
+    if (first) {
+      document.getElementById(ids[first])?.focus()
       return
     }
     submit.mutate({
@@ -101,16 +119,21 @@ function JobForm({ source }: { source: Job | null }) {
   }
 
   const need = mode === 'count' ? count : pinned.length
+  const pick = (i: number) => gpuList.find((g) => g.index === i)
+  // 指定了被外部进程占着的卡：丹炉永远不会分配它，严格先来先跑下这个任务会一直堵在队首
+  const pinnedExternal = mode === 'pinned' ? pinned.filter((i) => pick(i)?.external.length) : []
   const pinnedBusy = mode === 'pinned' && pinned.some((i) => {
-    const g = gpuList.find((x) => x.index === i)
+    const g = pick(i)
     return g && gpuBusy(g)
   })
   const willQueue = need > 0 && (mode === 'count' ? need > freeCount : pinnedBusy)
   const condaHint = conda.data && !conda.data.available ? conda.data.error : conda.data?.error || '任务启动前自动激活。'
+  const describe = (f: Field, hint = true) => cx(hint && `${ids[f]}-hint`, errors[f] && `${ids[f]}-err`) || undefined
 
   return (
     <form
       ref={formRef}
+      noValidate
       onSubmit={onSubmit}
       onKeyDown={(e) => {
         // Ctrl/⌘ + Enter 提交
@@ -123,30 +146,46 @@ function JobForm({ source }: { source: Job | null }) {
         <p className="mt-0.5 text-ui text-fg-3">
           {source ? `设置已从「${source.name}」复制过来，可以先改参数再提交。` : '提交后按顺序排队，有足够的空卡就自动开始。'}
         </p>
+        {source?.status === 'failed' && (
+          <p className="mt-1 text-ui text-fail [overflow-wrap:anywhere]">
+            原任务失败：<span className="font-mono text-[12.5px]">{failText(source)}</span>
+          </p>
+        )}
       </div>
       {source && <CodeChangeNotice source={source} workdir={workdir} />}
 
       <Card className="divide-y divide-line">
-        <FormRow label="工作目录" hint="服务器上的绝对路径。启动时会自动保存一份代码快照。">
-          <WorkdirInput value={workdir} onChange={setWorkdir} recent={recent.data?.dirs ?? []} />
+        <FormRow label="工作目录" hint="服务器上的绝对路径。启动时会自动保存一份代码快照。" htmlFor={ids.workdir}>
+          <WorkdirInput
+            id={ids.workdir}
+            describedBy={describe('workdir')}
+            invalid={!!errors.workdir}
+            value={workdir}
+            onChange={edit('workdir', setWorkdir)}
+            recent={recent.data?.dirs ?? []}
+          />
+          <FieldError id={`${ids.workdir}-err`}>{errors.workdir}</FieldError>
         </FormRow>
 
-        <FormRow label="命令" hint="在工作目录下用 bash 执行，可以写多行。torchrun 不用写 --master_port，会自动分配。">
+        <FormRow label="命令" hint="在工作目录下用 bash 执行，可以写多行。torchrun 不用写 --master_port，会自动分配。" htmlFor={ids.cmd}>
           <Textarea
+            id={ids.cmd}
+            aria-describedby={describe('cmd')}
+            aria-invalid={!!errors.cmd || undefined}
             value={cmd}
-            onChange={(e) => setCmd(e.target.value)}
+            onChange={(e) => edit('cmd', setCmd)(e.target.value)}
             rows={4}
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            required
-            placeholder="torchrun --nproc_per_node 2 train.py --lr 3e-4"
+            placeholder="例如 torchrun --nproc_per_node 2 train.py --lr 3e-4"
             className="font-mono text-[12.5px]"
           />
+          <FieldError id={`${ids.cmd}-err`}>{errors.cmd}</FieldError>
         </FormRow>
 
-        <FormRow label="conda 环境" hint={condaHint}>
-          <Select value={condaEnv} onChange={(e) => setCondaEnv(e.target.value)} disabled={conda.isLoading}>
+        <FormRow label="conda 环境" hint={condaHint} htmlFor={ids.conda}>
+          <Select id={ids.conda} aria-describedby={`${ids.conda}-hint`} value={condaEnv} onChange={(e) => setCondaEnv(e.target.value)} disabled={conda.isLoading}>
             <option value="">不使用 conda</option>
             {conda.data?.envs.map((e) => (
               <option key={e.path} value={e.name}>
@@ -160,8 +199,9 @@ function JobForm({ source }: { source: Job | null }) {
         <FormRow label="GPU" hint={`共 ${total} 张，现在空闲 ${freeCount} 张。整卡独占。`}>
           <div className="space-y-3">
             <Segmented
+              label="GPU 分配方式"
               value={mode}
-              onChange={setMode}
+              onChange={edit('gpu', setMode)}
               options={[
                 { value: 'count', label: '按张数' },
                 { value: 'pinned', label: '指定卡号' },
@@ -169,43 +209,57 @@ function JobForm({ source }: { source: Job | null }) {
             />
             {mode === 'count' ? (
               <div className="flex items-center gap-3">
-                <div className="inline-flex h-9 items-stretch overflow-hidden rounded-md border border-line-strong">
-                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40" onClick={() => setCount((c) => Math.max(0, c - 1))} disabled={count <= 0} aria-label="减少">
-                    <Minus className="size-4" />
+                <div role="group" aria-label="GPU 张数" className="inline-flex h-9 items-stretch overflow-hidden rounded-md border border-line-strong">
+                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40" onClick={() => setCount((c) => Math.max(0, c - 1))} disabled={count <= 0} aria-label="少一张">
+                    <Minus className="size-4" aria-hidden />
                   </button>
-                  <span className="grid w-10 place-items-center border-x border-line-strong text-sm font-semibold">{count}</span>
-                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40" onClick={() => setCount((c) => Math.min(total || 64, c + 1))} disabled={total > 0 && count >= total} aria-label="增加">
-                    <Plus className="size-4" />
+                  <output aria-live="polite" className="grid w-10 place-items-center border-x border-line-strong text-sm font-semibold">
+                    {count}
+                  </output>
+                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40" onClick={() => setCount((c) => Math.min(total || 64, c + 1))} disabled={total > 0 && count >= total} aria-label="多一张">
+                    <Plus className="size-4" aria-hidden />
                   </button>
                 </div>
                 <span className="text-ui text-fg-2">{count === 0 ? '不使用 GPU' : '张卡，自动挑空闲的'}</span>
               </div>
             ) : (
-              <GpuPicker gpus={gpuList} value={pinned} onChange={setPinned} />
+              <GpuPicker id={ids.gpu} gpus={gpuList} value={pinned} onChange={edit('gpu', setPinned)} />
             )}
-            {willQueue && <p className="text-xs text-warn">现在空闲的卡不够，提交后会排队，等卡空出来自动开始。</p>}
+            <FieldError id={`${ids.gpu}-err`}>{errors.gpu}</FieldError>
+            {pinnedExternal.length > 0 ? (
+              <p className="text-xs leading-relaxed text-warn">
+                GPU {pinnedExternal.join(', ')} 被外部进程占用，丹炉不会分配它。任务会一直排在队首、挡住后面所有任务，直到那个进程退出。
+              </p>
+            ) : (
+              willQueue && <p className="text-xs leading-relaxed text-warn">现在空闲的卡不够，提交后会排队，等卡空出来自动开始。</p>
+            )}
           </div>
         </FormRow>
 
-        <FormRow label="任务名" hint="留空则用目录名加时间。">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 vit-lr3e-4" maxLength={100} />
+        <FormRow label="任务名" hint="留空则用目录名加时间。" htmlFor={ids.name}>
+          <Input id={ids.name} aria-describedby={`${ids.name}-hint`} value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 vit-lr3e-4" maxLength={100} />
         </FormRow>
 
-        <FormRow label="环境变量" hint="可选，每行一个 KEY=VALUE。">
+        <FormRow label="环境变量" hint="可选，每行一个 KEY=VALUE。" htmlFor={ids.env}>
           <Textarea
+            id={ids.env}
+            aria-describedby={describe('env')}
+            aria-invalid={!!errors.env || undefined}
             className="font-mono text-[12.5px]"
             rows={2}
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
             value={envText}
-            onChange={(e) => setEnvText(e.target.value)}
-            placeholder={'WANDB_PROJECT=vit\nOMP_NUM_THREADS=8'}
+            onChange={(e) => edit('env', setEnvText)(e.target.value)}
+            placeholder={'例如 WANDB_PROJECT=vit\nOMP_NUM_THREADS=8'}
           />
+          <FieldError id={`${ids.env}-err`}>{errors.env}</FieldError>
         </FormRow>
 
-        <div className="flex flex-col-reverse gap-3 rounded-b-lg bg-subtle px-4 py-3 sm:flex-row sm:items-center sm:px-5">
-          <ErrorBox error={formError ?? submit.error} className="sm:mr-auto" />
+        {/* 手机上提交栏吸在底部导航上方，长表单不用滚到底才能提交 */}
+        <div className="flex flex-col-reverse gap-3 rounded-b-lg bg-subtle px-4 py-3 max-sm:sticky max-sm:bottom-[calc(3.5rem+env(safe-area-inset-bottom))] max-sm:z-10 sm:flex-row sm:items-center sm:px-5">
+          <ErrorBox error={submit.error} className="sm:mr-auto" />
           <div className="flex gap-2 sm:ml-auto">
             <Button onClick={() => nav(-1)}>返回</Button>
             <Button type="submit" variant="primary" loading={submit.isPending} className="flex-1 sm:flex-none">
@@ -219,10 +273,10 @@ function JobForm({ source }: { source: Job | null }) {
   )
 }
 
-function GpuPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[]; onChange: (v: number[]) => void }) {
+function GpuPicker({ id, gpus, value, onChange }: { id: string; gpus: GPU[]; value: number[]; onChange: (v: number[]) => void }) {
   return (
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-      {gpus.map((g) => {
+      {gpus.map((g, n) => {
         const on = value.includes(g.index)
         const state = g.job ? `#${g.job.id} 在用` : g.external.length ? '外部进程' : '空闲'
         const tone = g.job ? 'text-run' : g.external.length ? 'text-warn' : 'text-ok'
@@ -230,6 +284,8 @@ function GpuPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[]; on
           <button
             type="button"
             key={g.index}
+            // 第一张卡带上字段 id，校验失败时焦点落在这里
+            id={n === 0 ? id : undefined}
             aria-pressed={on}
             onClick={() => onChange(on ? value.filter((x) => x !== g.index) : [...value, g.index].sort((a, b) => a - b))}
             className={cx(
@@ -239,7 +295,7 @@ function GpuPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[]; on
           >
             <div className="flex items-center justify-between">
               <span className="text-ui font-semibold">GPU {g.index}</span>
-              {on && <Check className="size-3.5" strokeWidth={3} />}
+              {on && <Check className="size-3.5" strokeWidth={3} aria-hidden />}
             </div>
             <div className={cx('mt-0.5 truncate text-xs', tone)}>
               {state}
@@ -252,33 +308,66 @@ function GpuPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[]; on
   )
 }
 
-/** 重跑时比较工作目录当前代码和原任务的快照，有变化就提醒 */
+/** 重跑时比较工作目录当前代码和原任务的快照，说清楚会用哪份代码 */
 function CodeChangeNotice({ source, workdir }: { source: Job; workdir: string }) {
   const head = useQuery({ queryKey: ['githead', workdir], queryFn: () => api.gitHead(workdir), enabled: !!workdir })
   if (!head.data) return null
-  const msgs: string[] = []
-  if (head.data.is_git && source.git_commit) {
-    if (head.data.commit !== source.git_commit) msgs.push(`当前 commit 是 ${head.data.commit?.slice(0, 8)}，原任务是 ${source.git_commit.slice(0, 8)}`)
-    if (head.data.dirty) msgs.push('工作目录有未提交的改动')
-    else if (source.git_dirty) msgs.push('原任务运行时有未提交的改动')
+  const code = (
+    <Link to={`/jobs/${source.id}?tab=code`} className="font-medium underline decoration-current/40 underline-offset-2 hover:decoration-current">
+      原任务的代码快照
+    </Link>
+  )
+  if (!head.data.is_git || !source.git_commit) {
+    return (
+      <Alert>
+        工作目录不是 git 仓库，没法比较代码。重跑会使用目录里现在的文件；{code}可以查看和下载。
+      </Alert>
+    )
   }
-  if (!msgs.length) return null
+  const msgs: string[] = []
+  if (head.data.commit !== source.git_commit) msgs.push(`当前 commit 是 ${head.data.commit?.slice(0, 8)}，原任务是 ${source.git_commit.slice(0, 8)}`)
+  if (head.data.dirty) msgs.push('工作目录有未提交的改动，看不出和原任务运行时是否一样')
+  else if (source.git_dirty) msgs.push('原任务运行时有未提交的改动，现在工作目录是干净的')
+  if (!msgs.length) {
+    return (
+      <Alert>
+        工作目录现在的代码和原任务相同：commit {source.git_commit.slice(0, 8)}，都没有未提交的改动。
+      </Alert>
+    )
+  }
   return (
     <Alert tone="warn">
-      重跑会使用工作目录<b>现在</b>的代码，可能和原任务不同：
+      重跑会使用工作目录<b>现在</b>的代码，不是原任务快照里的那份：
       <ul className="mt-1 list-disc pl-4">
         {msgs.map((m) => (
           <li key={m}>{m}</li>
         ))}
       </ul>
-      原任务的代码可以在它的「代码」标签页里查看和下载。
+      {code}可以查看和下载。
     </Alert>
   )
 }
 
-function WorkdirInput({ value, onChange, recent }: { value: string; onChange: (v: string) => void; recent: string[] }) {
+function WorkdirInput({
+  id,
+  describedBy,
+  invalid,
+  value,
+  onChange,
+  recent,
+}: {
+  id: string
+  describedBy?: string
+  invalid: boolean
+  value: string
+  onChange: (v: string) => void
+  recent: string[]
+}) {
   const [focus, setFocus] = useState(false)
+  const [closed, setClosed] = useState(false) // 按 Esc 收起，继续输入时再展开
+  const [active, setActive] = useState(-1)
   const [query, setQuery] = useState(value)
+  const listId = useId()
   const timer = useRef<number>(undefined)
   useEffect(() => {
     window.clearTimeout(timer.current)
@@ -286,35 +375,80 @@ function WorkdirInput({ value, onChange, recent }: { value: string; onChange: (v
   }, [value])
   const dirs = useQuery({ queryKey: ['dirs', query], queryFn: () => api.dirs(query), enabled: focus })
   const options = useMemo(() => (dirs.data?.dirs ?? []).filter((d) => d !== value), [dirs.data, value])
+  const open = focus && !closed && options.length > 0
+  useEffect(() => setActive(-1), [options])
+  useEffect(() => {
+    if (active >= 0) document.getElementById(`${listId}-${active}`)?.scrollIntoView({ block: 'nearest' })
+  }, [active, listId])
+
+  const choose = (d: string) => {
+    onChange(d + '/')
+    setActive(-1)
+  }
 
   return (
     <div className="space-y-2">
       <div className="relative">
-        <FolderOpen className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-3" />
+        <FolderOpen className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-3" aria-hidden />
         <Input
+          id={id}
+          role="combobox"
+          aria-expanded={open}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={open && active >= 0 ? `${listId}-${active}` : undefined}
+          aria-describedby={describedBy}
+          aria-invalid={invalid || undefined}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            onChange(e.target.value)
+            setClosed(false)
+          }}
           onFocus={() => setFocus(true)}
           onBlur={() => setTimeout(() => setFocus(false), 150)}
-          placeholder="/home/you/projects/vit"
+          onKeyDown={(e) => {
+            if (!open) return
+            const n = options.length
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault()
+              setActive((a) => (e.key === 'ArrowDown' ? (a + 1) % n : (a - 1 + n) % n))
+            } else if (e.key === 'Enter' && active >= 0 && !e.ctrlKey && !e.metaKey) {
+              e.preventDefault()
+              choose(options[active])
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              setClosed(true)
+            }
+          }}
+          placeholder="例如 /home/you/projects/vit"
           className="pl-8 font-mono text-[12.5px]"
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          required
+          autoComplete="off"
         />
-        {focus && options.length > 0 && (
-          <div className="absolute inset-x-0 top-full z-20 mt-1 max-h-64 overflow-auto rounded-md border border-line bg-surface py-1 shadow-[0_8px_24px_rgb(0_0_0/0.12)]">
-            {options.map((d) => (
-              <button
-                type="button"
+        {open && (
+          <div
+            id={listId}
+            role="listbox"
+            aria-label="子目录"
+            className="absolute inset-x-0 top-full z-20 mt-1 max-h-64 overflow-auto rounded-md border border-line bg-surface py-1 shadow-[0_8px_24px_rgb(0_0_0/0.12)]"
+          >
+            {options.map((d, i) => (
+              <div
                 key={d}
+                id={`${listId}-${i}`}
+                role="option"
+                aria-selected={i === active}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => onChange(d + '/')}
-                className="block w-full truncate px-3 py-1.5 text-left font-mono text-[12.5px] text-fg-2 hover:bg-hover hover:text-fg"
+                onClick={() => choose(d)}
+                className={cx(
+                  'block w-full cursor-default truncate px-3 py-1.5 text-left font-mono text-[12.5px]',
+                  i === active ? 'bg-hover text-fg' : 'text-fg-2 hover:bg-hover hover:text-fg',
+                )}
               >
                 {d}/
-              </button>
+              </div>
             ))}
           </div>
         )}

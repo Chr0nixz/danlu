@@ -10,7 +10,7 @@
 - 公网访问：随机端口 + 安全入口 + 密码 + HTTPS（本地 CA，不需要域名）
 - 界面电脑和手机都能用：首页一屏看清在跑什么、有没有失败、哪张卡空着；跟随系统深浅色；快捷键 `N` 新建任务、`/` 搜索、`Ctrl+Enter` 提交
 
-设计文档：[docs/DEMO.md](docs/DEMO.md)（当前 demo）、[docs/DESIGN.md](docs/DESIGN.md)（长期规划）、[PRODUCT.md](PRODUCT.md)（产品定位）、[DESIGN.md](DESIGN.md)（界面视觉规范）。
+设计文档：[docs/DEMO.md](docs/DEMO.md)（当前 demo）、[docs/DESIGN.md](docs/DESIGN.md)（长期规划）、[PRODUCT.md](PRODUCT.md)（产品定位）、[web/DESIGN.md](web/DESIGN.md)（面板视觉规范）、[docs/CLIENT.md](docs/CLIENT.md)（桌面客户端方案）。
 
 ## 部署
 
@@ -123,7 +123,8 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 ## 本地开发
 
 ```bash
-cd web && pnpm install && pnpm build     # 前端构建到 internal/webui/dist，嵌入二进制
+pnpm install                              # 在仓库根目录安装前端依赖（pnpm workspace）
+cd web && pnpm build                      # 前端构建到 internal/webui/dist，嵌入二进制
 go test ./cmd/... ./internal/...          # 单元测试（Windows 上也能跑）
 ```
 

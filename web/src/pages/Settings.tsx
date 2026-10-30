@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Download, LogOut, Monitor, Moon, ShieldCheck, Sun } from 'lucide-react'
 import { useState, type FormEvent, type ReactNode } from 'react'
+import { Link } from 'react-router'
 import { Button, buttonClass, Card, ErrorBox, Field, Input, Segmented, Skeleton } from '../components/ui'
 import { api } from '../lib/api'
 import { fmtTime } from '../lib/format'
@@ -72,6 +73,7 @@ export function Settings() {
 
       <Section title="外观" desc="只保存在当前浏览器。">
         <Segmented
+          label="主题"
           value={theme}
           onChange={(t) => {
             setTheme(t)
@@ -123,7 +125,9 @@ export function Settings() {
                 <span className={e.action === 'login_fail' || e.action === 'login_locked' ? 'font-medium text-fail' : 'font-medium'}>
                   {actionLabel[e.action] ?? e.action}
                 </span>
-                <span className="col-span-2 min-w-0 truncate text-fg-3 sm:col-span-1">{e.detail}</span>
+                <span className="col-span-2 min-w-0 truncate text-fg-3 sm:col-span-1">
+                  <AuditDetail text={e.detail} />
+                </span>
               </div>
             ))}
           </div>
@@ -135,6 +139,20 @@ export function Settings() {
         退出登录
       </Button>
     </div>
+  )
+}
+
+/** 操作记录的说明里，开头的"#7"链接到那个任务 */
+function AuditDetail({ text }: { text: string }) {
+  const m = text.match(/^#(\d+)(.*)$/)
+  if (!m) return <>{text}</>
+  return (
+    <>
+      <Link to={`/jobs/${m[1]}`} className="text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg">
+        #{m[1]}
+      </Link>
+      {m[2]}
+    </>
   )
 }
 

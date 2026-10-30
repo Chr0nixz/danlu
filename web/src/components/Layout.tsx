@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Flame, LayoutDashboard, ListChecks, Plus, Settings } from 'lucide-react'
 import { useEffect } from 'react'
-import { Link, NavLink, Outlet, useNavigate } from 'react-router'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api } from '../lib/api'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
 import { buttonClass, cx, Kbd } from './ui'
@@ -25,20 +25,24 @@ const isTyping = (t: EventTarget | null) =>
 
 export function Layout() {
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
 
-  // 快捷键：N 新建任务
+  // 快捷键：N 新建任务；/ 搜索任务（任务页自己处理，其他页面先跳过去）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target)) return
       if (e.key === 'n' || e.key === 'N') {
         e.preventDefault()
         navigate('/new')
+      } else if (e.key === '/' && pathname !== '/jobs') {
+        e.preventDefault()
+        navigate('/jobs', { state: { focusSearch: true } })
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navigate])
+  }, [navigate, pathname])
 
   // 标签页标题带上运行和失败数，和 IDE 并排开着时不用切过来也能看到
   const active = useActiveJobs()
@@ -52,6 +56,12 @@ export function Layout() {
 
   return (
     <div className="min-h-dvh pb-[calc(3.5rem+env(safe-area-inset-bottom))] sm:pb-0">
+      <a
+        href="#main"
+        className="sr-only z-40 rounded-md bg-inv px-3 py-2 text-ui font-medium text-inv-fg focus:not-sr-only focus:fixed focus:top-2 focus:left-2"
+      >
+        跳到主要内容
+      </a>
       <header className="sticky top-0 z-30 border-b border-line bg-surface">
         <div className="mx-auto flex h-12 max-w-[1200px] items-center gap-3 px-4 sm:px-6">
           <Link to="/" className="flex min-w-0 items-center gap-2">
@@ -100,7 +110,7 @@ export function Layout() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1200px] px-4 py-4 sm:px-6 sm:py-6">
+      <main id="main" tabIndex={-1} className="mx-auto max-w-[1200px] px-4 py-4 outline-none sm:px-6 sm:py-6">
         <Outlet />
       </main>
 

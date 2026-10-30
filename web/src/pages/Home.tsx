@@ -39,18 +39,19 @@ function Summary({ running, queued }: { running: number; queued: number }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-ui sm:gap-x-5">
       <span className="inline-flex items-center gap-1.5">
-        <StatusIcon status="running" />
+        <StatusIcon status="running" decorative />
         <b className="font-semibold">{running}</b>
         <span className="text-fg-2">运行中</span>
       </span>
       <span className="inline-flex items-center gap-1.5">
-        <StatusIcon status="queued" />
+        <StatusIcon status="queued" decorative />
         <b className="font-semibold">{queued}</b>
         <span className="text-fg-2">排队</span>
       </span>
       {failed > 0 && (
-        <Link to="/jobs?status=failed" className="inline-flex items-center gap-1.5 hover:underline" title="最近 24 小时内失败的任务">
-          <StatusIcon status="failed" />
+        // 手机上把点击区撑到 40px 高，不改变排版
+        <Link to="/jobs?status=failed&recent=24h" className="inline-flex items-center gap-1.5 hover:underline max-sm:-my-2.5 max-sm:py-2.5" title="最近 24 小时内失败的任务">
+          <StatusIcon status="failed" decorative />
           <b className="font-semibold text-fail">{failed}</b>
           <span className="text-fail">失败</span>
           <span className="text-xs text-fg-3 max-sm:hidden">24 小时内</span>
@@ -99,21 +100,21 @@ export function Home() {
           <SkeletonRows rows={3} />
         ) : (
           <>
-            <Group icon={<StatusIcon status="running" />} title="运行中" count={running.length}>
+            <Group icon={<StatusIcon status="running" decorative />} title="运行中" count={running.length}>
               <JobList jobs={running} empty={<GroupEmpty>炉子空着，没有正在运行的任务</GroupEmpty>} />
             </Group>
-            <Group icon={<StatusIcon status="queued" />} title="排队" count={queued.length}>
+            <Group icon={<StatusIcon status="queued" decorative />} title="排队" count={queued.length}>
               <JobList jobs={queued} empty={<GroupEmpty>队列是空的</GroupEmpty>} />
             </Group>
           </>
         )}
         <Group
-          icon={<StatusIcon status="succeeded" className="text-fg-3" />}
+          icon={<StatusIcon status="succeeded" className="text-fg-3" decorative />}
           title="最近完成"
           extra={
-            <Link to="/jobs" className="inline-flex items-center gap-1 text-xs text-fg-3 hover:text-fg">
+            <Link to="/jobs" className="-mr-2 inline-flex h-9 items-center gap-1 px-2 text-xs text-fg-3 hover:text-fg">
               全部任务
-              <ArrowRight className="size-3.5" />
+              <ArrowRight className="size-3.5" aria-hidden />
             </Link>
           }
         >

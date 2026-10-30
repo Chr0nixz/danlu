@@ -210,7 +210,7 @@ finish $?
 GPU 卡片显示的内容：卡号、型号、利用率条、显存（已用/总量）、温度、功耗，以及当前占用者（"任务名"链接 / "外部进程 pid" / "空闲"）。
 数据刷新：GPU 状态和任务列表每 3 秒轮询一次（TanStack Query）；日志通过 SSE 实时推送。
 
-视觉规范见 [../DESIGN.md](../DESIGN.md)：中性灰阶，颜色只用来表示状态（排队灰色虚线圈、运行蓝色转圈、成功绿色对勾、失败红色叉、取消灰色斜杠、外部占卡琥珀色），系统字体，支持深色模式。快捷键：N 新建任务，/ 搜索任务。
+视觉规范见 [../web/DESIGN.md](../web/DESIGN.md)：中性灰阶，颜色只用来表示状态（排队灰色虚线圈、运行蓝色转圈、成功绿色对勾、失败红色叉、取消灰色斜杠、外部占卡琥珀色），系统字体，支持深色模式。快捷键：N 新建任务，/ 搜索任务。
 
 ## 6. API
 
@@ -223,7 +223,7 @@ GET  /api/conda-envs                   conda 环境列表
 GET  /api/fs/dirs?path=                目录自动补全
 GET  /api/workdirs/recent              最近用过的工作目录
 
-GET  /api/jobs?status=&q=&page=        任务列表
+GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 error_line 报错行）
 POST /api/jobs                         提交任务
 GET  /api/jobs/{id}                    任务详情
 POST /api/jobs/{id}/cancel             取消任务

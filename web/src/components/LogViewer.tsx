@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Download, WrapText } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { api } from '../lib/api'
 import { logToHtml } from '../lib/terminal'
 import { cx, ErrorBox, Spinner } from './ui'
@@ -93,6 +93,22 @@ export function LogViewer({ jobId }: { jobId: number }) {
     if (el && follow) el.scrollTop = el.scrollHeight
   }, [html, follow])
 
+  // 日志框从自己的位置铺到视口底部（见 index.css 的 .log-fit），上面的内容变高变矮时重新量
+  const [top, setTop] = useState(0)
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const measure = () => setTop(Math.round(el.getBoundingClientRect().top + window.scrollY))
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(document.body)
+    window.addEventListener('resize', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [])
+
   const onScroll = () => {
     const el = box.current
     if (!el) return
@@ -127,7 +143,7 @@ export function LogViewer({ jobId }: { jobId: number }) {
         <span className="flex items-center gap-1.5 px-1.5">
           {!ended ? (
             <>
-              <span className="size-1.5 animate-pulse rounded-full bg-[#3dd68c]" />
+              <span className="size-1.5 animate-pulse rounded-full bg-[#3dd68c]" aria-hidden />
               实时
             </>
           ) : (
@@ -155,7 +171,12 @@ export function LogViewer({ jobId }: { jobId: number }) {
         </a>
       </div>
       <div className="relative">
-        <div ref={box} onScroll={onScroll} className="term h-[60dvh] overflow-auto px-3 py-2.5 sm:h-[calc(100dvh-19.5rem)] sm:min-h-[420px]">
+        <div
+          ref={box}
+          onScroll={onScroll}
+          className="term log-fit overflow-auto px-3 py-2.5"
+          style={top ? ({ '--log-top': `${top}px` } as CSSProperties) : undefined}
+        >
           {loading ? (
             <Spinner />
           ) : error ? (
@@ -163,7 +184,7 @@ export function LogViewer({ jobId }: { jobId: number }) {
           ) : raw === '' ? (
             <span className="text-[#8f8f8f]">{ended ? '没有输出' : '等待输出…'}</span>
           ) : (
-            <pre className={wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'} dangerouslySetInnerHTML={{ __html: html }} />
+            <pre className={wrap ? 'whitespace-pre-wrap [overflow-wrap:anywhere]' : 'whitespace-pre'} dangerouslySetInnerHTML={{ __html: html }} />
           )}
         </div>
         {!follow && (

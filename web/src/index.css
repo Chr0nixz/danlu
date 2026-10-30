@@ -174,8 +174,24 @@
   background: rgb(82 168 255 / 0.35);
 }
 
+/*
+ * 日志框：从框的顶部铺到视口底部，最新几行始终在首屏里。--log-top 由 LogViewer 量出来。
+ * 手机上让出底部导航（3.5rem + 安全区）和页面下边距；电脑上只留页面下边距。
+ */
+.log-fit {
+  height: max(280px, calc(100dvh - var(--log-top, 22rem) - 3.5rem - env(safe-area-inset-bottom) - 1rem));
+}
+
+@media (min-width: 640px) {
+  .log-fit {
+    height: max(320px, calc(100dvh - var(--log-top, 20rem) - 1.5rem));
+  }
+}
+
+/* 外层终端面板已经有内边距；去掉 highlight.js 自带的，行号才能和代码对齐 */
 .hljs {
   background: transparent !important;
+  padding: 0 !important;
 }
 
 /* ANSI 颜色（ansi_up 的 class），按深色背景调亮 */

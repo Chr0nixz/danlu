@@ -4,19 +4,42 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { api, type Job } from '../lib/api'
 import { duration, fmtTime, isActive, jobDuration, now, timeAgo } from '../lib/format'
-import { Button, Commit, cx, Empty, GpuChips, Meter, StatusIcon } from './ui'
+import { Button, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
 
-export function useCancel() {
+/** 取消任务前的确认框：写清已经跑了多久、结束后不能恢复。出错时留在框里显示原因 */
+export function CancelDialog({ job: j, onClose }: { job: Job; onClose: () => void }) {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (j: Job) => api.cancel(j.id),
-    onSuccess: () => qc.invalidateQueries(),
-    onError: (e) => alert((e as Error).message),
+  const cancel = useMutation({
+    mutationFn: () => api.cancel(j.id),
+    onSuccess: () => {
+      qc.invalidateQueries()
+      onClose()
+    },
   })
-}
-
-export function confirmCancel(j: Job) {
-  return confirm(`确定取消任务 #${j.id}「${j.name}」吗？${j.status === 'running' ? '\n正在运行的进程会被结束。' : ''}`)
+  const running = j.status === 'running'
+  const d = jobDuration(j)
+  return (
+    <Dialog
+      title={`取消任务 #${j.id}？`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>{running ? '继续运行' : '保留排队'}</Button>
+          <Button variant="danger" loading={cancel.isPending} onClick={() => cancel.mutate()}>
+            取消任务
+          </Button>
+        </>
+      }
+    >
+      <p className="font-medium break-all text-fg">{j.name}</p>
+      <p>
+        {running
+          ? `已经运行 ${d !== null ? duration(d) : '-'}。确定后进程会被结束，不能恢复；日志和代码快照会保留。`
+          : `${j.queue_pos ? `排在第 ${j.queue_pos} 位，` : ''}取消后从队列里移除。`}
+      </p>
+      <ErrorBox error={cancel.error} />
+    </Dialog>
+  )
 }
 
 // 记住每个任务上次显示的状态；状态变了，这一行按新状态的颜色闪一下
@@ -48,18 +71,22 @@ export function compactProgress(line: string): { text: string; short: string; pc
   return { text, short, pct: m ? Math.min(100, Number(m[1])) : null }
 }
 
+/** 失败任务的原因：退出码加报错行（找不到报错行时用最后一行输出） */
+export function failText(j: Job): string {
+  const why = j.fail_reason || (j.exit_code !== null ? `退出码 ${j.exit_code}` : '失败')
+  const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
+  return line ? `${why} · ${line}` : why
+}
+
 /** 一行任务的说明文字：运行中显示最后一行日志，排队显示位置，失败显示原因 */
-function detail(j: Job): { text: ReactNode; short?: string; mono?: boolean; tone?: string; pct?: number | null } {
+function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: string; pct?: number | null } {
   if (j.status === 'queued') {
     const pos = j.queue_pos ? `第 ${j.queue_pos} 位` : '排队中'
     const need = j.gpus_pinned.length ? `等 GPU ${j.gpus_pinned.join(',')}` : j.gpus_req ? `等 ${j.gpus_req} 张卡` : '不用 GPU'
     return { text: `${pos} · ${need}` }
   }
   if (j.status === 'running' && j.cancel_requested) return { text: '正在结束进程…', tone: 'text-warn' }
-  if (j.status === 'failed') {
-    const why = j.fail_reason || (j.exit_code !== null ? `退出码 ${j.exit_code}` : '失败')
-    return { text: j.last_line ? `${why} · ${compactProgress(j.last_line).text}` : why, tone: 'text-fail' }
-  }
+  if (j.status === 'failed') return { text: failText(j), tone: 'text-fail' }
   if (j.last_line) {
     const p = compactProgress(j.last_line)
     return { text: p.text, short: p.short, mono: true, pct: j.status === 'running' ? p.pct : null }
@@ -68,82 +95,127 @@ function detail(j: Job): { text: ReactNode; short?: string; mono?: boolean; tone
   return { text: j.status === 'running' ? '等待输出…' : '没有输出' }
 }
 
+/**
+ * 一行任务。整行可点（名字是链接，用 ::after 铺满整行），commit 和取消按钮浮在上面单独可点。
+ * 电脑上是固定列；手机上折成两行：第一行名字和时间，第二行卡号、说明文字和 commit，字段一个不少。
+ */
 export function JobRow({ job: j }: { job: Job }) {
-  const cancel = useCancel()
+  const [confirming, setConfirming] = useState(false)
   const flash = useFlash(j.id, j.status)
   const d = jobDuration(j)
   const gpus = j.gpus_assigned.length ? j.gpus_assigned : j.gpus_pinned
   const info = detail(j)
+  const ended = !isActive(j)
   const time = j.status === 'queued' ? `等 ${duration(now() - j.created_at)}` : d !== null ? duration(d) : ''
-  const active = isActive(j) && !j.cancel_requested
+  const timeLabel = j.status === 'queued' ? '已等待' : j.status === 'running' ? '已运行' : '耗时'
+  const canCancel = isActive(j) && !j.cancel_requested
+  const code = `/jobs/${j.id}?tab=code`
 
   return (
     <div
-      className={cx('group flex items-center gap-3 px-3 py-2.5 transition-colors duration-150 hover:bg-subtle sm:px-4', flash && 'animate-flash')}
+      className={cx('group relative flex items-center gap-3 px-3 py-2.5 transition-colors duration-150 hover:bg-subtle sm:px-4', flash && 'animate-flash')}
       style={flash ? ({ '--flash': `var(--${flashTone[j.status] ?? 'run'})` } as CSSProperties) : undefined}
     >
       <StatusIcon status={j.status} cancelling={j.cancel_requested} className="self-start mt-0.5 md:mt-0 md:self-center" />
-      <Link to={`/jobs/${j.id}`} className="min-w-0 flex-1">
-        <div className="flex min-w-0 flex-col gap-1 md:flex-row md:items-center md:gap-4">
-          <div className="flex min-w-0 items-baseline gap-2 md:w-[240px] md:shrink-0 lg:w-[280px]">
+      <div className="flex min-w-0 flex-1 flex-col gap-1 md:flex-row md:items-center md:gap-4">
+        <div className="flex min-w-0 items-baseline gap-2 md:w-[240px] md:shrink-0 lg:w-[280px]">
+          <Link
+            to={`/jobs/${j.id}`}
+            title={j.name}
+            className="flex min-w-0 items-baseline gap-2 after:absolute after:inset-0 focus-visible:outline-none focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-run/70"
+          >
             <span className="shrink-0 text-ui text-fg-3">#{j.id}</span>
             <span className="truncate text-sm font-medium text-fg">{j.name}</span>
-            <span className="ml-auto shrink-0 pl-2 text-xs text-fg-3 md:hidden">{time}</span>
-          </div>
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            {gpus.length > 0 && <GpuChips ids={gpus} />}
-            {info.pct != null && (
-              <span className="w-10 shrink-0 max-md:hidden" title={`${info.pct}%`}>
-                <Meter value={info.pct} className="bg-run" />
-              </span>
-            )}
-            <span className={cx('min-w-0 truncate text-xs', info.mono && 'font-mono', info.tone ?? 'text-fg-3')}>{info.short && info.short !== info.text ? (
-                <>
-                  <span className="md:hidden">{info.short}</span>
-                  <span className="max-md:hidden">{info.text}</span>
-                </>
-              ) : (
-                info.text
-              )}
-            </span>
-          </div>
-          <div className="hidden shrink-0 items-center gap-4 text-xs text-fg-3 md:flex">
-            <span className="w-[5.5rem] text-right">{time}</span>
-            <span className="w-[4.5rem] text-right" title={isActive(j) ? undefined : fmtTime(j.ended_at)}>
-              {isActive(j) ? '' : timeAgo(j.ended_at)}
-            </span>
-            <span className="w-[4.5rem]">
-              <Commit sha={j.git_commit} dirty={j.git_dirty} />
-            </span>
-          </div>
+          </Link>
+          <span className="ml-auto shrink-0 pl-2 text-xs text-fg-3 md:hidden" title={ended ? fmtTime(j.ended_at) : timeLabel}>
+            {ended && j.ended_at ? `${time} · ${timeAgo(j.ended_at)}` : time}
+          </span>
         </div>
-      </Link>
-      {active ? (
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          {gpus.length > 0 && <GpuChips ids={gpus} />}
+          {info.pct != null && (
+            <span className="w-10 shrink-0 max-md:hidden" title={`${info.pct}%`}>
+              <Meter value={info.pct} className="bg-run" />
+            </span>
+          )}
+          <span
+            title={info.text}
+            className={cx(
+              // 手机上这一行还要放 commit，放不下时折成两行，不让 loss、失败原因这类信息被截掉
+              'min-w-0 text-xs max-md:line-clamp-2 max-md:[overflow-wrap:anywhere] md:truncate',
+              info.mono && 'font-mono',
+              info.tone ?? 'text-fg-3',
+            )}
+          >
+            {info.short && info.short !== info.text ? (
+              <>
+                <span className="md:hidden">{info.short}</span>
+                <span className="max-md:hidden">{info.text}</span>
+              </>
+            ) : (
+              info.text
+            )}
+          </span>
+          <Commit sha={j.git_commit} dirty={j.git_dirty} to={code} className="relative z-10 ml-auto shrink-0 pl-1 md:hidden" />
+        </div>
+        <div className="hidden shrink-0 items-center gap-4 text-xs text-fg-3 md:flex">
+          <span className="w-[5.5rem] text-right" title={timeLabel}>
+            {time}
+          </span>
+          <span className="w-[4.5rem] text-right" title={ended ? fmtTime(j.ended_at) : undefined}>
+            {ended ? timeAgo(j.ended_at) : ''}
+          </span>
+          <span className="w-[4.5rem]">
+            <Commit sha={j.git_commit} dirty={j.git_dirty} to={code} className="relative z-10" />
+          </span>
+        </div>
+      </div>
+      {canCancel ? (
         <Button
           size="icon-sm"
           variant="ghost"
-          className="text-fg-3 hover:text-fail max-md:-mr-2 max-md:size-11 md:pointer-fine:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+          className="relative z-10 text-fg-3 hover:text-fail max-md:-mr-2 max-md:size-11 md:pointer-fine:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
           title="取消任务"
           aria-label={`取消任务 #${j.id}`}
-          loading={cancel.isPending}
-          onClick={() => confirmCancel(j) && cancel.mutate(j)}
+          onClick={() => setConfirming(true)}
         >
           <X />
         </Button>
       ) : (
         <span className="hidden size-8 shrink-0 md:block" />
       )}
+      {confirming && <CancelDialog job={j} onClose={() => setConfirming(false)} />}
     </div>
   )
 }
 
-export function JobList({ jobs, empty }: { jobs: Job[]; empty: ReactNode }) {
+/** 任务页电脑端的列头，列宽和 JobRow 的固定列一致 */
+export function JobListHeader() {
+  return (
+    <div className="hidden h-8 items-center gap-3 border-b border-line bg-subtle px-4 text-xs text-fg-3 md:flex" aria-hidden>
+      <span className="w-4 shrink-0" />
+      <div className="flex min-w-0 flex-1 items-center gap-4">
+        <span className="w-[240px] shrink-0 lg:w-[280px]">任务</span>
+        <span className="min-w-0 flex-1">卡 · 最新输出</span>
+        <span className="w-[5.5rem] shrink-0 text-right">耗时</span>
+        <span className="w-[4.5rem] shrink-0 text-right">结束于</span>
+        <span className="w-[4.5rem] shrink-0">代码</span>
+      </div>
+      <span className="size-8 shrink-0" />
+    </div>
+  )
+}
+
+export function JobList({ jobs, empty, header }: { jobs: Job[]; empty: ReactNode; header?: ReactNode }) {
   if (!jobs.length) return typeof empty === 'string' ? <Empty>{empty}</Empty> : <>{empty}</>
   return (
-    <div className="divide-y divide-line">
-      {jobs.map((j) => (
-        <JobRow key={j.id} job={j} />
-      ))}
-    </div>
+    <>
+      {header}
+      <div className="divide-y divide-line">
+        {jobs.map((j) => (
+          <JobRow key={j.id} job={j} />
+        ))}
+      </div>
+    </>
   )
 }

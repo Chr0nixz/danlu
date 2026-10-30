@@ -44,6 +44,27 @@ func TestLastLine(t *testing.T) {
 	}
 }
 
+func TestErrorLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "l.log")
+	cases := map[string]string{
+		// 普通 Python 异常，后面跟着 danlu 的结束提示
+		"epoch 1: 50%|#####| 5/10\nTraceback (most recent call last):\n  File \"train.py\", line 9, in <module>\n" +
+			"\x1b[31mRuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB\x1b[0m\n" + BannerPrefix + "结束，退出码 1\n": "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB",
+		// torchrun：真正的原因在 ChildFailedError 汇总之前，带 rank 前缀
+		"[rank0]: Traceback (most recent call last):\n[rank0]: torch.OutOfMemoryError: CUDA out of memory.\n" +
+			"torch.distributed.elastic.multiprocessing.errors.ChildFailedError: \n====\ntrain.py FAILED\n====\n": "[rank0]: torch.OutOfMemoryError: CUDA out of memory.",
+		"step 100 loss=0.3\nKilled\n":         "Killed",
+		"epoch 3 done\nval_acc=0.81\n":       "",
+		"loss: 0.5\nlr: 3e-4\nError: boom\n": "Error: boom",
+	}
+	for in, want := range cases {
+		os.WriteFile(p, []byte(in), 0o644)
+		if got := ErrorLine(p); got != want {
+			t.Errorf("ErrorLine(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
 func TestFindTracker(t *testing.T) {
 	cases := map[string]string{
 		"wandb: 🚀 View run at \x1b[34m\x1b[4mhttps://wandb.ai/me/proj/runs/abc123\x1b[0m\n": "https://wandb.ai/me/proj/runs/abc123",

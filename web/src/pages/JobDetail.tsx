@@ -1,13 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowUpRight, Check, ChevronLeft, Copy, RotateCw, X } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
+import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, RotateCw, X } from 'lucide-react'
+import { useRef, useState, type ReactNode } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router'
+import { CancelDialog, compactProgress } from '../components/JobRow'
 import { CodeBrowser } from '../components/CodeBrowser'
-import { confirmCancel, useCancel } from '../components/JobRow'
 import { LogViewer } from '../components/LogViewer'
-import { Alert, Button, buttonClass, Card, Commit, cx, ErrorBox, GpuChips, Skeleton, StatusIcon, StatusLabel, Tabs } from '../components/ui'
-import { api, type Job } from '../lib/api'
+import { Alert, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
+import { api, ApiError, type Job } from '../lib/api'
 import { duration, fmtTime, isActive, jobDuration, now } from '../lib/format'
+
+type Tab = 'log' | 'info' | 'code'
+const tabs: Tab[] = ['log', 'info', 'code']
 
 export function JobDetail() {
   const id = Number(useParams().id)
@@ -16,8 +19,25 @@ export function JobDetail() {
     queryFn: () => api.job(id),
     refetchInterval: (query) => (query.state.data && !isActive(query.state.data) ? false : 2000),
   })
-  const [tab, setTab] = useState<'log' | 'info' | 'code'>('log')
-  const cancel = useCancel()
+  // 标签页放在地址里（?tab=code），commit 链接可以直接打开代码快照，刷新也不丢
+  const [params, setParams] = useSearchParams()
+  const tab = tabs.find((t) => t === params.get('tab')) ?? 'log'
+  const setTab = (t: Tab) =>
+    setParams(
+      (p) => {
+        if (t === 'log') p.delete('tab')
+        else p.set('tab', t)
+        return p
+      },
+      { replace: true },
+    )
+  const [confirming, setConfirming] = useState(false)
+  const panel = useRef<HTMLDivElement>(null)
+
+  const showLogEnd = () => {
+    setTab('log')
+    requestAnimationFrame(() => panel.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+  }
 
   if (q.isLoading) {
     return (
@@ -29,17 +49,29 @@ export function JobDetail() {
       </div>
     )
   }
-  if (q.error) return <ErrorBox error={q.error} />
+  if (q.error) {
+    // 编号不存在或不是数字；安全入口失效也是 404，但那种要显示原文，告诉用户重新打开入口地址
+    const missing = q.error instanceof ApiError && (q.error.status === 400 || q.error.message === '任务不存在')
+    return (
+      <div className="space-y-4">
+        <BackLink />
+        {missing ? (
+          <Card>
+            <Empty action={<Link to="/jobs" className={buttonClass('secondary', 'sm')}>回到任务列表</Link>}>任务 #{id} 不存在，可能输错了编号</Empty>
+          </Card>
+        ) : (
+          <ErrorBox error={q.error} />
+        )}
+      </div>
+    )
+  }
   const j = q.data!
   const trackerName = j.tracker_url.includes('swanlab') ? 'SwanLab' : 'W&B'
 
   return (
     <div className="space-y-4">
       <div className="space-y-2">
-        <Link to="/jobs" className="inline-flex items-center gap-0.5 text-ui text-fg-3 hover:text-fg">
-          <ChevronLeft className="size-4" />
-          任务
-        </Link>
+        <BackLink />
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
           <h1 className="flex min-w-0 flex-1 items-start gap-2 text-xl font-semibold tracking-tight">
             <StatusIcon status={j.status} cancelling={j.cancel_requested} className="mt-1.5 size-5" />
@@ -60,7 +92,7 @@ export function JobDetail() {
               重跑
             </Link>
             {isActive(j) && !j.cancel_requested && (
-              <Button size="sm" variant="danger" loading={cancel.isPending} onClick={() => confirmCancel(j) && cancel.mutate(j)}>
+              <Button size="sm" variant="danger" onClick={() => setConfirming(true)}>
                 <X />
                 取消
               </Button>
@@ -71,12 +103,13 @@ export function JobDetail() {
 
       <MetaStrip j={j} />
 
-      {j.status === 'failed' && j.fail_reason && <Alert tone="fail">{j.fail_reason}</Alert>}
+      {j.status === 'failed' && <FailBox j={j} onShowLog={showLogEnd} />}
       {j.status !== 'failed' && j.fail_reason && <Alert>{j.fail_reason}</Alert>}
       {j.cancel_requested && j.status === 'running' && <Alert tone="warn">已发送结束信号，正在等进程退出；超时会强制结束。</Alert>}
 
-      <div>
+      <div ref={panel} className="scroll-mt-16">
         <Tabs
+          id="job"
           value={tab}
           onChange={setTab}
           tabs={[
@@ -85,7 +118,7 @@ export function JobDetail() {
             { value: 'code', label: '代码' },
           ]}
         />
-        <div className="pt-4">
+        <div className="pt-4" {...tabPanelProps('job', tab)}>
           {tab === 'log' &&
             (j.status === 'queued' ? (
               <Card className="px-4 py-12 text-center text-ui text-fg-3">
@@ -98,15 +131,55 @@ export function JobDetail() {
           {tab === 'code' && <CodeBrowser jobId={j.id} />}
         </div>
       </div>
+      {confirming && <CancelDialog job={j} onClose={() => setConfirming(false)} />}
     </div>
   )
 }
 
-function Meta({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+function BackLink() {
+  return (
+    <Link to="/jobs" className="inline-flex items-center gap-0.5 text-ui text-fg-3 hover:text-fg">
+      <ChevronLeft className="size-4" aria-hidden />
+      任务
+    </Link>
+  )
+}
+
+/**
+ * 失败原因。最醒目的位置放最有用的信息：日志里的报错行（找不到时用最后一行输出），
+ * 而不是状态栏里已经有的退出码；退出码以外的原因（被外部终止、启动失败、清理了残留进程）单独写一行。
+ */
+function FailBox({ j, onShowLog }: { j: Job; onShowLog: () => void }) {
+  const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
+  const extra = j.fail_reason && !/^退出码 -?\d+$/.test(j.fail_reason) ? j.fail_reason : ''
+  return (
+    <Alert tone="fail">
+      {line ? (
+        <>
+          {!j.error_line && <div className="text-xs">没有找到报错行，最后一行输出是：</div>}
+          <div className="font-mono text-[12.5px] leading-relaxed [overflow-wrap:anywhere]">{line}</div>
+          {extra && <div className="mt-0.5">{extra}</div>}
+        </>
+      ) : (
+        <div>{j.fail_reason || '任务失败，没有留下输出'}</div>
+      )}
+      {j.started_at && (
+        <button type="button" onClick={onShowLog} className="mt-1 inline-flex items-center gap-1 text-xs font-medium underline decoration-fail/40 underline-offset-2 hover:decoration-fail">
+          看日志末尾
+          <ArrowDown className="size-3.5" aria-hidden />
+        </button>
+      )}
+    </Alert>
+  )
+}
+
+function Meta({ label, children, className, live }: { label: ReactNode; children: ReactNode; className?: string; live?: boolean }) {
   return (
     <div className={cx('min-w-0 space-y-1', className)}>
-      <div className="text-xs text-fg-3">{label}</div>
-      <div className="flex min-h-5 min-w-0 items-center gap-1.5 text-ui text-fg">{children}</div>
+      <div className="truncate text-xs text-fg-3">{label}</div>
+      <div className="flex min-h-5 min-w-0 items-center gap-1.5 text-ui text-fg" aria-live={live ? 'polite' : undefined}>
+        {children}
+      </div>
     </div>
   )
 }
@@ -117,7 +190,7 @@ function MetaStrip({ j }: { j: Job }) {
   const gpus = j.gpus_assigned.length ? j.gpus_assigned : j.gpus_pinned
   return (
     <Card className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 sm:grid-cols-3 lg:grid-cols-[repeat(6,auto)] lg:justify-between">
-      <Meta label="状态">
+      <Meta label="状态" live>
         <StatusLabel job={j} />
         {j.exit_code !== null && j.status !== 'succeeded' && <span className="text-fg-3">退出码 {j.exit_code}</span>}
       </Meta>
@@ -130,10 +203,17 @@ function MetaStrip({ j }: { j: Job }) {
       <Meta label={j.status === 'running' ? '已运行' : j.status === 'queued' ? '已等待' : '耗时'}>
         {j.status === 'queued' ? duration(now() - j.created_at) : d !== null ? duration(d) : <span className="text-fg-3">-</span>}
       </Meta>
-      <Meta label="代码版本">
+      <Meta
+        label={
+          <>
+            代码版本
+            {j.git_dirty && <span className="text-warn"> · 有未提交改动</span>}
+          </>
+        }
+      >
         {j.git_commit ? (
           <>
-            <Commit sha={j.git_commit} dirty={j.git_dirty} className="text-ui text-fg" />
+            <Commit sha={j.git_commit} dirty={j.git_dirty} to="?tab=code" className="text-ui text-fg" />
             {j.git_branch && <span className="truncate text-fg-3">{j.git_branch}</span>}
           </>
         ) : (

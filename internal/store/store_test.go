@@ -41,6 +41,12 @@ func TestJobRoundTrip(t *testing.T) {
 	if err != nil || total != 1 || len(list) != 1 {
 		t.Fatalf("ListJobs = %d %d %v", len(list), total, err)
 	}
+	if _, total, _ := s.ListJobs(JobFilter{EndedAfter: now}); total != 1 {
+		t.Fatalf("EndedAfter=now 应该包含刚结束的任务，total=%d", total)
+	}
+	if _, total, _ := s.ListJobs(JobFilter{EndedAfter: now + 1}); total != 0 {
+		t.Fatalf("EndedAfter=now+1 不应包含任何任务，total=%d", total)
+	}
 }
 
 func TestLockout(t *testing.T) {

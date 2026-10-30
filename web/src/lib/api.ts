@@ -27,6 +27,8 @@ export interface Job {
   started_at: number | null
   ended_at: number | null
   last_line?: string
+  /** 失败任务日志里最后一条像报错的行（Python 异常、Killed 等） */
+  error_line?: string
   queue_pos?: number
 }
 
@@ -98,7 +100,8 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   })
   const text = await res.text()
   if (res.status === 401 && !location.pathname.startsWith('/login')) {
-    location.href = '/login'
+    // 登录后回到原来的页面
+    location.href = `/login?next=${encodeURIComponent(location.pathname + location.search)}`
     throw new ApiError(401, '未登录')
   }
   if (res.status === 404 && !text) {
@@ -140,7 +143,7 @@ export const api = {
     get<{ is_git: boolean; commit?: string; branch?: string; dirty?: boolean }>(`/api/fs/git${qs({ path })}`),
   recentWorkdirs: () => get<{ dirs: string[] }>('/api/workdirs/recent'),
 
-  jobs: (p: { status?: string; q?: string; page?: number; size?: number }) =>
+  jobs: (p: { status?: string; q?: string; page?: number; size?: number; ended_after?: number }) =>
     get<{ jobs: Job[]; total: number; page: number; size: number }>(`/api/jobs${qs(p)}`),
   job: (id: number) => get<Job>(`/api/jobs/${id}`),
   submit: (r: SubmitReq) => post<Job>('/api/jobs', r),

@@ -10,6 +10,7 @@ import { JobDetail } from './pages/JobDetail'
 import { Jobs } from './pages/Jobs'
 import { Login } from './pages/Login'
 import { NewJob } from './pages/NewJob'
+import { NotFound } from './pages/NotFound'
 import { Settings } from './pages/Settings'
 
 const queryClient = new QueryClient({
@@ -34,7 +35,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="/jobs/:id" element={<JobDetail />} />
             <Route path="/new" element={<NewJob />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<Home />} />
+            <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>
       </BrowserRouter>

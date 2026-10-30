@@ -61,7 +61,8 @@ function Occupant({ g }: { g: GPU }) {
   return (
     <div className="min-w-0 space-y-0.5 text-ui">
       {g.job && (
-        <Link to={`/jobs/${g.job.id}`} className="flex min-w-0 items-center gap-1.5 text-fg hover:underline">
+        // 手机上把点击区撑高到 36px，不改变排版
+        <Link to={`/jobs/${g.job.id}`} className="flex min-w-0 items-center gap-1.5 text-fg hover:underline max-sm:-my-2 max-sm:py-2">
           <StatusIcon status="running" className="size-3.5" />
           <span className="shrink-0 text-fg-3">#{g.job.id}</span>
           <span className="truncate font-medium">{g.job.name}</span>
@@ -69,11 +70,13 @@ function Occupant({ g }: { g: GPU }) {
       )}
       {g.external.map((p) => (
         <div key={p.pid} className="flex min-w-0 items-center gap-1.5 text-warn" title="不是 danlu 启动的进程，这张卡不会被分配">
-          <span className="size-1.5 shrink-0 rounded-full bg-warn" />
+          <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
           <span className="truncate">
             外部进程 {p.pid}
-            {p.user && ` · ${p.user}`} · {mb(p.used_mem_mb)}
+            {p.user && ` · ${p.user}`}
           </span>
+          {/* 显存放在截断范围外，窄的时候宁可截掉用户名 */}
+          <span className="shrink-0">· {mb(p.used_mem_mb)}</span>
         </div>
       ))}
       {!g.job && !g.external.length && (

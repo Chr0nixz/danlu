@@ -1,4 +1,4 @@
-// Package logs 读取任务日志：分段读取、取最后一行、识别 W&B / SwanLab 链接。
+// Package logs 读取任务日志：分段读取、取最后一行和报错行、识别 W&B / SwanLab 链接。
 package logs
 
 import (
@@ -78,7 +78,23 @@ const BannerPrefix = "[danlu] 任务"
 // LastLine 取日志的最后一行可见内容（处理 \r 进度条和 ANSI 颜色），用于在列表里一眼看进度。
 // 跳过 danlu 自己的开始/结束提示，这样结束的任务显示的是程序最后的输出（通常是最终指标）。
 func LastLine(path string) string {
-	data, _, _, err := Tail(path, 8192)
+	return lastMatch(path, 8192, func(l string) bool { return !strings.HasPrefix(l, BannerPrefix) })
+}
+
+// 像报错的行：Python 异常（含 torchrun 给每个 rank 加的 "[rank0]: " 前缀）、被 OOM killer 杀掉、段错误、CUDA 报错
+var errLineRe = regexp.MustCompile(`^(?:\[rank\d+\]:\s*)?(?:[A-Za-z_]\w*\.)*\w*(?:Error|Exception)(?::|$)|^Killed$|Segmentation fault|core dumped|CUDA error:`)
+
+// ErrorLine 在日志末尾找最后一条像报错的行，用来在失败任务上直接说明"挂在哪"；找不到返回空串。
+// torchrun 退出前总会打印一行 ChildFailedError 汇总，真正的原因在它前面，所以跳过它。
+func ErrorLine(path string) string {
+	return lastMatch(path, 32<<10, func(l string) bool {
+		return !strings.Contains(l, "ChildFailedError") && errLineRe.MatchString(l)
+	})
+}
+
+// lastMatch 从日志末尾 tail 字节里倒着找第一条满足 ok 的可见行（处理 \r 进度条和 ANSI 颜色），截到 200 字。
+func lastMatch(path string, tail int64, ok func(string) bool) string {
+	data, _, _, err := Tail(path, tail)
 	if err != nil {
 		return ""
 	}
@@ -89,7 +105,7 @@ func LastLine(path string) string {
 			l = l[j+1:]
 		}
 		l = strings.TrimSpace(StripANSI(l))
-		if l != "" && !strings.HasPrefix(l, BannerPrefix) {
+		if l != "" && ok(l) {
 			if r := []rune(l); len(r) > 200 {
 				l = string(r[:200]) + "…"
 			}

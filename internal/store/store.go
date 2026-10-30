@@ -236,10 +236,11 @@ func (s *Store) JobsByStatus(status string) ([]*Job, error) {
 }
 
 type JobFilter struct {
-	Statuses []string
-	Query    string
-	Limit    int
-	Offset   int
+	Statuses   []string
+	Query      string
+	EndedAfter int64 // 只要这个时间（unix 秒）之后结束的任务；0 表示不限
+	Limit      int
+	Offset     int
 }
 
 func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
@@ -255,6 +256,10 @@ func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
 		where = append(where, "(name LIKE ? OR cmd LIKE ? OR workdir LIKE ?)")
 		q := "%" + f.Query + "%"
 		args = append(args, q, q, q)
+	}
+	if f.EndedAfter > 0 {
+		where = append(where, "ended_at >= ?")
+		args = append(args, f.EndedAfter)
 	}
 	cond := ""
 	if len(where) > 0 {

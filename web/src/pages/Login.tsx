@@ -1,11 +1,14 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { Brand } from '../components/Layout'
 import { Button, Card, ErrorBox, Field, Input } from '../components/ui'
 import { api } from '../lib/api'
 
 export function Login() {
   const nav = useNavigate()
+  // 会话过期被踢回来时带着 next，登录后回到原来的页面；只接受站内路径
+  const next = useSearchParams()[0].get('next')
+  const dest = next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/login') ? next : '/'
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<unknown>(null)
@@ -17,7 +20,7 @@ export function Login() {
     setError(null)
     try {
       await api.login(username, password)
-      nav('/', { replace: true })
+      nav(dest, { replace: true })
     } catch (err) {
       setError(err)
     } finally {
