@@ -12,23 +12,91 @@
 
 设计文档：[docs/DEMO.md](docs/DEMO.md)（当前 demo）、[docs/DESIGN.md](docs/DESIGN.md)（长期规划）、[PRODUCT.md](PRODUCT.md)（产品定位）、[DESIGN.md](DESIGN.md)（界面视觉规范）。
 
-## 部署到服务器
+## 部署
+
+丹炉是**一个静态链接的 Linux 可执行文件**，前端已经打包在里面。服务器上不需要 Docker、Node、Python，也不需要 root。部署分四步：
+
+1. 在开发机上交叉编译；
+2. 用 `scp` 把文件传到服务器；
+3. 运行 `danlu init` 生成配置；
+4. 运行 `danlu install-service` 注册成 systemd **用户服务**。
+
+> 目前只在 WSL 里用假 GPU 完整测试过（`scripts/e2e.sh`），还没有在真实的 GPU 服务器上跑过。
+
+### 服务器要求
+
+| | |
+|---|---|
+| 系统 | Linux x86_64 或 arm64，带 systemd |
+| 必需 | NVIDIA 驱动（`nvidia-smi` 能在 PATH 里找到）、`/bin/bash` |
+| 可选 | `git`：用来记录 commit 和未提交的改动，没有的话只保存文件快照<br>conda：用来自动激活环境 |
+| 网络 | 防火墙 / 云安全组放行一个 TCP 端口（`init` 时默认随机选一个） |
+
+### 1. 构建
+
+需要 Go 1.26+、Node 和 pnpm。
 
 ```powershell
-# 在 Windows 上构建（需要 Go、Node、pnpm），生成 dist/danlu-linux-amd64
-.\scripts\build.ps1
-scp dist\danlu-linux-amd64 你的服务器:~/bin/danlu
+.\scripts\build.ps1                # Windows，生成 dist\danlu-linux-amd64
+.\scripts\build.ps1 -Arch arm64    # ARM 服务器
 ```
 
 ```bash
-# 在服务器上（不需要 root）
-danlu init               # 交互式：端口、公网 IP、用户名、密码、conda 目录，都有默认值
-danlu install-service    # 安装为 systemd 用户服务，开机自启、退出 SSH 后继续运行
+bash scripts/build.sh              # Linux / macOS / WSL；加参数 arm64 构建 ARM 版本
 ```
 
-`init` 最后会打印访问地址，形如 `https://203.0.113.10:28457/k3x9p2qa7m4z`。记得在防火墙 / 云安全组放行这个端口，并把**完整地址**存成书签：不经过安全入口时，所有页面都返回 404。
+### 2. 上传
 
-第一次打开时浏览器会提示证书不受信任，点"继续"即可。想去掉警告，可以登录后到「设置」页下载 CA 证书，在手机和电脑上各安装一次。
+```bash
+ssh 你的服务器 'mkdir -p ~/bin'
+scp dist/danlu-linux-amd64 你的服务器:~/bin/danlu
+ssh 你的服务器 'chmod +x ~/bin/danlu'      # 从 Windows 传过去的文件没有执行权限
+```
+
+### 3. 初始化并安装服务（在服务器上执行）
+
+```bash
+~/bin/danlu init               # 交互式，每一项都有默认值，直接回车即可
+~/bin/danlu install-service
+```
+
+`init` 会询问端口、公网 IP、用户名、密码和 conda 目录，然后在 `~/.danlu/` 里生成配置文件、本地 CA 和服务器证书。如果密码留空，会随机生成一个，**只显示这一次**。在脚本里使用时加 `--yes`，用 `--port`、`--public-ip`、`--user`、`--password`、`--conda` 指定各项的值。
+
+`install-service` 会做以下几件事：
+
+- 写入 `~/.config/systemd/user/danlu.service`。其中 `ExecStart` 是二进制的绝对路径，`PATH` 是你执行这条命令时 shell 里的 PATH。所以请在能找到 `nvidia-smi` 和 conda 的那个 shell 里执行；以后 PATH 有变化，重新执行一次即可。
+- 设置 `KillMode=process`：重启或停止 danlu 时，不会连带杀掉正在跑的训练进程。
+- 执行 `systemctl --user enable --now danlu`：立即启动服务，并且开机自启。
+- 执行 `loginctl enable-linger`：退出 SSH 后服务继续运行。如果这一步因为权限失败，请手动执行 `sudo loginctl enable-linger $USER`。
+
+### 4. 打开面板
+
+`init` 最后会打印访问地址，形如 `https://203.0.113.10:28457/k3x9p2qa7m4z`；以后可以用 `danlu info` 重新查看。请把**完整地址**存成书签：不经过安全入口访问时，所有页面都返回 404。
+
+第一次打开时，浏览器会提示证书不受信任，点"继续"即可。想去掉这个警告，可以登录后在「设置」页下载 CA 证书，在手机和电脑上各安装一次。这个 CA 只能给这台服务器的 IP 签发证书。
+
+HTTPS 有三种模式，在 `~/.danlu/config.toml` 的 `[tls] mode` 里设置：
+
+- `local-ca`：默认，使用上面说的本地 CA；
+- `file`：使用自己的证书，比如有了域名以后，同时要填写 `cert_file` 和 `key_file`；
+- `off`：只用于本地测试，密码会以明文传输。
+
+### 升级
+
+```bash
+scp dist/danlu-linux-amd64 你的服务器:~/bin/danlu.new
+ssh 你的服务器 'chmod +x ~/bin/danlu.new && mv ~/bin/danlu.new ~/bin/danlu && systemctl --user restart danlu'
+```
+
+不能直接覆盖 `~/bin/danlu`：程序正在运行时，覆盖会报 `Text file busy`。先传成新文件名再 `mv` 过去就没有问题。重启时训练任务不会中断，新进程启动后会重新接管它们；配置和数据都不受影响。
+
+### 卸载
+
+```bash
+systemctl --user disable --now danlu
+rm ~/.config/systemd/user/danlu.service ~/bin/danlu
+rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按需执行
+```
 
 ### 常用命令
 
@@ -42,7 +110,15 @@ danlu install-service    # 安装为 systemd 用户服务，开机自启、退�
 | `systemctl --user restart danlu` | 修改配置后重启（不影响正在跑的训练） |
 | `journalctl --user -u danlu -f` | 查看服务日志 |
 
-数据都在 `~/.danlu/`：`config.toml`、`danlu.db`、`logs/`、`snapshots/`、`tls/`。
+数据都在 `~/.danlu/`，可以用环境变量 `DANLU_HOME` 改到别处：
+
+- `config.toml`：配置文件；
+- `secret.key`：会话签名用的密钥；
+- `danlu.db`：任务记录，SQLite 格式；
+- `logs/`：每个任务的日志；
+- `snapshots/`：代码快照；
+- `run/`：每个任务的包装脚本和退出码；
+- `tls/`：本地 CA 和服务器证书。
 
 ## 本地开发
 
