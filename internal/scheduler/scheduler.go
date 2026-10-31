@@ -63,14 +63,15 @@ func (m *Manager) Wake() {
 // ---------- 提交与取消 ----------
 
 type SubmitReq struct {
-	Name       string            `json:"name"`
-	Workdir    string            `json:"workdir"`
-	CondaEnv   string            `json:"conda_env"`
-	Cmd        string            `json:"cmd"`
-	Env        map[string]string `json:"env"`
-	GPUs       int               `json:"gpus"`
-	PinnedGPUs []int             `json:"pinned_gpus"`
-	RerunOf    *int64            `json:"rerun_of"`
+	Name          string            `json:"name"`
+	Workdir       string            `json:"workdir"`
+	CondaEnv      string            `json:"conda_env"`
+	Cmd           string            `json:"cmd"`
+	Env           map[string]string `json:"env"`
+	InheritBashrc bool              `json:"inherit_bashrc"`
+	GPUs          int               `json:"gpus"`
+	PinnedGPUs    []int             `json:"pinned_gpus"`
+	RerunOf       *int64            `json:"rerun_of"`
 }
 
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -133,7 +134,8 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j := &store.Job{Name: req.Name, Workdir: req.Workdir, CondaEnv: strings.TrimSpace(req.CondaEnv), Cmd: req.Cmd,
-		Env: req.Env, GPUsReq: req.GPUs, GPUsPinned: pinned, Status: store.StatusQueued, RerunOf: req.RerunOf}
+		Env: req.Env, InheritBashrc: req.InheritBashrc, GPUsReq: req.GPUs, GPUsPinned: pinned,
+		Status: store.StatusQueued, RerunOf: req.RerunOf}
 	if err := m.st.InsertJob(j); err != nil {
 		return nil, err
 	}
@@ -408,7 +410,7 @@ func (m *Manager) start(j *store.Job, gpus []int, ports map[int]bool) {
 	now := time.Now().Unix()
 	j.StartedAt = &now
 	pid, startTime, err := m.run.Start(runner.Spec{JobID: j.ID, Name: j.Name, Workdir: j.Workdir,
-		CondaEnv: j.CondaEnv, Cmd: j.Cmd, Env: j.Env, GPUs: gpus, Port: port})
+		CondaEnv: j.CondaEnv, Cmd: j.Cmd, Env: j.Env, InheritBashrc: j.InheritBashrc, GPUs: gpus, Port: port})
 	if err != nil {
 		j.Status, j.FailReason, j.EndedAt = store.StatusFailed, "启动失败: "+err.Error(), &now
 		m.save(j)

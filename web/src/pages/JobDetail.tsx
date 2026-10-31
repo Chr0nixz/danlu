@@ -291,6 +291,7 @@ function Overview({ j }: { j: Job }) {
             </div>
           </Row>
         )}
+        {j.inherit_bashrc && <Row label="Bash 环境">启动时加载服务器 ~/.bashrc</Row>}
         <Row label="代码版本">
           {j.git_commit ? (
             <span className="font-mono text-[12.5px]">

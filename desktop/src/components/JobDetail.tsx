@@ -44,6 +44,7 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
         conda_env: job.conda_env,
         cmd: job.cmd,
         env: job.env,
+        inherit_bashrc: job.inherit_bashrc ?? false,
         gpus: job.gpus_req,
         pinned_gpus: job.gpus_pinned,
         rerun_of: job.id,
@@ -166,6 +167,7 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
             {Object.keys(j.env).length > 0 && <span className="text-fg-3"> · {Object.entries(j.env).map(([k, v]) => `${k}=${v}`).join(' ')}</span>}
           </span>
         </Row>
+        {j.inherit_bashrc && <Row k="Bash">启动时加载服务器 ~/.bashrc</Row>}
         <Row k="时间">
           <span className="num text-[11.5px] text-fg-2">
             {fmtTime(j.created_at).slice(5)}

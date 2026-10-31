@@ -10,7 +10,16 @@
 - 公网访问：随机端口 + 安全入口 + 密码 + HTTPS（本地 CA，不需要域名）
 - 界面电脑和手机都能用：首页一屏看清在跑什么、有没有失败、哪张卡空着；跟随系统深浅色；快捷键 `N` 新建任务、`/` 搜索、`Ctrl+Enter` 提交
 
-设计文档：[docs/DEMO.md](docs/DEMO.md)（当前 demo）、[docs/DESIGN.md](docs/DESIGN.md)（长期规划）、[PRODUCT.md](PRODUCT.md)（产品定位）、[web/DESIGN.md](web/DESIGN.md)（面板视觉规范）、[docs/CLIENT.md](docs/CLIENT.md)（桌面客户端方案）。
+管理多台服务器用桌面客户端（`desktop/`，目前只有 Windows 版）。它常驻托盘，把各台的空卡和任务汇总在一个窗口里，在任务失败或服务器异常时发系统通知；升级和服务管理也在客户端里做，通过 SSH 执行。服务器之间互不连接，汇总都在客户端完成。用法见下文"桌面客户端"。
+
+设计文档：
+- [docs/DEMO.md](docs/DEMO.md)：当前 demo 的范围和接口；
+- [docs/DESIGN.md](docs/DESIGN.md)：长期规划，部分已被客户端方案取代；
+- [PRODUCT.md](PRODUCT.md)：面板的产品定位；
+- [web/DESIGN.md](web/DESIGN.md)：面板的视觉规范；
+- [docs/CLIENT.md](docs/CLIENT.md)：桌面客户端方案和里程碑；
+- [desktop/PRODUCT.md](desktop/PRODUCT.md)：客户端的产品定位；
+- [desktop/DESIGN.md](desktop/DESIGN.md)：客户端的视觉规范。
 
 ## 部署
 
@@ -85,10 +94,12 @@ HTTPS 有三种模式，在 `~/.danlu/config.toml` 的 `[tls] mode` 里设置：
 
 ```bash
 scp dist/danlu-linux-amd64 你的服务器:~/bin/danlu.new
-ssh 你的服务器 'chmod +x ~/bin/danlu.new && mv ~/bin/danlu.new ~/bin/danlu && systemctl --user restart danlu'
+ssh 你的服务器 'chmod +x ~/bin/danlu.new && ~/bin/danlu.new replace ~/bin/danlu'
 ```
 
-不能直接覆盖 `~/bin/danlu`：程序正在运行时，覆盖会报 `Text file busy`。先传成新文件名再 `mv` 过去就没有问题。重启时训练任务不会中断，新进程启动后会重新接管它们；配置和数据都不受影响。
+`replace` 让新程序把自己改名成 `~/bin/danlu`，然后重启服务，效果和 `mv` 之后执行 `systemctl --user restart danlu` 一样。不能直接覆盖 `~/bin/danlu`：程序正在运行时，覆盖会报 `Text file busy`，所以要先传成一个新文件名。
+
+重启时训练任务不会中断，新进程启动后会重新接管它们；配置和数据都不受影响。桌面客户端「服务器」页的升级走的也是这条命令。
 
 ### 卸载
 
@@ -135,7 +146,7 @@ go test ./cmd/... ./internal/...          # 单元测试（Windows 上也能跑�
 在 WSL 或 Linux 里用假 GPU 测试：
 
 ```bash
-bash scripts/e2e.sh      # 端到端测试：入口/登录/调度/取消/重启接管/日志/快照/限速
+bash scripts/e2e.sh      # 端到端测试：入口/登录/调度/取消/重启接管/日志/快照/限速/设备令牌/游标翻页/replace 升级
 bash scripts/dev-wsl.sh  # 启动演示环境（4 张假 GPU，第 3 张模拟被外部占用），打开打印出的地址
 ```
 
@@ -150,7 +161,17 @@ cd desktop && pnpm tauri dev              # 启动客户端（开发模式）
 cd desktop/src-tauri && cargo test        # Rust 层的单元测试
 ```
 
-在客户端的「服务器」页添加服务器：填 `~/.ssh/config` 里的主机名或 `user@host`。客户端用系统自带的 ssh 登录，所以要能免密登录（密钥或 ssh-agent），而且第一次连接时已经在终端里确认过主机密钥。服务器列表存在 `%APPDATA%\dev.danlu.desktop\servers.json`，设备令牌存在 Windows 凭据管理器里。
+在客户端的「服务器」页添加服务器，填 `~/.ssh/config` 里的主机名或 `user@host`。添加之前有三个前提：
+
+- 服务器上已经按上面的步骤装好 danlu。客户端目前还不能部署新服务器，这项功能在 C3。
+- 能免密登录（密钥或 ssh-agent），因为客户端用的是系统自带的 ssh。
+- 第一次连接时已经在终端里确认过主机密钥。
+
+客户端会自动读取地址和 CA 证书，并在服务器上领一个设备令牌，不用输面板密码。数据存放位置：
+
+- 服务器列表：`%APPDATA%\dev.danlu.desktop\servers.json`；
+- 偏好、已读的失败和通知进度：同目录下的 `state.json`；
+- 设备令牌：Windows 凭据管理器。
 
 客户端常驻托盘：关闭窗口只是缩回托盘，退出在托盘图标的右键菜单里。托盘图标灰色表示空闲，朱砂色表示有任务在跑，带红点表示有没看过的失败或服务器异常；单击图标或按 `Ctrl+Alt+D`（可在设置里改）弹出迷你总览。
 
@@ -162,4 +183,10 @@ cd desktop/src-tauri && cargo test        # Rust 层的单元测试
 - `↑` `↓` `Enter` `Esc` 在任务列表里移动、打开和关闭详情；
 - `Ctrl+F` 搜索日志。
 
-在「服务器」页升级时，客户端上传它自带的 danlu 程序；开发时用的是仓库 `dist/` 里刚构建的 `danlu-linux-<架构>`，所以先运行 `.\scripts\build.ps1`。先升一台：客户端确认新版本在服务、升级前在跑的任务都已被接管，才出现"升级其余 N 台"。
+在「服务器」页升级时，客户端上传仓库 `dist/` 里构建好的 `danlu-linux-<架构>`，所以要先运行 `.\scripts\build.ps1`（ARM 服务器加 `-Arch arm64`）。安装包目前还不带服务器程序，这要等 C3 的发布流程。
+
+升级时先升一台。客户端确认新版本已经在服务、升级前在跑的任务都已被接管，才会出现"升级其余 N 台"。服务器的接口版本（`api_version`）和客户端不一致时，「服务器」页会提示升级。
+
+## 许可证
+
+本项目采用 GNU GPL-3.0，详见 [LICENSE](LICENSE)。

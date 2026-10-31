@@ -9,6 +9,7 @@ export interface Job {
   conda_env: string
   cmd: string
   env: Record<string, string>
+  inherit_bashrc: boolean
   gpus_req: number
   gpus_pinned: number[]
   gpus_assigned: number[]
@@ -107,6 +108,7 @@ export interface SubmitReq {
   conda_env: string
   cmd: string
   env: Record<string, string>
+  inherit_bashrc: boolean
   gpus: number
   pinned_gpus: number[]
   rerun_of: number | null

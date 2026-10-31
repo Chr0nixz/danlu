@@ -16,14 +16,15 @@ type Runner struct {
 }
 
 type Spec struct {
-	JobID    int64
-	Name     string
-	Workdir  string
-	CondaEnv string
-	Cmd      string
-	Env      map[string]string
-	GPUs     []int
-	Port     int
+	JobID         int64
+	Name          string
+	Workdir       string
+	CondaEnv      string
+	Cmd           string
+	Env           map[string]string
+	InheritBashrc bool
+	GPUs          []int
+	Port          int
 }
 
 func (r *Runner) RunDir(id int64) string  { return filepath.Join(r.RunRoot, strconv.FormatInt(id, 10)) }

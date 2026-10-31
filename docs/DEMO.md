@@ -2,6 +2,8 @@
 
 > 目标：在一台 GPU 服务器上运行一个 `danlu` 程序。电脑和安卓手机通过 **公网 IP + 端口 + 安全入口** 打开网页，就能**提交、排队、查看、取消、重跑**训练任务，并且**能查到每次任务实际跑的是哪一版代码**。
 > 长期规划见 [DESIGN.md](DESIGN.md)。Demo 直接用正式版的技术栈，做完后在它上面继续迭代，不会推倒重写。
+> 状态：第 9 节的 1–7 步都已完成，在 WSL 里用假 GPU 跑通了端到端测试（`scripts/e2e.sh`）。还差第 8 步：部署到真实的 GPU 服务器上，逐条验证第 0 节的完成标准。
+> 多服务器由桌面客户端负责，见 [CLIENT.md](CLIENT.md)。客户端要求服务器端做的改动（设备令牌、`info --json`、游标翻页等）已经合进本文的接口和命令。
 
 ## 0. 完成标准（全部通过才算 demo 做完）
 
@@ -17,7 +19,7 @@
 
 **要做**：安全入口和登录、HTTPS、GPU 面板、在网页上提交任务、先来先跑的整卡调度、任务执行（含 conda 环境、danlu 重启后接管任务、取消）、实时日志、代码快照、重跑、手机适配。
 
-**不做**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。
+**不做**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。其中多服务器和通知后来交给了桌面客户端（[CLIENT.md](CLIENT.md)），面板本身仍然不做。
 
 **有余力再做**：两次任务之间的代码和参数 diff；"用当时的代码重跑"；申请 Let's Encrypt 的 IP 证书；TOTP 两步验证。
 
@@ -51,7 +53,10 @@ $ danlu info              # 重新显示访问地址（密码不会再显示）
 $ danlu passwd            # 修改密码
 $ danlu entrance --reset  # 换一个新的安全入口
 $ danlu port 30001        # 修改端口
+$ danlu restart           # 改完配置后重启服务（训练不中断）
 ```
+
+完整的命令列表（包括设备令牌和升级用的 `replace`）见 [README](../README.md#常用命令)。
 
 之后的日常使用：
 1. 照旧在本地改代码，用 rsync 推到服务器上。
@@ -123,6 +128,7 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
 | 命令 | 多行文本，作为 bash 脚本执行，可以写多条命令 |
 | GPU | 两种写法二选一："张数 N"（默认），或者"指定卡号"，如 `0,1` |
 | 环境变量 | 可选，`KEY=VALUE` 键值对 |
+| Bash 环境 | 可选，启动时加载服务器用户的 `~/.bashrc`，默认关闭 |
 
 提交前会做校验：工作目录必须存在；GPU 张数不能超过总卡数；指定的卡号必须存在。
 
@@ -160,6 +166,8 @@ finish $?
   | `PYTHONUNBUFFERED=1` | | **否则输出重定向到文件时，Python 的 print 会被缓冲，日志要很久才出现** |
   | `DANLU_JOB_ID`、`DANLU_JOB_NAME` | | 方便在代码里引用 |
   | `WANDB_TAGS` | 追加 `danlu-<id>` | 在 W&B 里按标签找回任务 |
+
+- 勾选“Bash 环境”时，danlu 用交互式 Bash 加载服务器用户的 `~/.bashrc`，把其中导出的变量加入任务环境。任务表单里的自定义变量优先于 `.bashrc`，danlu 管理的变量仍由 danlu 注入。文件缺失、加载失败或超过 10 秒时，任务会启动失败。
 
 - **取消**：向整个进程组，以及所有带 `DANLU_JOB_ID=<id>` 标记的进程发 SIGTERM，等 30 秒（可配置），还没退出就发 SIGKILL。
 - **收尾**：任务结束后，扫描 `/proc`，找出仍带着这个任务标记的残留进程（比如 DDP 的孤儿 worker）并全部结束掉，在任务上注明"已清理 N 个残留进程"。收尾时只按标记清理、不按进程组号清理，因为包装脚本退出后，进程组号可能已经被别的进程复用了。
@@ -278,50 +286,58 @@ snapshot_max_total_mb = 50
   danlu.db                           # SQLite
   tls/ca.crt ca.key server.crt server.key
   logs/<id>.log
-  snapshots/<id>.tar.gz
+  snapshots/<id>.tar.gz <id>.meta.json <id>.diff   # 代码、清单和 git 信息、未提交的改动
   run/<id>/run.sh cmd.sh exitcode
 ```
 
 ```
-jobs(id, name, workdir, conda_env, cmd, env_json,
+jobs(id, name, workdir, conda_env, cmd, env_json, inherit_bashrc,
      gpus_req, gpus_pinned, gpus_assigned, status,
-     master_port, pid, pid_starttime, exit_code, fail_reason, tracker_url, last_line,
-     git_commit, git_branch, git_dirty, snapshot_path, snapshot_note, rerun_of,
+     master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
+     git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of,
      created_at, started_at, ended_at)
 sessions(token_hash, created_at, expires_at, ip, user_agent)
 audit(id, ts, ip, action, detail)
 login_failures(ip, count, locked_until)
 recent_workdirs(path, last_used_at)
+device_tokens(id, name, token_hash, created_at, last_used_at, last_ip)   -- 第 2 次迁移，同时加了 jobs(ended_at) 索引
+-- 第 3 次迁移：给 jobs 增加 inherit_bashrc，已有任务默认关闭
 ```
+
+最后一行日志和失败时的报错行不存数据库，列任务时从日志文件末尾读出来。快照文件按任务编号放在 `snapshots/` 下，表里只记 `snapshot_ok`。迁移只能往后追加，按 `PRAGMA user_version` 执行。
 
 ## 8. 技术实现与项目结构
 
 | 部分 | 选型 |
 |---|---|
-| 后端 | Go 1.25，路由直接用标准库 `net/http`，**纯 Go 不用 cgo**，可以在 Windows 上交叉编译出 Linux 版本 |
+| 后端 | Go 1.26，路由直接用标准库 `net/http`，**纯 Go 不用 cgo**，可以在 Windows 上交叉编译出 Linux 版本 |
 | 数据库 | `modernc.org/sqlite`（纯 Go 实现） |
 | 密码 | `golang.org/x/crypto/bcrypt` |
 | 证书 | 标准库 `crypto/x509` |
-| 前端 | React + Vite + TypeScript + Tailwind + shadcn/ui + TanStack Query + ansi_up + highlight.js |
+| 前端 | React 19 + Vite + TypeScript + Tailwind v4 + react-router + TanStack Query + highlight.js；接口类型、日志处理（tqdm、ansi_up）放在和桌面客户端共享的 `packages/core` |
 | 打包 | `go:embed` 把前端打进二进制，最终只有一个文件 |
 
 ```
 D:\Projects\danlu\
-  cmd/danlu/main.go        # 子命令：init / serve / info / passwd / entrance / port / cert / install-service
+  cmd/danlu/main.go        # 所有子命令：init / serve / info / token / passwd / entrance / port / cert /
+                           #   restart / logs / replace / install-service；systemd unit 也在这里生成（带 KillMode=process）
   internal/config/         # 读写配置，init 交互流程
-  internal/auth/           # 安全入口、登录、会话、限速、审计
+  internal/auth/           # 安全入口、登录、会话、设备令牌、限速、审计
   internal/tlsutil/        # 本地 CA 和服务器证书
   internal/gpu/            # 解析 nvidia-smi，假 GPU 模式
+  internal/procfs/         # 读 /proc：进程启动时间、环境变量里的任务标记
   internal/store/          # SQLite 和数据库迁移
   internal/scheduler/      # 先来先跑的调度
   internal/runner/         # 包装脚本、进程组、接管、取消
   internal/snapshot/       # 代码快照、git 信息
   internal/logs/           # 日志分段读取、SSE、链接识别
   internal/api/            # HTTP 路由和处理函数
-  web/                     # React 前端
-  deploy/danlu.service     # systemd 用户服务模板（带 KillMode=process）
-  scripts/build.ps1        # 构建前端 + 交叉编译 linux/amd64
-  docs/DEMO.md  docs/DESIGN.md
+  internal/webui/          # 嵌入前端构建产物
+  web/                     # 面板前端
+  packages/core/           # 面板和客户端共享的 TS 代码
+  desktop/                 # 桌面客户端（Tauri）
+  scripts/                 # build.ps1 / build.sh（构建前端 + 交叉编译）、e2e.sh、dev-wsl.sh
+  docs/DEMO.md  docs/DESIGN.md  docs/CLIENT.md
 ```
 
 ## 9. 开发步骤（每一步都能单独验证）

@@ -11,7 +11,7 @@ import { heatStyle } from './GpuStrip'
 import { Button, cx, ErrorText, Field, inputClass, Kbd, Segmented, useToast } from './ui'
 
 function blank(server: string): Draft {
-  return { server, name: '', workdir: '', conda_env: '', cmd: '', env: {}, gpus: 1, pinned: [], rerun_of: null }
+  return { server, name: '', workdir: '', conda_env: '', cmd: '', env: {}, inherit_bashrc: false, gpus: 1, pinned: [], rerun_of: null }
 }
 
 const envToText = (env: Record<string, string>) =>
@@ -89,6 +89,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
       conda_env: d.conda_env,
       cmd: d.cmd.trim(),
       env,
+      inherit_bashrc: d.inherit_bashrc,
       gpus: mode === 'pinned' ? d.pinned.length : d.gpus,
       pinned_gpus: mode === 'pinned' ? d.pinned : [],
       rerun_of: d.rerun_of,
@@ -206,6 +207,18 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
             placeholder="WANDB_PROJECT=vit"
             spellCheck={false}
           />
+        </Field>
+
+        <Field label="Bash 环境" hint="缺失或加载超时会启动失败">
+          <span className="flex min-h-7 items-center gap-2 text-[11.5px] text-fg-2">
+            <input
+              type="checkbox"
+              checked={d.inherit_bashrc}
+              onChange={(e) => set({ inherit_bashrc: e.target.checked })}
+              className="size-4 accent-fg"
+            />
+            加载服务器 ~/.bashrc 导出的变量
+          </span>
         </Field>
       </div>
 

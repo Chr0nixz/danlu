@@ -20,7 +20,7 @@ func openTest(t *testing.T) *Store {
 func TestJobRoundTrip(t *testing.T) {
 	s := openTest(t)
 	j := &Job{Name: "a", Workdir: "/w", Cmd: "python x.py", Env: map[string]string{"K": "V"},
-		GPUsReq: 2, GPUsPinned: []int{0, 1}, Status: StatusQueued}
+		InheritBashrc: true, GPUsReq: 2, GPUsPinned: []int{0, 1}, Status: StatusQueued}
 	if err := s.InsertJob(j); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestJobRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != StatusFailed || *got.ExitCode != 3 || got.Env["K"] != "V" ||
+	if got.Status != StatusFailed || *got.ExitCode != 3 || got.Env["K"] != "V" || !got.InheritBashrc ||
 		len(got.GPUsAssigned) != 2 || got.PIDStart != 123456789 || got.EndedAt == nil {
 		t.Fatalf("字段没有正确保存: %+v", got)
 	}

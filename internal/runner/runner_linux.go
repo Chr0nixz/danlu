@@ -23,7 +23,14 @@ func (r *Runner) Start(s Spec) (int, uint64, error) {
 	defer logf.Close() // 子进程已经拿到自己的文件描述符
 	cmd := exec.Command("/bin/bash", script)
 	cmd.Dir = r.RunDir(s.JobID)
-	cmd.Env = r.BuildEnv(os.Environ(), s)
+	baseEnv := os.Environ()
+	if s.InheritBashrc {
+		baseEnv, err = loadBashrcEnvironment()
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	cmd.Env = r.BuildEnv(baseEnv, s)
 	cmd.Stdout = logf // 直接传文件，子进程直接写日志，不经过 danlu 中转
 	cmd.Stderr = logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

@@ -41,3 +41,32 @@ func TestBuildEnv(t *testing.T) {
 		t.Error("用户和系统的 CUDA_VISIBLE_DEVICES 都应被覆盖")
 	}
 }
+
+func TestBuildEnvBashrcPrecedence(t *testing.T) {
+	r := &Runner{RunRoot: "/run", LogRoot: "/logs", CondaBase: "/conda"}
+	env := r.BuildEnv([]string{"PATH=/service", "TOKEN=service", "PATH=/bashrc", "TOKEN=bashrc"}, Spec{
+		JobID: 1, Name: "x", Workdir: "/work", Cmd: "true", Env: map[string]string{"TOKEN": "task"},
+	})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok {
+			got[k] = v
+		}
+	}
+	if got["PATH"] != "/bashrc" || got["TOKEN"] != "task" {
+		t.Fatalf("PATH=%q TOKEN=%q，期望 bashrc 覆盖服务环境、任务变量覆盖 bashrc", got["PATH"], got["TOKEN"])
+	}
+}
+
+func TestParseBashEnvironment(t *testing.T) {
+	output := append([]byte(".bashrc startup output\n"+bashEnvMarker), []byte("PATH=/custom/bin\x00TOKEN=a=b\x00MULTILINE=one\ntwo\x00")...)
+	env, err := parseBashEnvironment(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"PATH=/custom/bin", "TOKEN=a=b", "MULTILINE=one\ntwo"}
+	if !slices.Equal(env, want) {
+		t.Fatalf("parseBashEnvironment = %#v，期望 %#v", env, want)
+	}
+}

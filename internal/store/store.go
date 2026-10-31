@@ -87,6 +87,7 @@ var migrations = []string{
 		last_ip TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX jobs_ended ON jobs(ended_at);`,
+	`ALTER TABLE jobs ADD COLUMN inherit_bashrc INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func Open(path string) (*Store, error) {
@@ -132,6 +133,7 @@ type Job struct {
 	CondaEnv        string            `json:"conda_env"`
 	Cmd             string            `json:"cmd"`
 	Env             map[string]string `json:"env"`
+	InheritBashrc   bool              `json:"inherit_bashrc"`
 	GPUsReq         int               `json:"gpus_req"`
 	GPUsPinned      []int             `json:"gpus_pinned"`
 	GPUsAssigned    []int             `json:"gpus_assigned"`
@@ -160,21 +162,23 @@ func (j *Job) Finished() bool {
 
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
-	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at`
+	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
+	inherit_bashrc`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanJob(r scanner) (*Job, error) {
 	var (
-		j                      Job
-		envJSON, pinned, asgn  string
-		exit                   sql.NullInt64
-		rerun, started, ended  sql.NullInt64
-		pidStart               int64
+		j                     Job
+		envJSON, pinned, asgn string
+		exit                  sql.NullInt64
+		rerun, started, ended sql.NullInt64
+		pidStart              int64
 	)
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
-		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended)
+		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
+		&j.InheritBashrc)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -210,9 +214,9 @@ func (s *Store) InsertJob(j *Job) error {
 	}
 	env, _ := json.Marshal(j.Env)
 	res, err := s.db.Exec(`INSERT INTO jobs (name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned,
-		status, rerun_of, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		status, rerun_of, created_at, inherit_bashrc) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		j.Name, j.Workdir, j.CondaEnv, j.Cmd, string(env), j.GPUsReq, JoinInts(j.GPUsPinned),
-		j.Status, j.RerunOf, j.CreatedAt)
+		j.Status, j.RerunOf, j.CreatedAt, j.InheritBashrc)
 	if err != nil {
 		return err
 	}

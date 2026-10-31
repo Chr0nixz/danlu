@@ -61,6 +61,7 @@ function JobForm({ source }: { source: Job | null }) {
   const [count, setCount] = useState(source?.gpus_req ?? 1)
   const [pinned, setPinned] = useState<number[]>(source?.gpus_pinned ?? [])
   const [envText, setEnvText] = useState(source ? Object.entries(source.env).map(([k, v]) => `${k}=${v}`).join('\n') : '')
+  const [inheritBashrc, setInheritBashrc] = useState(source?.inherit_bashrc ?? false)
   const [errors, setErrors] = useState<Partial<Record<Field, string>>>({})
 
   // 改了哪个字段就清掉哪个字段的错误
@@ -112,6 +113,7 @@ function JobForm({ source }: { source: Job | null }) {
       conda_env: condaEnv,
       cmd,
       env,
+      inherit_bashrc: inheritBashrc,
       gpus: mode === 'count' ? count : pinned.length,
       pinned_gpus: mode === 'pinned' ? pinned : [],
       rerun_of: source?.id ?? null,
@@ -255,6 +257,18 @@ function JobForm({ source }: { source: Job | null }) {
             placeholder={'例如 WANDB_PROJECT=vit\nOMP_NUM_THREADS=8'}
           />
           <FieldError id={`${ids.env}-err`}>{errors.env}</FieldError>
+        </FormRow>
+
+        <FormRow label="Bash 环境" hint="缺失或加载超时会启动失败">
+          <label className="inline-flex min-h-8 items-center gap-2 text-ui text-fg-2">
+            <input
+              type="checkbox"
+              checked={inheritBashrc}
+              onChange={(e) => setInheritBashrc(e.target.checked)}
+              className="size-4 accent-fg"
+            />
+            加载服务器 ~/.bashrc 导出的变量
+          </label>
         </FormRow>
 
         {/* 手机上提交栏吸在底部导航上方，长表单不用滚到底才能提交 */}

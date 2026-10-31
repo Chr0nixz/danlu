@@ -12,6 +12,7 @@ export interface Draft {
   conda_env: string
   cmd: string
   env: Record<string, string>
+  inherit_bashrc: boolean
   gpus: number
   pinned: number[]
   rerun_of: number | null
@@ -54,6 +55,7 @@ export function draftFrom(job: Job, from: string, to = from): Draft {
     conda_env: place?.conda_env ?? '',
     cmd: job.cmd,
     env: { ...job.env },
+    inherit_bashrc: job.inherit_bashrc ?? false,
     gpus: job.gpus_req,
     // 指定的卡号只在同一台上有意义
     pinned: same ? job.gpus_pinned : [],

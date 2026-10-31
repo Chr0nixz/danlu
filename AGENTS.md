@@ -11,7 +11,7 @@ Direction:
 - **Fallback panel.** This web panel is the fallback that exists on every server, for phones and for when the desktop client is unavailable. Controlling several servers at once is the job of the desktop client: a Tauri app in `desktop/`, built for Windows first with macOS planned. It is designed in `docs/CLIENT.md`, and milestones C1 (skeleton) and C2 (first usable version) are built; C3 is next (see "Desktop client" under Architecture). Servers never talk to each other; multi-server aggregation happens in the client.
 - **Obsolete parts of `docs/DESIGN.md`.** The §4 peer federation (peers, request forwarding, cross-node auto-assignment, the "move to another node" feature) and the §5.1 folder-picker submit with snapshot upload are dropped. Code still reaches the servers through the user's own rsync/scp. The rest of that doc is still a valid backlog; `docs/CLIENT.md` §10 has the mapping.
 - **`/api` is not frozen.** Change it freely, but in the same change update the types and request functions in `packages/core/src` and keep both `web/` and `desktop/` compiling. For an incompatible change, bump `APIVersion` in `internal/api` and `API_VERSION` in `packages/core` together. The client compares it with `/api/me`'s `api_version` to tell which servers need upgrading.
-- **Status.** Everything in the demo scope (`docs/DEMO.md`) is built and passes in WSL with fake GPUs. None of it has been verified on a real GPU server yet.
+- **Status.** Everything in the demo scope (`docs/DEMO.md`) is built and passes in WSL with fake GPUs. None of it has been verified on a real GPU server yet. In the desktop client, the HTTPS path (pinned CA, device token, log streaming), the tray popover and the notification logic were exercised against a WSL server. The SSH flows were not: adding a server, upgrades and service management have never run end to end, because the WSL test box has no sshd. Toast display and the tray icon states were also never confirmed visually.
 
 Other docs:
 
@@ -144,7 +144,10 @@ C1 and C2 are built (`docs/CLIENT.md` §11): a tray app with a main window (over
   - An upgrade scps the binary to `<exe>.new`, then runs `<exe>.new replace --json <exe>`: the new binary renames itself over the old one and restarts the service. The binary comes from the bundle's `bin/` resource dir, or during development from the repo's `dist/`.
   - `ssh::run_danlu` pipes a tiny POSIX script to `sh -s`, so the remote login shell doesn't matter. The script adds `~/bin` and `~/.local/bin` to PATH.
   - ssh runs with `BatchMode=yes` and never auto-accepts unknown host keys: the CA and the token travel over that connection.
-- **Versions.** The installer bundles `danlu-linux-amd64` and `danlu-linux-arm64`, and client and server share one version number. Upgrades go to one server first; the rest follow only after the client confirms the new version is serving and the running jobs were re-attached.
+- **Versions.** Upgrades go to one server first; the rest follow only after the client confirms the new version is serving and the running jobs were re-attached.
+  - **Target (C3 release work):** the installer bundles `danlu-linux-amd64` and `danlu-linux-arm64` under `bin/`, and client and server share one version number.
+  - **Today:** `tauri.conf.json` bundles no resources, so `ops::find_binary` falls back to the repo's `dist/`, a path compiled in from `CARGO_MANIFEST_DIR`. That fallback only works on the build machine.
+  - **Version checks:** the client compares only `api_version`. Server builds are stamped `dev-<timestamp>` unless `VERSION` is set, and the client is still `0.1.0`.
 - **Not Windows-only.** macOS comes later, so keep platform specifics behind small seams: credential store, tray versus menu bar, `Ctrl` versus `⌘` shortcuts, window controls. Don't use Mica, acrylic or vibrancy.
 - **Client-local state.**
   - In Rust `state.json`, because the tray and notifications need it: read failures, prefs and notification watermarks.
