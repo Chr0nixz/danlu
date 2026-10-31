@@ -102,12 +102,16 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 
 | 命令 | 作用 |
 |---|---|
-| `danlu info` | 显示访问地址、CA 指纹 |
-| `danlu passwd` | 修改密码（会注销所有已登录的设备） |
+| `danlu info` | 显示访问地址、CA 指纹；加 `--json` 输出给桌面客户端读取 |
+| `danlu token create --name 电脑名` | 给桌面客户端领一个设备令牌（客户端添加服务器时会自动执行） |
+| `danlu token list` / `danlu token revoke <id>` | 查看、吊销设备令牌，吊销立即生效；面板「设置」页也能吊销 |
+| `danlu passwd` | 修改密码（会注销面板上所有已登录的设备，桌面客户端的令牌不受影响） |
 | `danlu entrance --reset` | 换一个新的安全入口 |
 | `danlu port 30001` | 修改端口 |
 | `danlu cert --regen` | 公网 IP 变化后重新生成证书（需要重装 CA） |
-| `systemctl --user restart danlu` | 修改配置后重启（不影响正在跑的训练） |
+| `danlu restart` | 修改配置后重启服务（不影响正在跑的训练），等同于 `systemctl --user restart danlu` |
+| `danlu logs -n 200` | 查看服务日志的最后若干行 |
+| `danlu.new replace ~/bin/danlu` | 升级：用新程序原子替换旧程序并重启服务（桌面客户端升级时用的就是它） |
 | `journalctl --user -u danlu -f` | 查看服务日志 |
 
 数据都在 `~/.danlu/`，可以用环境变量 `DANLU_HOME` 改到别处：
@@ -136,3 +140,26 @@ bash scripts/dev-wsl.sh  # 启动演示环境（4 张假 GPU，第 3 张模拟�
 ```
 
 假 GPU 由环境变量控制：`DANLU_FAKE_GPUS=4` 表示模拟 4 张卡，`DANLU_FAKE_BUSY=3` 表示第 3 号卡被外部进程占用。
+
+### 桌面客户端（`desktop/`）
+
+另外需要 Rust（stable）。Windows 上还需要 WebView2，Windows 11 自带。
+
+```bash
+cd desktop && pnpm tauri dev              # 启动客户端（开发模式）
+cd desktop/src-tauri && cargo test        # Rust 层的单元测试
+```
+
+在客户端的「服务器」页添加服务器：填 `~/.ssh/config` 里的主机名或 `user@host`。客户端用系统自带的 ssh 登录，所以要能免密登录（密钥或 ssh-agent），而且第一次连接时已经在终端里确认过主机密钥。服务器列表存在 `%APPDATA%\dev.danlu.desktop\servers.json`，设备令牌存在 Windows 凭据管理器里。
+
+客户端常驻托盘：关闭窗口只是缩回托盘，退出在托盘图标的右键菜单里。托盘图标灰色表示空闲，朱砂色表示有任务在跑，带红点表示有没看过的失败或服务器异常；单击图标或按 `Ctrl+Alt+D`（可在设置里改）弹出迷你总览。
+
+主窗口的快捷键：
+
+- `N` 新建任务；
+- `C` 复制当前任务；
+- `/` 或 `Ctrl+K` 筛选；
+- `↑` `↓` `Enter` `Esc` 在任务列表里移动、打开和关闭详情；
+- `Ctrl+F` 搜索日志。
+
+在「服务器」页升级时，客户端上传它自带的 danlu 程序；开发时用的是仓库 `dist/` 里刚构建的 `danlu-linux-<架构>`，所以先运行 `.\scripts\build.ps1`。先升一台：客户端确认新版本在服务、升级前在跑的任务都已被接管，才出现"升级其余 N 台"。

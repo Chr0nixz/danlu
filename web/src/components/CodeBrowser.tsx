@@ -11,8 +11,8 @@ import python from 'highlight.js/lib/languages/python'
 import yaml from 'highlight.js/lib/languages/yaml'
 import 'highlight.js/styles/github-dark.css'
 import { useMemo, useState } from 'react'
-import { api, ApiError, type SnapshotMeta } from '../lib/api'
-import { bytes } from '../lib/format'
+import { ApiError, bytes, type SnapshotMeta } from '@danlu/core'
+import { api } from '../lib/api'
 import { buttonClass, Card, cx, ErrorBox, Segmented, Spinner } from './ui'
 
 hljs.registerLanguage('python', python)

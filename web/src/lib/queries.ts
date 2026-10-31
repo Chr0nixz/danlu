@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from './api'
-import { now } from './format'
+import { now } from '@danlu/core'
 
 /** "最近失败"的时间窗口：24 小时 */
 export const RECENT_SEC = 86400

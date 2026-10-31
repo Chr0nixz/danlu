@@ -7,6 +7,9 @@
 //	/api/login          → 只需要 gate
 //	其他 /api/*         → 还需要登录会话，否则 401
 //	其他路径（前端页面）  → 只需要 gate；前端发现 401 会自己跳到登录页
+//
+// 桌面客户端不用 cookie，而是带 "Authorization: Bearer <设备令牌>"：令牌有效就跳过
+// gate 和会话检查；令牌无效则和没过入口一样返回空 404，服务照样认不出来。
 package auth
 
 import (
@@ -55,9 +58,14 @@ type Auth struct {
 	opt   Options
 	store *store.Store
 	mu    sync.RWMutex // 保护 opt.PasswordHash
+
+	usedMu sync.Mutex
+	used   map[int64]time.Time // 设备令牌上次写入"最后使用时间"的时刻，避免每个请求都写库
 }
 
-func New(st *store.Store, opt Options) *Auth { return &Auth{opt: opt, store: st} }
+func New(st *store.Store, opt Options) *Auth {
+	return &Auth{opt: opt, store: st, used: map[int64]time.Time{}}
+}
 
 func HashPassword(pw string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(pw), 12)
@@ -81,12 +89,18 @@ func (a *Auth) Username() string { return a.opt.Username }
 
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/"+a.opt.Entrance {
+		tok, device := bearerToken(r)
+		switch {
+		case device:
+			if !a.deviceValid(tok, ClientIP(r)) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+		case r.URL.Path == "/"+a.opt.Entrance:
 			a.setGate(w)
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
-		}
-		if !a.gateValid(r) {
+		case !a.gateValid(r):
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -97,7 +111,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"需要 application/json"}`, http.StatusUnsupportedMediaType)
 				return
 			}
-			if r.URL.Path != "/api/login" && !a.SessionValid(r) {
+			if !device && r.URL.Path != "/api/login" && !a.SessionValid(r) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte(`{"error":"未登录或登录已过期"}`))
@@ -150,6 +164,47 @@ func hashToken(tok string) string {
 func (a *Auth) SessionValid(r *http.Request) bool {
 	c, err := r.Cookie(sessionCookie)
 	return err == nil && c.Value != "" && a.store.SessionValid(hashToken(c.Value))
+}
+
+// ---------- 设备令牌 ----------
+
+// NewDeviceToken 生成一个设备令牌并入库，返回令牌 id 和令牌本身。令牌只在这里出现一次。
+func NewDeviceToken(st *store.Store, name string) (int64, string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return 0, "", err
+	}
+	tok := "dl_" + base64.RawURLEncoding.EncodeToString(raw)
+	id, err := st.CreateDeviceToken(name, hashToken(tok))
+	return id, tok, err
+}
+
+func bearerToken(r *http.Request) (string, bool) {
+	h := r.Header.Get("Authorization")
+	if len(h) < 7 || !strings.EqualFold(h[:7], "Bearer ") {
+		return "", false
+	}
+	return strings.TrimSpace(h[7:]), true
+}
+
+func (a *Auth) deviceValid(tok, ip string) bool {
+	if tok == "" {
+		return false
+	}
+	id, err := a.store.DeviceTokenID(hashToken(tok))
+	if err != nil {
+		return false
+	}
+	a.usedMu.Lock()
+	stale := time.Since(a.used[id]) > time.Minute
+	if stale {
+		a.used[id] = time.Now()
+	}
+	a.usedMu.Unlock()
+	if stale {
+		a.store.TouchDeviceToken(id, ip)
+	}
+	return true
 }
 
 // CurrentSessionHash 用于"改密码后注销其他会话"。

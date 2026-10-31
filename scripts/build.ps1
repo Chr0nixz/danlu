@@ -12,7 +12,7 @@ Pop-Location
 # vite 会清空 dist，补回占位文件让 go:embed 在没构建前端时也能编译
 New-Item -ItemType File -Force (Join-Path $root "internal/webui/dist/.gitkeep") | Out-Null
 
-$version = "dev-" + (Get-Date -Format "yyyyMMdd-HHmm")
+$version = if ($env:VERSION) { $env:VERSION } else { "dev-" + (Get-Date -Format "yyyyMMdd-HHmm") } # 发布时由 VERSION 环境变量指定
 $env:GOOS = "linux"; $env:GOARCH = $Arch; $env:CGO_ENABLED = "0"
 go build -C $root -trimpath -ldflags "-s -w -X main.version=$version" -o "dist/danlu-linux-$Arch" ./cmd/danlu
 $code = $LASTEXITCODE

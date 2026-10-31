@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { api, type GPU } from '../lib/api'
-import { mb } from '../lib/format'
+import { mb, type GPU } from '@danlu/core'
+import { api } from '../lib/api'
 import { Alert, Card, cx, ErrorBox, Meter, Skeleton, StatusIcon } from './ui'
 
 export function useGpus() {

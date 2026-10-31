@@ -5,8 +5,8 @@ import { Link } from 'react-router'
 import { GpuGrid, gpuBusy, shortName, useGpus } from '../components/GpuGrid'
 import { JobList } from '../components/JobRow'
 import { Card, cx, ErrorBox, SkeletonRows, StatusIcon } from '../components/ui'
-import { api, type Job } from '../lib/api'
-import { now } from '../lib/format'
+import { now, type Job } from '@danlu/core'
+import { api } from '../lib/api'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
 
 function Group({ icon, title, count, extra, children }: { icon: ReactNode; title: string; count?: number; extra?: ReactNode; children: ReactNode }) {

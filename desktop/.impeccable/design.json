@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-31T15:00:00Z",
+  "title": "Design System: 丹炉 桌面客户端",
+  "extensions": {
+    "colorMeta": {
+      "ink-light": { "role": "primary", "displayName": "反色墨 Inverted Ink", "canonical": "#16171b", "note": "深色模式为 ink-dark #eeeef1，主按钮字色互换", "tonalRamp": ["#0a0b0d", "#16171b", "#2a2c32", "#4a4d55", "#6f727a", "#a3a5ad", "#d9dadf", "#f6f7f9"] },
+      "run-light": { "role": "secondary", "displayName": "运行蓝 Run Blue", "canonical": "#1f6fe0", "note": "深色模式 #5aa7ff", "tonalRamp": ["#0b2447", "#0f3a75", "#1f6fe0", "#3d86ea", "#5aa7ff", "#8cc3ff", "#bfdcff", "#e8f2ff"] },
+      "ok-light": { "role": "secondary", "displayName": "成功绿 OK Green", "canonical": "#15803d", "note": "深色模式 #4fd18b", "tonalRamp": ["#0b3a1c", "#11592c", "#15803d", "#22a456", "#4fd18b", "#86e3b0", "#bff1d4", "#eafaf1"] },
+      "fail-light": { "role": "secondary", "displayName": "失败红 Fail Red", "canonical": "#dc2626", "note": "深色模式 #ff6b6b", "tonalRamp": ["#4a0d0d", "#7f1414", "#dc2626", "#ef4444", "#ff6b6b", "#ff9b9b", "#ffcaca", "#fff0f0"] },
+      "warn-light": { "role": "secondary", "displayName": "外部琥珀 External Amber", "canonical": "#b45309", "note": "深色模式 #f5b14c", "tonalRamp": ["#3d1d03", "#6b3306", "#b45309", "#d9800f", "#f5b14c", "#f8cb85", "#fbe3bd", "#fff6e8"] },
+      "cinnabar": { "role": "tertiary", "displayName": "朱砂 Cinnabar", "canonical": "#e5482d", "note": "只用于火焰标志", "tonalRamp": ["#4a1208", "#7d1f0f", "#b8341c", "#e5482d", "#ec6c55", "#f29a8a", "#f8c8bf", "#fdeeeb"] },
+      "window-light": { "role": "neutral", "displayName": "窗口底 Window", "canonical": "#e8eaee", "note": "深色 #0a0b0d" },
+      "panel-light": { "role": "neutral", "displayName": "内容面板 Panel", "canonical": "#ffffff", "note": "深色 #121317" },
+      "card-light": { "role": "neutral", "displayName": "详情卡片 Card", "canonical": "#f6f7f9", "note": "深色 #18191e" },
+      "hover-light": { "role": "neutral", "displayName": "悬停 Hover", "canonical": "#eff0f3", "note": "深色 #1e2026" },
+      "terminal-dark": { "role": "neutral", "displayName": "日志终端 Terminal", "canonical": "#0b0c0e", "note": "浅色主题下也是深色 #111215" }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Title", "purpose": "右侧详情的任务名、表单标题" },
+      "heading": { "displayName": "Heading", "purpose": "页面名、卡片和对话框标题" },
+      "body": { "displayName": "Body", "purpose": "界面正文和按钮" },
+      "data": { "displayName": "Data", "purpose": "编号、命令、路径、进度、时长，等宽对齐" },
+      "micro": { "displayName": "Micro", "purpose": "卡号、显存、快捷键、计数" }
+    },
+    "shadows": [
+      { "name": "panel-light", "value": "0 1px 2px rgb(0 0 0 / 0.04), 0 4px 16px rgb(0 0 0 / 0.04)", "purpose": "内容面板，浅色主题" },
+      { "name": "panel-dark", "value": "0 1px 2px rgb(0 0 0 / 0.3)", "purpose": "内容面板，深色主题" },
+      { "name": "float-light", "value": "0 8px 28px rgb(0 0 0 / 0.14), 0 1px 3px rgb(0 0 0 / 0.08)", "purpose": "下拉菜单、对话框、提示条" },
+      { "name": "float-dark", "value": "0 10px 32px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.06)", "purpose": "浮起元素，深色主题" }
+    ],
+    "motion": [
+      { "name": "hover", "value": "120ms", "purpose": "按钮、任务行的悬停底色过渡" },
+      { "name": "rise", "value": "150ms ease-out, translateY(4px) → 0", "purpose": "切换任务时右侧详情淡入上移" },
+      { "name": "pop", "value": "160ms ease-out, scale(0.98) → 1", "purpose": "托盘浮窗、下拉菜单、对话框出现" },
+      { "name": "flash", "value": "1.2s ease-out", "purpose": "任务状态变化时整行用新状态色闪一下" },
+      { "name": "data", "value": "300ms", "purpose": "热力色、进度条、小曲线新数据推入" },
+      { "name": "breathe", "value": "2s ease-in-out infinite", "purpose": "日志的实时圆点" }
+    ],
+    "breakpoints": [
+      { "name": "list-compact", "value": "640px", "purpose": "任务列表容器窄于此时收起项目列" },
+      { "name": "list-tight", "value": "540px", "purpose": "再窄时收起卡号列" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "反色墨实心按钮，每屏最多一个，带快捷键提示。",
+      "html": "<button class=\"ds-btn-primary\">新建任务 <kbd class=\"ds-kbd\">N</kbd></button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: #16171b; color: #fff; font: 500 12.5px/1 'Geist Variable', system-ui, sans-serif; cursor: default; transition: opacity 120ms; } .ds-btn-primary:hover { opacity: 0.9; } .ds-btn-primary:focus-visible { outline: 2px solid #6f727a; outline-offset: 1px; } .ds-kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 4px; border: 1px solid rgb(255 255 255 / 0.3); border-radius: 4px; font: 10.5px 'Geist Mono Variable', monospace; color: rgb(255 255 255 / 0.7); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "面板底加细边的次按钮。",
+      "html": "<button class=\"ds-btn-secondary\">复制</button>",
+      "css": ".ds-btn-secondary { height: 28px; padding: 0 10px; border: 1px solid rgb(0 0 0 / 0.12); border-radius: 6px; background: #fff; color: #16171b; font: 500 12.5px/1 'Geist Variable', system-ui, sans-serif; transition: background-color 120ms; } .ds-btn-secondary:hover { background: #eff0f3; } .ds-btn-secondary:focus-visible { outline: 2px solid #6f727a; outline-offset: 1px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "和次按钮同形，只有文字是失败红；总是配确认对话框。",
+      "html": "<button class=\"ds-btn-danger\">取消</button>",
+      "css": ".ds-btn-danger { height: 28px; padding: 0 10px; border: 1px solid rgb(0 0 0 / 0.12); border-radius: 6px; background: #fff; color: #dc2626; font: 500 12.5px/1 'Geist Variable', system-ui, sans-serif; transition: background-color 120ms; } .ds-btn-danger:hover { background: #eff0f3; }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "28px 输入框，路径和命令用等宽。",
+      "html": "<input class=\"ds-input\" placeholder=\"/home/you/code/vit\">",
+      "css": ".ds-input { height: 28px; width: 260px; padding: 0 8px; border: 1px solid rgb(0 0 0 / 0.12); border-radius: 6px; background: #fff; color: #16171b; font: 11.5px 'Geist Mono Variable', monospace; outline: none; transition: border-color 120ms; } .ds-input::placeholder { color: #6f727a; } .ds-input:focus { border-color: #6f727a; }"
+    },
+    {
+      "name": "Job Row",
+      "kind": "custom",
+      "refersTo": "job-row",
+      "description": "30px 单行任务：状态、编号、项目、名称、卡号、进度、时间、未读红点。",
+      "html": "<div class=\"ds-row\"><span class=\"ds-dot-run\"></span><span class=\"ds-mono\">gpu1-42</span><span class=\"ds-muted\">vit</span><span class=\"ds-name\">vit-b16 lr3e-4</span><span class=\"ds-mono ds-muted\">0-3</span><span class=\"ds-bar\"><i style=\"width:62%\"></i></span><span class=\"ds-mono ds-run\">62%</span><span class=\"ds-mono ds-muted\">2小时10分</span></div>",
+      "css": ".ds-row { display: flex; align-items: center; gap: 12px; height: 30px; padding: 0 8px; border-radius: 6px; font: 12.5px 'Geist Variable', system-ui, sans-serif; color: #16171b; transition: background-color 120ms; } .ds-row:hover { background: #eff0f3; } .ds-mono { font: 11.5px 'Geist Mono Variable', monospace; font-variant-numeric: tabular-nums; } .ds-muted { color: #6f727a; } .ds-name { flex: 1; font-weight: 500; } .ds-run { color: #1f6fe0; } .ds-dot-run { width: 12px; height: 12px; border: 2px solid #1f6fe0; border-right-color: transparent; border-radius: 50%; } .ds-bar { width: 96px; height: 4px; border-radius: 99px; background: #eff0f3; overflow: hidden; } .ds-bar i { display: block; height: 100%; background: #1f6fe0; border-radius: 99px; }"
+    },
+    {
+      "name": "GPU Heat Cell",
+      "kind": "custom",
+      "refersTo": "gpu-cell",
+      "description": "空卡条的格子：底色按利用率混入运行蓝，外部进程占用时换成琥珀并描边。",
+      "html": "<div class=\"ds-cell\" style=\"--u: 62\"><div><span class=\"ds-i\">0</span> <b>gpu1-42</b> <span class=\"ds-u\">62%</span></div><div class=\"ds-m\">9.9 / 24 GB</div></div> <div class=\"ds-cell ds-ext\"><div><span class=\"ds-i\">3</span> <b>alice</b> <span class=\"ds-u\">75%</span></div><div class=\"ds-m\">7.6 / 24 GB</div></div>",
+      "css": ".ds-cell { display: inline-block; width: 130px; padding: 6px 8px 4px; border-radius: 6px; background: color-mix(in srgb, #1f6fe0 calc(4% + var(--u) * 0.3%), #f6f7f9); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.07); font: 11px 'Geist Mono Variable', monospace; color: #16171b; transition: background-color 300ms; } .ds-cell b { font-weight: 400; } .ds-i, .ds-m { color: #6f727a; } .ds-u { float: right; font-weight: 500; } .ds-ext { background: color-mix(in srgb, #b45309 14%, #f6f7f9); box-shadow: inset 0 0 0 1px color-mix(in srgb, #b45309 60%, transparent); } .ds-ext b { color: #b45309; }"
+    },
+    {
+      "name": "Nav Item",
+      "kind": "nav",
+      "refersTo": "nav-item-active",
+      "description": "左侧窄导航的图标按钮；当前页是面板底加细描边。",
+      "html": "<button class=\"ds-nav ds-nav-on\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><rect x=\"3\" y=\"3\" width=\"7\" height=\"9\" rx=\"1\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"5\" rx=\"1\"/><rect x=\"14\" y=\"12\" width=\"7\" height=\"9\" rx=\"1\"/><rect x=\"3\" y=\"16\" width=\"7\" height=\"5\" rx=\"1\"/></svg></button><button class=\"ds-nav\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><rect x=\"2\" y=\"2\" width=\"20\" height=\"8\" rx=\"2\"/><rect x=\"2\" y=\"14\" width=\"20\" height=\"8\" rx=\"2\"/></svg></button>",
+      "css": ".ds-nav { display: inline-grid; place-items: center; width: 32px; height: 32px; border: none; border-radius: 6px; background: transparent; color: #6f727a; transition: background-color 120ms, color 120ms; } .ds-nav:hover { background: #eff0f3; color: #16171b; } .ds-nav-on { background: #fff; color: #16171b; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.12); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "炉前控制台",
+    "overview": "一块安静的操作台，开着就在 IDE 旁边，只在出事时用颜色叫你。做工参照 Linear、Raycast，但更收敛：没有渐变、没有毛玻璃、没有彩色主按钮。结构完全由中性灰的底色台阶和发丝细边撑起来，四层：窗口底、内容面板、详情卡片、日志终端。颜色只有两种用途：任务和卡的状态，以及火焰标志的朱砂。它在 Windows 和以后的 macOS 上长得一样。窗口用纯色，不用云母、亚克力或半透明；标题栏自己画，平台差异只剩窗口按钮的位置。信息密度优先：任务一行 30px，数字一律等宽对齐，空卡条直接把每张卡的利用率、占用者和 5 分钟曲线摊开。主题跟随系统，深浅两套同样完整，日志终端在两种主题下都是深色。",
+    "keyCharacteristics": [
+      "四层底色台阶 + 发丝细边，投影只托住浮起的面板",
+      "颜色只说状态：运行蓝、成功绿、失败红、外部占卡琥珀；朱砂只给火焰",
+      "反色墨主按钮，选中项是底色加一圈内描边",
+      "Geist / Geist Mono 随安装包打包，编号、数字、命令、路径、日志用等宽",
+      "热力色块的空卡条，失败未读的红点，托盘图标三态",
+      "动效克制：转圈、呼吸、状态闪一下、详情淡入；系统\"减少动态效果\"时全关"
+    ],
+    "rules": [
+      { "name": "The Status-Only Color Rule", "body": "颜色只表示状态。选中项、主按钮、导航高亮都用中性色；想强调就用字重、底色台阶或细边。", "section": "colors" },
+      { "name": "The One Flame Rule", "body": "朱砂只出现在火焰标志上，从不用于按钮、链接、背景或强调。", "section": "colors" },
+      { "name": "The Paired Theme Rule", "body": "每个颜色都有深浅两个值，一起改。弱文字在两套主题下都要在面板底上达到 4.5:1。", "section": "colors" },
+      { "name": "The Data-Is-Mono Rule", "body": "编号、数字、命令、路径、日志一律等宽，并且数字等宽对齐，列才能竖着读。", "section": "typography" },
+      { "name": "The Steps-Not-Shadows Rule", "body": "区分层次先用底色台阶和细边；投影只给浮在内容上面的东西。", "section": "elevation" }
+    ],
+    "dos": [
+      "Do 用底色台阶（窗口底 → 面板 → 卡片 → 终端）和发丝细边分层。",
+      "Do 让编号、数字、命令、路径、日志用 Geist Mono 并等宽对齐数字。",
+      "Do 每个颜色同时给深浅两个值，弱文字在面板底上保持 4.5:1 以上。",
+      "Do 给每个高频操作配快捷键，并在按钮上用 Kbd 标出来。",
+      "Do 在系统开启\"减少动态效果\"时关掉所有动画和过渡。"
+    ],
+    "donts": [
+      "Don't 用彩色做选中、主按钮或导航高亮；颜色只说状态。",
+      "Don't 在火焰标志以外的地方用朱砂或任何橙色。",
+      "Don't 用云母、亚克力、毛玻璃或半透明窗口。",
+      "Don't 给详情卡片、按钮加投影或高光。",
+      "Don't 为了好看降低信息密度：任务保持一行，空卡条保持展开。",
+      "Don't 给取消任务这类不能撤回的操作配快捷键；必须点按钮并确认。"
+    ]
+  }
+}

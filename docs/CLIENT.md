@@ -1,7 +1,7 @@
-# Danlu 桌面客户端 · 方案草稿 v0.6
+# Danlu 桌面客户端 · 方案 v0.8
 
 > 常驻托盘的多服务器控制台，外加服务器运维工具。
-> 状态：设计中，带 ❓ 的是待确认项。变更记录见文末。
+> 状态：C1（打通骨架）和 C2（第一版）已完成，下一步是 C3。带 ❓ 的是待确认项。变更记录见文末。
 
 ## 1. 定位
 
@@ -190,7 +190,7 @@
 
 **键盘优先**：常用操作都有快捷键（第 5.5 节），C3 再加 `Ctrl+K` 命令面板。
 
-正式的 `desktop/DESIGN.md` 由 impeccable 以本节为输入生成（第 9.2 节）。
+本节是 C2 之前定下的方向。C2 照它做完界面后，由 impeccable 从实际代码生成了 `desktop/DESIGN.md`，以后以那份为准；弱文字色在那里调到了 4.5:1 的对比度（第 9.2 节）。
 
 ### 5.5 键盘（C2）
 
@@ -234,7 +234,8 @@
   - 服务器异常：连不上、卡被外部进程占用、磁盘快满、`nvidia-smi` 报错。
 - **外部进程占卡只在影响你时才报**：外部进程出现在你的任务正在用的卡上（可能抢显存导致 OOM），或者挡住了你排队的任务。和别人共用服务器时，平常的占卡不会打扰你，只在空卡条上标出来。
 - **同一件事只报一次**：服务器连续 30 秒连不上才报，只报一次，恢复后再报一条"已恢复"；同一个外部进程不重复报。
-- 点通知会打开主窗口，定位到对应的任务或服务器。
+- 点通知会打开主窗口，定位到对应的任务或服务器。做法：点通知会再启动一次客户端，单实例插件把它转给已经在运行的那个，后者定位到 10 分钟内最近一条通知指向的地方。开发版的通知以 PowerShell 的名义发出，能否弹出取决于系统的专注模式。
+- 轮询、判断该不该通知、托盘图标都在 Rust 层：窗口隐藏后网页的定时器会被降频，放在界面里就收不到通知。已读状态和"每台通知到哪个结束时间"也存在 Rust 层（应用数据目录的 `state.json`），所以重启客户端不会重复通知。
 - **已读**：在右侧分栏打开过的失败任务算已读，也可以"全部标为已读"。
 - 电脑睡眠或关机期间失败的任务，醒来后合成一条通知补报。
 - **刷新频率**：主窗口打开时每 3 秒刷新一次；只在托盘时每 10 秒一次，所以通知最多晚 10 秒左右。
@@ -242,16 +243,16 @@
 
 ## 8. 服务器端要改的
 
-| 改动 | 原因 |
-|---|---|
-| 设备令牌：`danlu token create / list / revoke`；请求带 `Authorization: Bearer` 头，令牌有效就跳过安全入口检查，无效仍返回 404 | 客户端不走 cookie 登录 |
-| 面板设置页列出设备令牌和最后使用时间，可以吊销 | 电脑丢了时，用手机打开面板就能吊销 |
-| `danlu info --json` | 客户端通过 SSH 读取地址、安全入口、CA 指纹、版本 |
-| `danlu doctor --json` | 机器体检 |
-| `/api/me` 增加 `api_version` | 各台版本不一致时提示 |
-| 上报磁盘余量和 GPU 报错 | "服务器异常"通知 |
-| 任务列表支持按时间游标翻页（`before=<时间>`） | 历史页要把多台服务器的结果按时间合并，页码翻页做不到 |
-| ❓ `/api/events` 事件流 | 把任务状态变化推给客户端，不用轮询。2–3 台服务器轮询也够用，可以以后再加 |
+| 改动 | 原因 | 状态 |
+|---|---|---|
+| 设备令牌：`danlu token create / list / revoke`；请求带 `Authorization: Bearer` 头，令牌有效就跳过安全入口检查，无效仍返回 404 | 客户端不走 cookie 登录 | C1 已完成 |
+| 面板设置页列出设备令牌和最后使用时间，可以吊销 | 电脑丢了时，用手机打开面板就能吊销 | C1 已完成 |
+| `danlu info --json`：地址、HTTPS 模式、CA 证书和指纹、版本、程序路径 | 客户端通过 SSH 读取 | C1 已完成 |
+| `danlu doctor --json` | 机器体检 | C3 |
+| `/api/me` 增加 `api_version` | 各台版本不一致时提示 | C1 已完成 |
+| 上报磁盘余量和 GPU 报错 | "服务器异常"通知 | GPU 报错已有（`/api/gpus` 的 `error`）；磁盘余量 C3 |
+| 任务列表按结束时间游标翻页：`order=ended&before=<结束时间>&before_id=<id>` | 历史页要把多台服务器的结果按时间合并，页码翻页做不到。结束时间只精确到秒，所以游标带上 id | C1 已完成 |
+| ❓ `/api/events` 事件流 | 把任务状态变化推给客户端，不用轮询。2–3 台服务器轮询也够用，可以以后再加 | 暂不做 |
 
 ## 9. 技术栈与仓库结构
 
@@ -305,20 +306,21 @@ web/DESIGN.md                            # 面板的视觉系统
 web/.impeccable/design.json              # 面板 DESIGN.md 的 sidecar
 web/.impeccable/surfaces/web-src.md      # 面板的方向约定，primary_target: "src"
 web/.impeccable/critique/                # 面板的评审记录
-desktop/PRODUCT.md                       # 待建：客户端的产品定位，替换根目录那份
-desktop/DESIGN.md                        # 待建：客户端的视觉系统，C2 由 impeccable 生成
-desktop/.impeccable/surfaces/*.md        # 待建：主窗口、托盘浮窗各一份方向约定
+desktop/PRODUCT.md                       # 客户端的产品定位，替换根目录那份（C1 写成）
+desktop/DESIGN.md                        # 客户端的视觉系统（C2 生成）
+desktop/.impeccable/design.json          # 客户端 DESIGN.md 的 sidecar
+desktop/.impeccable/surfaces/desktop-src.md  # 客户端的方向约定，primary_target: "src"（主窗口和托盘浮窗共用一份）
 ```
 
 **不要把界面约定或 `DESIGN.md` 放回仓库根目录**：根目录的界面约定会被忽略；根目录的 `DESIGN.md` 则会被 `desktop/` 继承，impeccable 会把它当成客户端已有的设计去延续。`.gitignore` 里 impeccable 的临时文件规则都以 `**/` 开头，对每个应用的 `.impeccable/` 都生效。
 
-检查命令：`impeccable doctor --json --target web/src` 应该找到 `web/DESIGN.md` 和面板的界面约定；`--target desktop/src` 在 C2 之前找不到 `DESIGN.md`，这是正常的。
+检查命令：`impeccable doctor --json --target web/src` 应该找到 `web/DESIGN.md` 和面板的界面约定；`--target desktop/src` 应该找到 `desktop/PRODUCT.md`、`desktop/DESIGN.md` 和客户端的界面约定。
 
 **使用习惯**：
 
 - 每次调用都写明目录，比如"调整 `web/src` 的任务列表""改 `desktop/src` 的托盘浮窗"。不写目录时，impeccable 按仓库根目录处理。
-- C1 期间用 `/impeccable init` 针对 `desktop/` 写出 `desktop/PRODUCT.md`，内容取自本文第 1、2 节。根目录那份写的是"Web 面板、手机和电脑同等重要"，不适合客户端。C1 不跑视觉流程。
-- C2 开始时对 `desktop/src` 跑新设计流程，以第 5.4 节定下的风格为输入。这时 `desktop/` 没有 `DESIGN.md`，impeccable 会按这套风格出界面稿，方向写进 `desktop/.impeccable/surfaces/`，做完生成 `desktop/DESIGN.md`。
+- `desktop/PRODUCT.md` 已在 C1 用 `/impeccable init` 写成，内容取自本文第 1–3 节。根目录那份写的是"Web 面板、手机和电脑同等重要"，不适合客户端。
+- C2 对 `desktop/src` 跑了新设计流程。方向是第 5.4 节里用户已经定下的，按 impeccable 的规则"用户钉死的方向优先于抽签"，没有再抽方向；本机没有图像生成，走的是 code-led。方向约定写在 `desktop/.impeccable/surfaces/desktop-src.md`，做完后从实际代码生成了 `desktop/DESIGN.md`。以后对客户端界面的改动按 `desktop/DESIGN.md` 来。
 
 ## 10. 对 DESIGN.md 的影响
 
@@ -331,13 +333,13 @@ desktop/.impeccable/surfaces/*.md        # 待建：主窗口、托盘浮窗各�
 
 ## 11. 里程碑
 
-**C1 · 打通骨架**（朴素界面，只验证技术链路）
+**C1 · 打通骨架**（朴素界面，只验证技术链路）：已完成（2026-10-31）
 - 服务器：设备令牌、`danlu info --json`、`api_version`、按时间游标翻页
 - 客户端：Tauri 骨架、`packages/core`、通过 SSH 添加**已装好 danlu 的**服务器、固定证书的 HTTPS
 - 界面：总览（空卡条 + 任务列表）、右侧分栏的任务详情和实时日志
 - 仓库：用 `/impeccable init` 写出 `desktop/PRODUCT.md`。pnpm workspace 移到根目录、面板的 impeccable 文件搬进 `web/`，这两件已经在 C1 之前做完（第 9.2 节）
 
-**C2 · 第一版**（能日常用起来）
+**C2 · 第一版**（能日常用起来）：已完成（2026-10-31）
 - 视觉设计：以第 5.4 节的风格为输入，对 `desktop/src` 跑 impeccable 的新设计流程（第 9.2 节），先出界面稿，再改造 C1 的界面，最后生成 `desktop/DESIGN.md`
 - 托盘：三种状态、迷你总览、全局快捷键
 - 通知：任务失败；服务器异常中的连不上、卡被外部进程占用、`nvidia-smi` 报错（这三项现有接口已经能拿到）；醒来后补报
@@ -355,12 +357,12 @@ desktop/.impeccable/surfaces/*.md        # 待建：主窗口、托盘浮窗各�
 
 ## 12. 待确认 ❓（括号里是默认做法）
 
-1. 服务器连不上时，总览里怎么显示？（保留最后一次拿到的状态，整体变灰，标出"5 分钟前"）
-2. 界面稿的具体数值（第 5.4 节是示意稿里的取值，C2 出正式界面稿时再细调）
-3. 仓库公开还是私有，决定自动更新的文件放在哪（第 9.1 节；C3 之前定下来即可）
+1. 仓库公开还是私有，决定自动更新的文件放在哪（第 9.1 节；C3 之前定下来即可）
 
 ---
 变更记录
+- v0.8（2026-10-31）：完成 C2。客户端：按第 5.4 节的风格重做界面（自绘标题栏、热力色块和 5 分钟小曲线、Geist 字体），生成 `desktop/DESIGN.md`；轮询、通知、托盘三态、迷你总览、全局快捷键、关闭缩回托盘、开机自启、单实例都在 Rust 层；提交、取消、重跑、复制（含复制到另一台）、命令历史、代码快照、历史页、日志搜索和下载；服务器页的批量升级（先升一台、自动检查）和服务管理；设置页的通知、自启、快捷键、已登录的设备。服务器端新增 `danlu restart`、`danlu logs`、`danlu replace`、`danlu passwd --password-stdin`。第 12 节的前两项按默认做法定下。
+- v0.7（2026-10-31）：完成 C1：服务器端的设备令牌、`info --json`、`api_version`、按结束时间游标翻页；`packages/core`；客户端骨架（通过 SSH 添加服务器、固定 CA 的 HTTPS、总览、右侧详情和实时日志）；`desktop/PRODUCT.md`。第 8 节加上各项的状态。
 - v0.6（2026-10-31）：完成 C1 前的仓库调整：pnpm workspace 和锁文件移到根目录，面板的 `DESIGN.md` 和 impeccable 文件搬进 `web/`；impeccable 的多应用模式只靠 pnpm workspace 声明，不用 `projectRoots`（第 9.2 节）。
 - v0.5（2026-10-31）：定下视觉风格：和平台无关的现代开发者工具，取代原先的 Windows 11 Fluent 方向（第 5.4 节）；平台改为先做 Windows、以后支持 macOS；impeccable 的多应用模式也可以用 `projectRoots` 提前打开。
 - v0.4（2026-10-31）：新增第 9.2 节，说明面板和客户端如何分别使用 impeccable，以及 C1 要一起完成的搬迁。

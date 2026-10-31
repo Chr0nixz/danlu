@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { JobList, JobListHeader } from '../components/JobRow'
 import { Button, buttonClass, Card, ErrorBox, Input, Kbd, Segmented, SkeletonRows, StatusIcon, Empty } from '../components/ui'
-import { api, type JobStatus } from '../lib/api'
-import { now } from '../lib/format'
+import { now, type JobStatus } from '@danlu/core'
+import { api } from '../lib/api'
 import { RECENT_SEC } from '../lib/queries'
 
 const filters: { value: '' | JobStatus; label: string }[] = [

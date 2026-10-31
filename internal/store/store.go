@@ -78,6 +78,15 @@ var migrations = []string{
 		path TEXT PRIMARY KEY,
 		last_used_at INTEGER NOT NULL
 	);`,
+	`CREATE TABLE device_tokens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		token_hash TEXT NOT NULL UNIQUE,
+		created_at INTEGER NOT NULL,
+		last_used_at INTEGER,
+		last_ip TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX jobs_ended ON jobs(ended_at);`,
 }
 
 func Open(path string) (*Store, error) {
@@ -239,8 +248,15 @@ type JobFilter struct {
 	Statuses   []string
 	Query      string
 	EndedAfter int64 // 只要这个时间（unix 秒）之后结束的任务；0 表示不限
-	Limit      int
-	Offset     int
+	// ByEnded 为 true 时只要已结束的任务，按结束时间从新到旧排；否则按 id 从新到旧。
+	// 多台服务器的历史要按结束时间合并，所以这种排序配合 Before 游标翻页，不用页码。
+	ByEnded bool
+	// Before、BeforeID 是上一页最后一条的结束时间和 id，只在 ByEnded 时生效。
+	// 结束时间只精确到秒，同一秒结束的任务再按 id 区分。BeforeID 为 0 时取这一秒之前的。
+	Before   int64
+	BeforeID int64
+	Limit    int
+	Offset   int
 }
 
 func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
@@ -261,18 +277,35 @@ func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
 		where = append(where, "ended_at >= ?")
 		args = append(args, f.EndedAfter)
 	}
-	cond := ""
-	if len(where) > 0 {
-		cond = " WHERE " + strings.Join(where, " AND ")
+	order := " ORDER BY id DESC"
+	if f.ByEnded {
+		where = append(where, "ended_at IS NOT NULL")
+		order = " ORDER BY ended_at DESC, id DESC"
 	}
+	cond := func(w []string) string {
+		if len(w) == 0 {
+			return ""
+		}
+		return " WHERE " + strings.Join(w, " AND ")
+	}
+	// total 不算游标：它是符合筛选条件的总数，不随翻页变化
 	var total int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM jobs"+cond, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM jobs"+cond(where), args...).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+	if f.ByEnded && f.Before > 0 {
+		if f.BeforeID > 0 {
+			where = append(where, "(ended_at < ? OR (ended_at = ? AND id < ?))")
+			args = append(args, f.Before, f.Before, f.BeforeID)
+		} else {
+			where = append(where, "ended_at < ?")
+			args = append(args, f.Before)
+		}
 	}
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
-	jobs, err := s.queryJobs("SELECT "+jobCols+" FROM jobs"+cond+" ORDER BY id DESC LIMIT ? OFFSET ?",
+	jobs, err := s.queryJobs("SELECT "+jobCols+" FROM jobs"+cond(where)+order+" LIMIT ? OFFSET ?",
 		append(args, f.Limit, f.Offset)...)
 	return jobs, total, err
 }
@@ -343,6 +376,73 @@ func (s *Store) DeleteSessionsExcept(keepHash string) error {
 func (s *Store) PurgeExpiredSessions() error {
 	_, err := s.db.Exec("DELETE FROM sessions WHERE expires_at<=?", time.Now().Unix())
 	return err
+}
+
+// ---------- 设备令牌 ----------
+
+// DeviceToken 是发给桌面客户端的长期令牌。库里只存哈希，令牌本身只在创建时显示一次。
+type DeviceToken struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	CreatedAt  int64  `json:"created_at"`
+	LastUsedAt *int64 `json:"last_used_at"`
+	LastIP     string `json:"last_ip"`
+}
+
+func (s *Store) CreateDeviceToken(name, tokenHash string) (int64, error) {
+	res, err := s.db.Exec("INSERT INTO device_tokens (name, token_hash, created_at) VALUES (?,?,?)",
+		truncate(name, 100), tokenHash, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// DeviceTokenID 返回令牌哈希对应的 id；没有这个令牌（或已吊销）时返回 ErrNotFound。
+func (s *Store) DeviceTokenID(tokenHash string) (int64, error) {
+	var id int64
+	err := s.db.QueryRow("SELECT id FROM device_tokens WHERE token_hash=?", tokenHash).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return id, err
+}
+
+func (s *Store) TouchDeviceToken(id int64, ip string) {
+	_, _ = s.db.Exec("UPDATE device_tokens SET last_used_at=?, last_ip=? WHERE id=?", time.Now().Unix(), ip, id)
+}
+
+func (s *Store) ListDeviceTokens() ([]DeviceToken, error) {
+	rows, err := s.db.Query("SELECT id, name, created_at, last_used_at, last_ip FROM device_tokens ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DeviceToken{}
+	for rows.Next() {
+		var (
+			t    DeviceToken
+			used sql.NullInt64
+		)
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt, &used, &t.LastIP); err != nil {
+			return nil, err
+		}
+		if used.Valid {
+			t.LastUsedAt = &used.Int64
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RevokeDeviceToken 直接删除令牌，返回被删令牌的名字。
+func (s *Store) RevokeDeviceToken(id int64) (string, error) {
+	var name string
+	err := s.db.QueryRow("DELETE FROM device_tokens WHERE id=? RETURNING name", id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return name, err
 }
 
 // ---------- 登录失败计数 ----------

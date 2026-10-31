@@ -30,6 +30,9 @@ import (
 	"danlu/internal/tlsutil"
 )
 
+// APIVersion 是接口的版本号。接口有不兼容的改动时加一，桌面客户端据此提示哪台服务器需要升级。
+const APIVersion = 1
+
 type Server struct {
 	Cfg     *config.Config
 	Paths   config.Paths
@@ -73,6 +76,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings/ca.crt", s.caCert)
 	mux.HandleFunc("POST /api/settings/password", s.changePassword)
 	mux.HandleFunc("GET /api/audit", s.audit)
+	mux.HandleFunc("GET /api/tokens", s.listTokens)
+	mux.HandleFunc("POST /api/tokens/{id}/revoke", s.revokeToken)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, 404, "接口不存在") })
 	mux.Handle("/", s.spa())
@@ -163,7 +168,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
-	writeJSON(w, 200, map[string]string{"username": s.Auth.Username(), "version": s.Version, "hostname": host})
+	writeJSON(w, 200, map[string]any{"username": s.Auth.Username(), "version": s.Version, "api_version": APIVersion, "hostname": host})
 }
 
 // ---------- GPU ----------
@@ -361,6 +366,10 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		f.Statuses = strings.Split(st, ",")
 	}
 	f.EndedAfter, _ = strconv.ParseInt(q.Get("ended_after"), 10, 64)
+	// order=ended：只要已结束的，按结束时间倒序，用 before / before_id 游标翻页
+	f.ByEnded = q.Get("order") == "ended"
+	f.Before, _ = strconv.ParseInt(q.Get("before"), 10, 64)
+	f.BeforeID, _ = strconv.ParseInt(q.Get("before_id"), 10, 64)
 	size, _ := strconv.Atoi(q.Get("size"))
 	if size <= 0 || size > 200 {
 		size = 20
@@ -664,6 +673,37 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"entries": entries})
+}
+
+// ---------- 设备令牌 ----------
+
+// 令牌只能在服务器上用 danlu token create 创建：能 SSH 登录才说明是本人。面板这里只能查看和吊销。
+func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
+	toks, err := s.Store.ListDeviceTokens()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"tokens": toks})
+}
+
+func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "令牌 id 无效")
+		return
+	}
+	name, err := s.Store.RevokeDeviceToken(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, 404, "令牌不存在")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.Store.Audit(auth.ClientIP(r), "token_revoke", fmt.Sprintf("#%d %s", id, name))
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // ---------- 前端 ----------

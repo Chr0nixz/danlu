@@ -2,8 +2,7 @@ import { CircleAlert, CircleCheck, CircleDashed, CircleSlash, CircleX, Info, Loa
 import { useEffect, useId, useRef, type AriaRole, type ButtonHTMLAttributes, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
-import type { Job, JobStatus } from '../lib/api'
-import { jobStatusText, statusLabel } from '../lib/format'
+import { jobStatusText, statusLabel, type Job, type JobStatus } from '@danlu/core'
 
 export function cx(...c: (string | false | null | undefined)[]) {
   return c.filter(Boolean).join(' ')

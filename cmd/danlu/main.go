@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,12 +43,16 @@ const usage = `danlu — GPU 服务器训练任务管理面板
 
   init              初始化：生成端口、安全入口、密码和证书
   serve             启动服务
-  info              显示访问地址等信息
+  info              显示访问地址等信息；--json 输出给桌面客户端读取
+  token             设备令牌（桌面客户端用）：create --name 名字 | list | revoke <id>
   passwd            修改登录密码
   entrance          查看安全入口；--reset 重新生成
   port <端口>       修改端口
   cert --regen      重新生成本地 CA 和证书（公网 IP 变化后使用）
   install-service   安装为 systemd 用户服务（开机自启、退出 SSH 后继续运行）
+  restart           重启服务（正在跑的训练不受影响）
+  logs [-n 行数]    查看服务日志（journalctl）
+  replace <路径>    升级用：用当前这个程序替换 <路径> 上的 danlu，然后重启服务
   version           显示版本
 
 数据目录默认是 ~/.danlu，可以用环境变量 DANLU_HOME 指定。
@@ -66,7 +71,9 @@ func main() {
 	case "serve":
 		err = cmdServe(args)
 	case "info":
-		err = cmdInfo()
+		err = cmdInfo(args)
+	case "token":
+		err = cmdToken(args)
 	case "passwd":
 		err = cmdPasswd(args)
 	case "entrance":
@@ -75,6 +82,12 @@ func main() {
 		err = cmdPort(args)
 	case "cert":
 		err = cmdCert(args)
+	case "restart":
+		err = cmdRestart()
+	case "logs":
+		err = cmdLogs(args)
+	case "replace":
+		err = cmdReplace(args)
 	case "install-service":
 		err = cmdInstallService()
 	case "version", "--version", "-v":
@@ -324,10 +337,16 @@ func loadForEdit() (config.Paths, *config.Config, error) {
 
 const restartHint = "重启服务后生效：systemctl --user restart danlu"
 
-func cmdInfo() error {
+func cmdInfo(args []string) error {
+	fs := flag.NewFlagSet("info", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "以 JSON 输出（桌面客户端通过 SSH 读取）")
+	fs.Parse(args)
 	p, c, err := loadForEdit()
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return printInfoJSON(p, c)
 	}
 	fmt.Println("访问地址 ", c.URL())
 	fmt.Println("用户名   ", c.Auth.Username, "（密码不会再显示，忘记了用 danlu passwd 重设）")
@@ -342,6 +361,113 @@ func cmdInfo() error {
 	return nil
 }
 
+// printInfoJSON 给桌面客户端用：拿到地址和 CA 证书后，客户端只信任这张 CA。
+// 输出走 SSH，SSH 已经证明了身份，所以 CA 证书本身可以直接信任，不必另外核对指纹。
+func printInfoJSON(p config.Paths, c *config.Config) error {
+	exe, _ := os.Executable()
+	host, _ := os.Hostname()
+	info := map[string]any{
+		"version":     version,
+		"api_version": api.APIVersion,
+		"hostname":    host,
+		"base_url":    c.BaseURL(),
+		"url":         c.URL(),
+		"tls_mode":    c.TLS.Mode,
+		"username":    c.Auth.Username,
+		"data_dir":    p.Home,
+		"exe":         exe,
+	}
+	if c.TLS.Mode == config.TLSLocalCA {
+		f := tlsutil.FilesIn(p.TLS).CACert
+		pem, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("读取 CA 证书失败: %w", err)
+		}
+		fp, err := tlsutil.Fingerprint(f)
+		if err != nil {
+			return err
+		}
+		info["ca_pem"], info["ca_fingerprint"] = string(pem), fp
+	}
+	return printJSON(info)
+}
+
+func printJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func cmdToken(args []string) error {
+	const tokenUsage = "用法: danlu token create --name 名字 [--json] | list [--json] | revoke <id>"
+	if len(args) == 0 {
+		return errors.New(tokenUsage)
+	}
+	fs := flag.NewFlagSet("token "+args[0], flag.ExitOnError)
+	name := fs.String("name", "", "令牌名称，一般写电脑名")
+	asJSON := fs.Bool("json", false, "以 JSON 输出")
+	fs.Parse(args[1:])
+
+	st, err := store.Open(paths().DB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	switch args[0] {
+	case "create":
+		if strings.TrimSpace(*name) == "" {
+			return errors.New("请用 --name 写明是哪台电脑的令牌，方便以后吊销")
+		}
+		id, tok, err := auth.NewDeviceToken(st, strings.TrimSpace(*name))
+		if err != nil {
+			return err
+		}
+		st.Audit("cli", "token_create", fmt.Sprintf("#%d %s", id, *name))
+		if *asJSON {
+			return printJSON(map[string]any{"id": id, "name": *name, "token": tok})
+		}
+		fmt.Printf("已创建设备令牌 #%d（%s），只显示这一次：\n%s\n吊销：danlu token revoke %d，或在面板「设置」页操作\n", id, *name, tok, id)
+	case "list":
+		toks, err := st.ListDeviceTokens()
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return printJSON(map[string]any{"tokens": toks})
+		}
+		if len(toks) == 0 {
+			fmt.Println("还没有设备令牌")
+		}
+		for _, t := range toks {
+			used := "从未使用"
+			if t.LastUsedAt != nil {
+				used = "最后使用 " + time.Unix(*t.LastUsedAt, 0).Format("2006-01-02 15:04") + " " + t.LastIP
+			}
+			fmt.Printf("#%-4d %-20s 创建于 %s  %s\n", t.ID, t.Name, time.Unix(t.CreatedAt, 0).Format("2006-01-02 15:04"), used)
+		}
+	case "revoke":
+		if fs.NArg() != 1 {
+			return errors.New(tokenUsage)
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return fmt.Errorf("令牌 id %q 无效", fs.Arg(0))
+		}
+		name, err := st.RevokeDeviceToken(id)
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("没有 #%d 这个令牌", id)
+		}
+		if err != nil {
+			return err
+		}
+		st.Audit("cli", "token_revoke", fmt.Sprintf("#%d %s", id, name))
+		fmt.Printf("已吊销 #%d（%s），立即生效\n", id, name)
+	default:
+		return errors.New(tokenUsage)
+	}
+	return nil
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "-"
@@ -352,12 +478,17 @@ func orDash(s string) string {
 func cmdPasswd(args []string) error {
 	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
 	pw := fs.String("password", "", "新密码（不填则交互输入）")
+	// 桌面客户端经 SSH 改密码时用：密码不出现在命令行里，别的用户 ps 看不到
+	fromStdin := fs.Bool("password-stdin", false, "从标准输入读一行作为新密码")
 	fs.Parse(args)
 	p, c, err := loadForEdit()
 	if err != nil {
 		return err
 	}
-	if *pw == "" {
+	if *fromStdin {
+		line, _ := stdin.ReadString('\n')
+		*pw = strings.TrimRight(line, "\r\n")
+	} else if *pw == "" {
 		*pw = askPassword("新密码（至少 8 位）")
 		if again := askPassword("再输入一次"); again != *pw {
 			return errors.New("两次输入不一致")
@@ -451,6 +582,82 @@ func cmdCert(args []string) error {
 	}
 	fmt.Println("已重新生成 CA 和证书。之前安装过 CA 的设备需要删掉旧 CA、重新安装新的。" + restartHint)
 	return nil
+}
+
+// ---------- 服务管理（桌面客户端经 SSH 调用） ----------
+
+func cmdRestart() error {
+	if out, err := exec.Command("systemctl", "--user", "restart", "danlu").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl --user restart danlu 失败: %v\n%s", err, out)
+	}
+	fmt.Println("已重启 danlu（正在跑的训练任务不受影响）")
+	return nil
+}
+
+func cmdLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	n := fs.Int("n", 200, "显示最后多少行")
+	fs.Parse(args)
+	cmd := exec.Command("journalctl", "--user", "-u", "danlu", "-n", strconv.Itoa(*n), "--no-pager", "-o", "short-iso")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+// cmdReplace 由新版本的程序执行：把自己原子地换到 <路径> 上，再重启服务。
+// 客户端先把新程序传成 <路径>.new，再执行 "<路径>.new replace <路径>"。直接覆盖正在运行的程序会报 Text file busy，改名不会。
+func cmdReplace(args []string) error {
+	fs := flag.NewFlagSet("replace", flag.ExitOnError)
+	noRestart := fs.Bool("no-restart", false, "只替换，不重启服务")
+	asJSON := fs.Bool("json", false, "以 JSON 输出")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("用法: danlu replace [--no-restart] <要替换的 danlu 路径>")
+	}
+	target, err := filepath.Abs(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	self, _ = filepath.EvalSymlinks(self)
+	if self == target {
+		return errors.New("新程序和要替换的是同一个文件")
+	}
+	if filepath.Dir(self) == filepath.Dir(target) {
+		err = os.Rename(self, target)
+	} else {
+		err = copyExecutable(self, target)
+	}
+	if err != nil {
+		return fmt.Errorf("替换 %s 失败: %w", target, err)
+	}
+	restarted := false
+	if !*noRestart {
+		if err := cmdRestart(); err != nil {
+			return err
+		}
+		restarted = true
+	}
+	if *asJSON {
+		return printJSON(map[string]any{"version": version, "path": target, "restarted": restarted})
+	}
+	fmt.Printf("已把 %s 换成 %s\n", target, version)
+	return nil
+}
+
+// copyExecutable 先复制到同目录的临时文件，再改名过去，保证替换是原子的。
+func copyExecutable(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o755); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 const serviceUnit = `[Unit]

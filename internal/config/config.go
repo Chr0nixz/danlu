@@ -195,14 +195,17 @@ func (c *Config) Scheme() string {
 	return "https"
 }
 
-// URL 是带安全入口的完整访问地址。
-func (c *Config) URL() string {
+// BaseURL 是不带安全入口的地址，桌面客户端用设备令牌访问时用它。
+func (c *Config) BaseURL() string {
 	host := c.Server.PublicIP
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		host = "[" + host + "]"
 	}
-	return fmt.Sprintf("%s://%s:%d/%s", c.Scheme(), host, c.Server.Port, c.Server.Entrance)
+	return fmt.Sprintf("%s://%s:%d", c.Scheme(), host, c.Server.Port)
 }
+
+// URL 是带安全入口的完整访问地址。
+func (c *Config) URL() string { return c.BaseURL() + "/" + c.Server.Entrance }
 
 func ValidEntrance(s string) bool {
 	if len(s) < 6 || len(s) > 64 {

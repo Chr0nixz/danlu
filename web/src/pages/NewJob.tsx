@@ -3,9 +3,9 @@ import { Check, FolderOpen, History, Minus, Plus } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { gpuBusy, useGpus } from '../components/GpuGrid'
-import { failText } from '../components/JobRow'
 import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
-import { api, type GPU, type Job } from '../lib/api'
+import { failText, type GPU, type Job } from '@danlu/core'
+import { api } from '../lib/api'
 
 function rerunName(name: string) {
   const m = name.match(/^(.*)-r(\d+)$/)

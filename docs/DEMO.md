@@ -216,7 +216,8 @@ GPU 卡片显示的内容：卡号、型号、利用率条、显存（已用/总
 
 ```
 GET  /<entrance>                       通过安全入口（设置 gate cookie）
-POST /api/login        POST /api/logout        GET /api/me
+POST /api/login        POST /api/logout
+GET  /api/me                           用户名、版本、api_version（接口版本号，不兼容的改动时加一）
 
 GET  /api/gpus                         GPU 状态和占用者
 GET  /api/conda-envs                   conda 环境列表
@@ -224,6 +225,7 @@ GET  /api/fs/dirs?path=                目录自动补全
 GET  /api/workdirs/recent              最近用过的工作目录
 
 GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 error_line 报错行）
+GET  /api/jobs?order=ended&before=&before_id=  只要已结束的任务，按结束时间倒序；before / before_id 是上一页最后一条的结束时间和 id（游标翻页，多台服务器的历史按时间合并时用）
 POST /api/jobs                         提交任务
 GET  /api/jobs/{id}                    任务详情
 POST /api/jobs/{id}/cancel             取消任务
@@ -237,7 +239,11 @@ GET  /api/jobs/{id}/snapshot/download  下载 tar.gz
 GET  /api/settings/ca.crt              下载 CA 证书
 POST /api/settings/password            修改密码
 GET  /api/audit?page=                  审计日志
+GET  /api/tokens                       设备令牌列表（不含令牌本身）
+POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 ```
+
+桌面客户端不走 cookie，而是带 `Authorization: Bearer <设备令牌>`：令牌有效就跳过安全入口和登录检查，无效则和没过入口一样返回空 404。令牌只能在服务器上用 `danlu token create` 创建（能 SSH 登录才说明是本人），面板上只能查看和吊销。
 
 ## 7. 配置与数据
 

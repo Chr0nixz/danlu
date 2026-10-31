@@ -1,0 +1,249 @@
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+@import 'tailwindcss';
+
+/*
+ * 视觉风格见 docs/CLIENT.md 第 5.4 节：和平台无关的现代开发者工具，中性灰阶，颜色只表示状态，
+ * 朱砂色只给火焰标志。层次靠底色台阶和细边：窗口底 → 内容面板 → 详情卡片 → 日志终端。主题跟随系统。
+ */
+:root {
+  color-scheme: light;
+  --bg: #e8eaee;
+  --panel: #ffffff;
+  --card: #f6f7f9;
+  --hover: #eff0f3;
+  --fg: #16171b;
+  --fg-2: #5b5e66;
+  --fg-3: #6f727a;
+  --line: rgb(0 0 0 / 0.07);
+  --line-strong: rgb(0 0 0 / 0.12);
+  --panel-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 4px 16px rgb(0 0 0 / 0.04);
+  --float-shadow: 0 8px 28px rgb(0 0 0 / 0.14), 0 1px 3px rgb(0 0 0 / 0.08);
+  --run: #1f6fe0;
+  --ok: #15803d;
+  --fail: #dc2626;
+  --warn: #b45309;
+  --term: #111215;
+  --primary: #16171b;
+  --on-primary: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0a0b0d;
+    --panel: #121317;
+    --card: #18191e;
+    --hover: #1e2026;
+    --fg: #eeeef1;
+    --fg-2: #a3a5ad;
+    --fg-3: #7c7f88;
+    --line: rgb(255 255 255 / 0.06);
+    --line-strong: rgb(255 255 255 / 0.1);
+    --panel-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+    --float-shadow: 0 10px 32px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.06);
+    --run: #5aa7ff;
+    --ok: #4fd18b;
+    --fail: #ff6b6b;
+    --warn: #f5b14c;
+    --term: #0b0c0e;
+    --primary: #eeeef1;
+    --on-primary: #0a0b0d;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-card: var(--card);
+  --color-hover: var(--hover);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-run: var(--run);
+  --color-ok: var(--ok);
+  --color-fail: var(--fail);
+  --color-warn: var(--warn);
+  --color-term: var(--term);
+  --color-primary: var(--primary);
+  --color-on-primary: var(--on-primary);
+  --color-brand: #e5482d;
+  --shadow-panel: var(--panel-shadow);
+  --shadow-float: var(--float-shadow);
+  /* 中文用系统黑体：Windows 微软雅黑，macOS 苹方 */
+  --font-sans: 'Geist Variable', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', 'Microsoft YaHei UI', 'PingFang SC', ui-monospace, monospace;
+  --radius-panel: 10px;
+  --radius-ctl: 6px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'ss01';
+  /* 桌面应用：界面文字不随手选中，命令、路径、日志单独开放 */
+  user-select: none;
+  cursor: default;
+}
+
+/* 编号、数字、命令、路径：等宽、数字对齐 */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.selectable {
+  user-select: text;
+  cursor: text;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--run) 30%, transparent);
+}
+
+input,
+textarea {
+  caret-color: var(--fg);
+}
+
+:focus-visible {
+  outline: 2px solid var(--fg-3);
+  outline-offset: 1px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---------- 动效：克制，系统开了"减少动态效果"就全部关掉 ---------- */
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.breathe {
+  animation: breathe 2s ease-in-out infinite;
+}
+
+/* 任务状态变化时整行用新状态的颜色闪一下 */
+@keyframes flash {
+  from {
+    background-color: color-mix(in srgb, var(--flash) 22%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+.flash {
+  animation: flash 1.2s ease-out;
+}
+
+/* 切换任务时，详情淡入并上移 4px */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+.rise {
+  animation: rise 150ms ease-out;
+}
+
+/* 托盘浮窗从托盘方向淡入，同时从 98% 放大到 100% */
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+.pop {
+  animation: pop 160ms ease-out;
+  transform-origin: bottom center;
+}
+
+/* 小曲线的新数据从右边推入 */
+@keyframes push {
+  from {
+    transform: translateX(var(--step));
+  }
+}
+.push {
+  animation: push 300ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* 日志搜索的命中（CSS Custom Highlight API，不改动日志的 DOM） */
+::highlight(log-match) {
+  background-color: rgb(245 177 76 / 0.35);
+  color: #fff;
+}
+::highlight(log-current) {
+  background-color: #f5b14c;
+  color: #0b0c0e;
+}
+
+/* ANSI 颜色（ansi_up 的 class），按深色背景调亮 */
+.ansi-black-fg { color: #7a7a7a; }
+.ansi-red-fg { color: #ff7b72; }
+.ansi-green-fg { color: #56d364; }
+.ansi-yellow-fg { color: #e3b341; }
+.ansi-blue-fg { color: #79c0ff; }
+.ansi-magenta-fg { color: #d2a8ff; }
+.ansi-cyan-fg { color: #56d4dd; }
+.ansi-white-fg { color: #e6e6e6; }
+.ansi-bright-black-fg { color: #9e9e9e; }
+.ansi-bright-red-fg { color: #ffa198; }
+.ansi-bright-green-fg { color: #7ee787; }
+.ansi-bright-yellow-fg { color: #f2cc60; }
+.ansi-bright-blue-fg { color: #a5d6ff; }
+.ansi-bright-magenta-fg { color: #e2c5ff; }
+.ansi-bright-cyan-fg { color: #b3f0ff; }
+.ansi-bright-white-fg { color: #fafafa; }
+.ansi-black-bg { background: #262626; }
+.ansi-red-bg { background: #6e1b1b; }
+.ansi-green-bg { background: #12432a; }
+.ansi-yellow-bg { background: #5c4410; }
+.ansi-blue-bg { background: #143d6b; }
+.ansi-magenta-bg { background: #4e2369; }
+.ansi-cyan-bg { background: #0f4a52; }
+.ansi-white-bg { background: #8a8a8a; }
+.ansi-bold { font-weight: 700; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }

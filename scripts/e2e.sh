@@ -142,10 +142,46 @@ check "快照保存的是改动后的代码" [ "$(api "$BASE/api/jobs/$A/snapsho
 check "diff 包含改动" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$A/snapshot/diff' | grep -q 'v2'"
 check "可以下载快照 tar.gz" [ "$(code "$BASE/api/jobs/$A/snapshot/download")" = 200 ]
 
+echo "== 设备令牌（桌面客户端）=="
+INFO=$("$BIN" info --json)
+check "info --json 给出地址和接口版本" [ "$(echo "$INFO" | json "d['base_url'] + ' ' + str(d['api_version'])")" = "$BASE 1" ]
+TOK_JSON=$("$BIN" token create --name "e2e's pc" --json)
+TOK=$(echo "$TOK_JSON" | json "d['token']")
+TOK_ID=$(echo "$TOK_JSON" | json "d['id']")
+bearer() { curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $1" "${@:2}"; }
+check "令牌不经过安全入口也能访问接口" [ "$(bearer "$TOK" "$BASE/api/me")" = 200 ]
+check "令牌可以提交任务" [ "$(bearer "$TOK" -H 'Content-Type: application/json' -d "{\"name\":\"T\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}" "$BASE/api/jobs")" = 201 ]
+check "错误的令牌和没过入口一样是空 404" [ "$(curl -s -w '%{http_code}' -H 'Authorization: Bearer dl_wrong' "$BASE/api/me")" = 404 ]
+check "面板能列出令牌和最后使用时间" [ "$(api "$BASE/api/tokens" | json "d['tokens'][0]['last_used_at'] is not None")" = True ]
+check "面板吊销令牌" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/tokens/$TOK_ID/revoke")" = 200 ]
+check "吊销后立即失效" [ "$(bearer "$TOK" "$BASE/api/me")" = 404 ]
+FIRST=$(api "$BASE/api/jobs?order=ended&size=2")
+LAST_END=$(echo "$FIRST" | json "d['jobs'][-1]['ended_at']")
+LAST_ID=$(echo "$FIRST" | json "d['jobs'][-1]['id']")
+NEXT_IDS=$(api "$BASE/api/jobs?order=ended&size=200&before=$LAST_END&before_id=$LAST_ID" | json "[j['id'] for j in d['jobs']]")
+check "按结束时间游标翻页不重复" python3 -c "
+import json, sys
+first = [j['id'] for j in json.loads(sys.argv[1])['jobs']]
+rest = $NEXT_IDS
+assert first and rest and not set(first) & set(rest), (first, rest)
+" "$FIRST"
+
 echo "== 登录限速 =="
 curl -s -c "$T/jar2" -o /dev/null "$BASE/$ENTRANCE"
 for _ in 1 2 3 4 5; do curl -s -b "$T/jar2" -o /dev/null -H 'Content-Type: application/json' -d '{"username":"admin","password":"x"}' "$BASE/api/login"; done
 check "连续输错 5 次后被锁定（429）" [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$T/jar2" -H 'Content-Type: application/json' -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login")" = 429 ]
+
+echo "== 客户端运维用的子命令 =="
+cp "$BIN" "$T/danlu-copy" && cp "$BIN" "$T/danlu-copy.new"
+check "replace 用新程序原子替换旧程序" bash -c "'$T/danlu-copy.new' replace --no-restart --json '$T/danlu-copy' | grep -q '\"restarted\": false' && [ ! -e '$T/danlu-copy.new' ]"
+OLD_HASH=$(grep password_hash "$DANLU_HOME/config.toml")
+# 和客户端发出的脚本一样：密码放在带引号的 heredoc 里，经标准输入传给 passwd
+sh -s >/dev/null <<EOF
+exec "$BIN" passwd --password-stdin <<'DANLU_INPUT_1'
+new\$pass word\`x
+DANLU_INPUT_1
+EOF
+check "passwd --password-stdin 从标准输入读密码" [ "$(grep password_hash "$DANLU_HOME/config.toml")" != "$OLD_HASH" ]
 
 echo "== HTTPS（本地 CA）=="
 kill "$SERVER_PID" 2>/dev/null; SERVER_PID=

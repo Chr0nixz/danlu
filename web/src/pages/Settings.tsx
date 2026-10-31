@@ -1,10 +1,10 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, LogOut, Monitor, Moon, ShieldCheck, Sun } from 'lucide-react'
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { Button, buttonClass, Card, ErrorBox, Field, Input, Segmented, Skeleton } from '../components/ui'
+import { Button, buttonClass, Card, Dialog, ErrorBox, Field, Input, Segmented, Skeleton } from '../components/ui'
 import { api } from '../lib/api'
-import { fmtTime } from '../lib/format'
+import { fmtTime, type DeviceToken } from '@danlu/core'
 import { getTheme, setTheme, type Theme } from '../lib/theme'
 
 const actionLabel: Record<string, string> = {
@@ -15,6 +15,8 @@ const actionLabel: Record<string, string> = {
   submit: '提交任务',
   cancel: '取消任务',
   password_change: '修改密码',
+  token_create: '创建设备令牌',
+  token_revoke: '吊销设备令牌',
 }
 
 function Section({ title, desc, children, footer }: { title: string; desc?: ReactNode; children: ReactNode; footer?: ReactNode }) {
@@ -113,6 +115,8 @@ export function Settings() {
 
       <PasswordSection />
 
+      <TokensSection />
+
       <Section title="操作记录" desc="最近的登录和任务操作。">
         {audit.isLoading ? (
           <Skeleton className="h-24 w-full" />
@@ -153,6 +157,83 @@ function AuditDetail({ text }: { text: string }) {
       </Link>
       {m[2]}
     </>
+  )
+}
+
+/** 桌面客户端的设备令牌。电脑丢了的时候，用手机打开面板在这里吊销 */
+function TokensSection() {
+  const q = useQuery({ queryKey: ['tokens'], queryFn: api.tokens })
+  const [revoking, setRevoking] = useState<DeviceToken | null>(null)
+  return (
+    <Section
+      title="设备令牌"
+      desc={
+        <>
+          桌面客户端用令牌连接，不需要密码，长期有效。令牌在服务器上用 <code className="font-mono text-[12px]">danlu token create</code> 创建，客户端添加服务器时会自动完成。吊销后立即失效。
+        </>
+      }
+    >
+      {q.isLoading ? (
+        <Skeleton className="h-10 w-full" />
+      ) : q.error ? (
+        <ErrorBox error={q.error} />
+      ) : q.data!.tokens.length === 0 ? (
+        <p className="text-ui text-fg-3">还没有设备连接过。</p>
+      ) : (
+        <div className="-mx-4 -my-4 divide-y divide-line sm:-mx-5">
+          {q.data!.tokens.map((t) => (
+            <div key={t.id} className="flex items-center gap-3 px-4 py-2.5 text-ui sm:px-5">
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium">{t.name}</div>
+                <div className="truncate text-xs text-fg-3">
+                  创建于 {fmtTime(t.created_at).slice(0, 16)} ·{' '}
+                  {t.last_used_at ? (
+                    <>
+                      最后使用 {fmtTime(t.last_used_at).slice(5, 16)} <span className="font-mono">{t.last_ip}</span>
+                    </>
+                  ) : (
+                    '从未使用'
+                  )}
+                </div>
+              </div>
+              <Button size="sm" variant="danger" onClick={() => setRevoking(t)}>
+                吊销
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      {revoking && <RevokeDialog token={revoking} onClose={() => setRevoking(null)} />}
+    </Section>
+  )
+}
+
+function RevokeDialog({ token: t, onClose }: { token: DeviceToken; onClose: () => void }) {
+  const qc = useQueryClient()
+  const revoke = useMutation({
+    mutationFn: () => api.revokeToken(t.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tokens'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+      onClose()
+    },
+  })
+  return (
+    <Dialog
+      title={`吊销「${t.name}」的令牌？`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>保留</Button>
+          <Button variant="danger" loading={revoke.isPending} onClick={() => revoke.mutate()}>
+            吊销
+          </Button>
+        </>
+      }
+    >
+      <p>这台设备上的客户端会立即断开。要重新连接，在客户端里重新添加这台服务器。</p>
+      <ErrorBox error={revoke.error} />
+    </Dialog>
   )
 }
 

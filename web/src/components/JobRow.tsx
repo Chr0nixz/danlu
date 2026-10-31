@@ -2,8 +2,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { api, type Job } from '../lib/api'
-import { duration, fmtTime, isActive, jobDuration, now, timeAgo } from '../lib/format'
+import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, now, timeAgo, type Job } from '@danlu/core'
+import { api } from '../lib/api'
 import { Button, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
 
 /** 取消任务前的确认框：写清已经跑了多久、结束后不能恢复。出错时留在框里显示原因 */
@@ -57,25 +57,6 @@ function useFlash(id: number, status: string) {
     return () => clearTimeout(t)
   }, [id, status])
   return flash
-}
-
-/**
- * tqdm 进度条里的方块字符在列表里会变成一大块深色，还会把后面的数字挤出去。
- * "84%|████▍     | 84/100 [loss=0.88]" → "84% · 84/100 [loss=0.88]"，百分比单独拿出来画细条。
- */
-export function compactProgress(line: string): { text: string; short: string; pct: number | null } {
-  const m = line.match(/(\d{1,3})%\s*\|[▀-▟#\s]*\|/)
-  const text = line.replace(/\s*\|[▀-▟#\s]*\|\s*/g, ' · ').replace(/\s{2,}/g, ' ')
-  // 手机上宽度不够：有百分比时去掉重复的 75/100（细条也不显示），给 loss 之类的数字留位置
-  const short = m ? text.replace(/ · \d+\/\d+\s*/, ' ') : text
-  return { text, short, pct: m ? Math.min(100, Number(m[1])) : null }
-}
-
-/** 失败任务的原因：退出码加报错行（找不到报错行时用最后一行输出） */
-export function failText(j: Job): string {
-  const why = j.fail_reason || (j.exit_code !== null ? `退出码 ${j.exit_code}` : '失败')
-  const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
-  return line ? `${why} · ${line}` : why
 }
 
 /** 一行任务的说明文字：运行中显示最后一行日志，排队显示位置，失败显示原因 */

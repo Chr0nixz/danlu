@@ -123,3 +123,52 @@ func TestNonJSONWriteRejected(t *testing.T) {
 		t.Fatalf("表单提交应被拒绝，实际 %d", resp.StatusCode)
 	}
 }
+
+func TestDeviceToken(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	a := New(st, Options{Entrance: "k3x9p2qa7m4z", Secret: []byte("0123456789abcdef"), SessionTTL: time.Hour})
+	srv := httptest.NewServer(a.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })))
+	t.Cleanup(srv.Close)
+	id, tok, err := NewDeviceToken(st, "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(method, path, auth string) int {
+		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	// 没有 gate cookie、没有登录，有效令牌也能访问 API
+	if got := do("GET", "/api/me", "Bearer "+tok); got != 200 {
+		t.Fatalf("有效令牌应为 200，实际 %d", got)
+	}
+	if got := do("POST", "/api/jobs", "bearer "+tok); got != 200 {
+		t.Fatalf("Bearer 不区分大小写，写操作也应通过，实际 %d", got)
+	}
+	// 无效令牌和没过入口一样是 404，不暴露这是需要登录的服务
+	for _, h := range []string{"Bearer dl_wrong", "Bearer "} {
+		if got := do("GET", "/api/me", h); got != 404 {
+			t.Fatalf("%q 应为 404，实际 %d", h, got)
+		}
+	}
+	toks, _ := st.ListDeviceTokens()
+	if len(toks) != 1 || toks[0].LastUsedAt == nil {
+		t.Fatalf("使用后应记录最后使用时间: %+v", toks)
+	}
+	st.RevokeDeviceToken(id)
+	if got := do("GET", "/api/me", "Bearer "+tok); got != 404 {
+		t.Fatalf("吊销后应立即失效，实际 %d", got)
+	}
+}

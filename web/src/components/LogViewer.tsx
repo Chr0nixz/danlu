@@ -1,86 +1,15 @@
+import { logToHtml, useJobLog } from '@danlu/core'
 import { ArrowDown, ArrowUp, Download, WrapText } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { api } from '../lib/api'
-import { logToHtml } from '../lib/terminal'
 import { cx, ErrorBox, Spinner } from './ui'
 
-const TAIL = 256 * 1024
-const MAX_CHARS = 3_000_000
-
-/**
- * 先读日志末尾 256KB，再用 SSE 接收增量。
- * 偏移量都以字节计，由服务端给出（o = 本段起点，n = 下一段起点），前端只负责拼接和去重。
- */
+/** 先读日志末尾 256KB，再用 SSE 接收增量（见 @danlu/core 的 useJobLog） */
 export function LogViewer({ jobId }: { jobId: number }) {
-  const [raw, setRaw] = useState('')
-  const [start, setStart] = useState(0) // 已加载内容在文件中的起始字节；-1 表示前面被丢弃过
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<unknown>(null)
-  const [ended, setEnded] = useState(false)
+  const { raw, start, loading, error, ended, loadingOlder, loadOlder } = useJobLog(api, jobId)
   const [follow, setFollow] = useState(true)
   const [wrap, setWrap] = useState(true)
-  const [loadingOlder, setLoadingOlder] = useState(false)
-  const next = useRef(0)
   const box = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    let es: EventSource | null = null
-    let retry: number | undefined
-    let closed = false
-    setRaw('')
-    setEnded(false)
-    setLoading(true)
-
-    const append = (t: string) =>
-      setRaw((r) => {
-        const s = r + t
-        if (s.length <= MAX_CHARS) return s
-        setStart(-1)
-        const cut = s.slice(s.length - MAX_CHARS * 0.7)
-        return cut.slice(cut.indexOf('\n') + 1)
-      })
-
-    const connect = () => {
-      if (closed) return
-      es = new EventSource(`/api/jobs/${jobId}/log/stream?offset=${next.current}`)
-      es.onmessage = (ev) => {
-        const m = JSON.parse(ev.data) as { o: number; n: number; t: string }
-        if (m.n <= next.current) return // 重连后重复的内容
-        append(m.t)
-        next.current = m.n
-      }
-      es.addEventListener('end', () => {
-        setEnded(true)
-        es?.close()
-      })
-      es.onerror = () => {
-        // 浏览器的自动重连会带着旧的 offset，这里自己控制重连
-        es?.close()
-        retry = window.setTimeout(connect, 2000)
-      }
-    }
-
-    api
-      .log(jobId, { tail: TAIL })
-      .then((r) => {
-        if (closed) return
-        setRaw(r.data)
-        setStart(r.start)
-        next.current = r.next
-        setLoading(false)
-        connect()
-      })
-      .catch((e) => {
-        setError(e)
-        setLoading(false)
-      })
-
-    return () => {
-      closed = true
-      es?.close()
-      window.clearTimeout(retry)
-    }
-  }, [jobId])
 
   const html = useMemo(() => {
     // 从文件中间开始读时，第一行是半截的，丢掉
@@ -88,10 +17,15 @@ export function LogViewer({ jobId }: { jobId: number }) {
     return logToHtml(text)
   }, [raw, start])
 
+  // 往前加载了一段时，保持正在看的那一行不动
+  const prev = useRef({ start, height: 0 })
   useLayoutEffect(() => {
     const el = box.current
-    if (el && follow) el.scrollTop = el.scrollHeight
-  }, [html, follow])
+    if (!el) return
+    if (follow) el.scrollTop = el.scrollHeight
+    else if (start >= 0 && start < prev.current.start) el.scrollTop += el.scrollHeight - prev.current.height
+    prev.current = { start, height: el.scrollHeight }
+  }, [html, follow, start])
 
   // 日志框从自己的位置铺到视口底部（见 index.css 的 .log-fit），上面的内容变高变矮时重新量
   const [top, setTop] = useState(0)
@@ -113,26 +47,6 @@ export function LogViewer({ jobId }: { jobId: number }) {
     const el = box.current
     if (!el) return
     setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
-  }
-
-  const loadOlder = async () => {
-    if (start <= 0) return
-    setLoadingOlder(true)
-    try {
-      const from = Math.max(0, start - TAIL)
-      const r = await api.log(jobId, { offset: from, limit: start - from })
-      const el = box.current
-      const prevHeight = el?.scrollHeight ?? 0
-      setRaw((cur) => r.data + cur)
-      setStart(r.start)
-      requestAnimationFrame(() => {
-        if (el) el.scrollTop += el.scrollHeight - prevHeight
-      })
-    } catch (e) {
-      setError(e)
-    } finally {
-      setLoadingOlder(false)
-    }
   }
 
   const tb = 'inline-flex h-7 items-center gap-1.5 rounded px-2 text-xs text-[#a1a1a1] transition-colors duration-150 hover:bg-white/10 hover:text-white disabled:opacity-50 [&_svg]:size-3.5'
