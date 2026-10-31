@@ -8,14 +8,18 @@ Danlu (丹炉) is a control panel for GPU training jobs that runs on each GPU se
 
 Direction:
 
-- **Fallback panel.** This web panel is the fallback that exists on every server, for phones and for when the desktop client is unavailable. Controlling several servers at once is the job of the desktop client: a Tauri app in `desktop/`, built for Windows first with macOS planned. It is designed in `docs/CLIENT.md`, and milestones C1 (skeleton) and C2 (first usable version) are built; C3 is next (see "Desktop client" under Architecture). Servers never talk to each other; multi-server aggregation happens in the client.
-- **Obsolete parts of `docs/DESIGN.md`.** The §4 peer federation (peers, request forwarding, cross-node auto-assignment, the "move to another node" feature) and the §5.1 folder-picker submit with snapshot upload are dropped. Code still reaches the servers through the user's own rsync/scp. The rest of that doc is still a valid backlog; `docs/CLIENT.md` §10 has the mapping.
+- **Current phase: backend and web panel first.** The web panel is the main interface for now, on desktop and phone alike, so design it as the primary tool, not a fallback. `docs/ROADMAP.md` lists the work items in order and says what counts as done.
+- **Desktop client paused.** Controlling several servers at once is the job of the desktop client: a Tauri app in `desktop/`, built for Windows first with macOS planned. It is designed in `docs/CLIENT.md`. Milestones C1 (skeleton) and C2 (first usable version) are built; C3 waits until the backend and panel reach a stable release. Until then add no client features, but keep `desktop/` compiling and working whenever `/api` changes. Once the client resumes, it becomes the main tool on the desktop and the panel stays as the per-server fallback for phones.
+- **One server per panel.** The panel manages only the server it runs on: no server switcher and no multi-server views. Servers never talk to each other; multi-server aggregation happens in the client. Phone notifications come from the server itself via ntfy (planned in `docs/ROADMAP.md`); desktop notifications stay with the client.
+- **Obsolete parts of `docs/DESIGN.md`.** The §4 peer federation (peers, request forwarding, cross-node auto-assignment, the "move to another node" feature) the §5.1 folder-picker submit with snapshot upload, and the §5.7 Let's Encrypt IP certificates are dropped (certificates: `docs/ROADMAP.md` §7.1). Code still reaches the servers through the user's own rsync/scp. The rest of that doc is still a valid backlog; `docs/CLIENT.md` §10 has the mapping.
 - **`/api` is not frozen.** Change it freely, but in the same change update the types and request functions in `packages/core/src` and keep both `web/` and `desktop/` compiling. For an incompatible change, bump `APIVersion` in `internal/api` and `API_VERSION` in `packages/core` together. The client compares it with `/api/me`'s `api_version` to tell which servers need upgrading.
-- **Status.** Everything in the demo scope (`docs/DEMO.md`) is built and passes in WSL with fake GPUs. None of it has been verified on a real GPU server yet. In the desktop client, the HTTPS path (pinned CA, device token, log streaming), the tray popover and the notification logic were exercised against a WSL server. The SSH flows were not: adding a server, upgrades and service management have never run end to end, because the WSL test box has no sshd. Toast display and the tray icon states were also never confirmed visually.
+- **Status.** Everything in the demo scope (`docs/DEMO.md`) is built and passes in WSL with fake GPUs. None of it has been verified on a real GPU server yet; that is the first item in `docs/ROADMAP.md`. In the desktop client, the HTTPS path (pinned CA, device token, log streaming), the tray popover and the notification logic were exercised against a WSL server. The SSH flows were not: adding a server, upgrades and service management have never run end to end, because the WSL test box has no sshd. Toast display and the tray icon states were also never confirmed visually.
 
 Other docs:
 
 - `README.md`: deployment and operations.
+- `docs/ROADMAP.md`: the current phase: goal and acceptance scenarios, the must-have list for the release (定版线) and the later list (理想线), what is out of scope, design notes for certificates and the web terminal, and what happens when the client resumes.
+- `docs/PHASES.md`: the 定版线 split into stages S0–S5, each with its code changes, migrations, config keys, API additions and acceptance checks. Work through it stage by stage and tick ROADMAP §4's status column as items land.
 - `docs/DEMO.md`: current scope, API list, config format.
 - `PRODUCT.md`: users and product principles.
 - `web/DESIGN.md`: the web panel's visual system.
@@ -37,6 +41,8 @@ cd desktop && pnpm tauri dev                       # run the desktop client (vit
 cd desktop/src-tauri && cargo test                 # Rust layer; cargo clippy and cargo fmt --check are kept clean
 ```
 
+CI (`.github/workflows/ci.yml`) runs these on every push to main and every PR: Go tests and vet on Linux (so `*_linux_test.go` run too), the three typechecks, the build and `scripts/e2e.sh` on ubuntu; `cargo fmt --check`, `clippy -D warnings` and `cargo test` on Windows.
+
 `cargo test -- --ignored` also runs `http::tests::live_server` against a real local-CA danlu: pinned CA accepted, foreign CA rejected, log SSE read to `end`. The test's doc comment lists the env vars it needs. In WSL's NAT networking, `127.0.0.1` from Windows may not reach WSL, so regenerate the test server's cert for the WSL IP with `danlu cert --regen --public-ip <ip>`.
 
 To build the shipping binary (frontend first, then a cross-compile), run `.\scripts\build.ps1 [-Arch arm64]` on Windows or `bash scripts/build.sh [arm64]` elsewhere. The output is `dist/danlu-linux-<arch>`.
@@ -57,11 +63,14 @@ bash scripts/dev-wsl.sh  # demo server on 127.0.0.1:17600 (TLS off, fake GPUs, s
 `cmd/danlu/main.go` holds every subcommand (`init`, `serve`, `install-service`, `passwd`, …). `serve` wires the parts together:
 
 1. `store` (SQLite)
-2. `gpu.Monitor` (polls `nvidia-smi` every 2 s)
-3. `runner`
+2. `gpu.Monitor` (polls `nvidia-smi` every 2 s) and `system.Monitor` (CPU and memory), both a `sample.Sampler`: `Latest()` returns an error once no sample has completed for 20 s, so stale data is never trusted
+3. `runner`, which implements `scheduler.Executor`
 4. `scheduler.Manager`
 5. `auth`
 6. `api.Server`, which also serves the embedded `internal/webui`
+7. `tlsutil.CertManager`: the certificate lives in memory and is served through `GetCertificate`; it reloads changed cert files every minute and renews the local-CA cert daily
+
+On SIGTERM, `serve` cancels the requests' base context (log SSE exits), waits for in-flight requests (`Shutdown`, 5 s), then waits for `Manager.Run` to return, which itself waits for jobs being launched to reach the database. Only then does the database close.
 
 ### Request gating (`internal/auth`)
 
@@ -78,20 +87,28 @@ bash scripts/dev-wsl.sh  # demo server on 127.0.0.1:17600 (TLS off, fake GPUs, s
 
 The job lifecycle spans `scheduler`, `runner`, `procfs`, `snapshot` and `store`.
 
-- **State changes.** All of them go through `scheduler.Manager` under a single lock.
-- **Scheduling.** Strict FIFO: when the job at the head of the queue doesn't fit, nothing behind it starts. Jobs get whole GPUs only, and a card with any external compute process is never allocated.
-- **Snapshot on start.** Before a job starts, its working directory is snapshotted: the code files plus git commit, branch and diff. The snapshot is size-capped and has a 10 s timeout. If it fails, the failure is recorded on the job, which starts anyway.
+- **State changes.** All of them go through `scheduler.Manager` under a single lock. Only millisecond work happens under it.
+- **OS seam.** The manager talks to the OS only through the `Executor` interface (`*runner.Runner` in production) and reads GPUs through `GPUSource`, so the state machine is unit-tested with fakes in `scheduler/manager_test.go`. Add a case there when you change scheduling, launch, cancel or recovery.
+- **Scheduling.** Strict FIFO: when the job at the head of the queue doesn't fit, nothing behind it starts. Jobs get whole GPUs only, and a card with any external compute process is never allocated. While GPU data is untrusted (`Latest()` errors: stale, or `gpu.ErrProcsUnknown`), no GPU job starts.
+- **Three-step start.** Write before you fork, so a job can never start twice:
+  1. Reserve, under the lock: the job is saved as `running` with `pid = 0`, its GPUs, port and `boot_id`. If that write fails, nothing starts.
+  2. Prepare, outside the lock (`launch`): the snapshot (size-capped, 10 s timeout; on failure it is noted on the job, which starts anyway) and `LoadEnv` (`.bashrc`, 10 s).
+  3. Start, under the lock: cancelled meanwhile → `cancelled`; danlu stopping → back to the queue; otherwise fork/exec and save the pid. Jobs in this window are in `Manager.starting`.
+- **Unsaved state.** When a save fails, the job goes into `Manager.pending` and the in-memory copy wins until a later round saves it.
 - **Launch.** `runner` writes two scripts into `~/.danlu/run/<id>/`: a fixed wrapper, `run.sh`, and the user command, `cmd.sh`. It starts them with `setsid`.
   - Parameters reach the wrapper only through env vars; nothing user-supplied is interpolated into a script.
-  - The wrapper activates conda and writes an `exitcode` file when the job ends.
+  - The wrapper first writes a `pid` file, activates conda and writes an `exitcode` file when the job ends.
   - stdout and stderr go straight to `~/.danlu/logs/<id>.log`, so jobs survive a danlu restart.
 - **Injected env.** `CUDA_VISIBLE_DEVICES`, `PET_MASTER_PORT` (unique per job; torchrun's default master port), `WANDB_TAGS=danlu-<id>`, and the `DANLU_*` variables. Users cannot override the reserved keys (`runner.ReservedEnv`).
-- **Liveness and restart.** A job is identified by its pid plus the process start time from `/proc`, which guards against pid reuse. `Manager.Recover()` re-attaches to running jobs at startup. The systemd unit must keep `KillMode=process`; without it, restarting danlu kills the training processes.
+- **Liveness and restart.** A job is identified by its pid plus the process start time from `/proc`, which guards against pid reuse; with no start time, `DANLU_JOB_ID` in its environ is checked instead. `Manager.Recover()` re-attaches to running jobs at startup. A `running` job with `pid = 0` that isn't being launched goes through `reconcile`: adopt it from the pid file, finalize it if it already ran, or requeue it if it never started. A job that vanished without an exit code is "服务器重启" if `boot_id` changed, else "进程被外部终止". The systemd unit must keep `KillMode=process`; without it, restarting danlu kills the training processes.
 - **Cancel.** SIGTERM goes to the job's process group and to every process whose `/proc/<pid>/environ` contains `DANLU_JOB_ID=<id>`. The env scan is needed because torchrun workers start new sessions, so the process group alone misses them. SIGKILL follows after `kill_grace`.
 
 ### Invariants that span files
 
-- **Migrations.** `store` migrations are an append-only list indexed by `PRAGMA user_version`. Never edit an existing entry; append a new one.
+- **Migrations.** `store` migrations are an append-only list indexed by `PRAGMA user_version`. Never edit an existing entry; append a new one. Each runs in a transaction together with its version bump; before upgrading an existing database, `store.Open` backs it up to `backup/` with `VACUUM INTO` (last 5 kept), and it refuses a database newer than the binary.
+- **Config vs runtime state.** The server process never writes `config.toml`; only the CLI does (`init`, `port`, `entrance`, `cert`, `passwd`), and those changes need a restart. State that changes at runtime lives in the `settings` table. The password hash is there (`auth.password_hash`), so panel and `danlu passwd` changes apply at once; a legacy `[auth] password_hash` in the config is imported once at startup.
+- **External commands.** Run helpers (`git`, `nvidia-smi`, `conda`, the `.bashrc` loader) through `internal/execx`: its own session, the whole group killed on timeout, and `WaitDelay` so a background child holding the pipe can't hang the caller. Training jobs themselves are started by `runner`.
+- **HTTP timeouts.** The server has read, write and idle timeouts. A long-lived handler must renew its write deadline (log SSE does, per write) or clear it (downloads use `noWriteTimeout`).
 - **Log banner.** `logs.BannerPrefix` must match the `[danlu] 任务…` lines that the wrapper in `runner.go` echoes. `LastLine` skips those lines so job rows show training output.
 - **Linux-only code.** It lives in `*_linux.go`, with `*_other.go` stubs, so everything compiles and unit-tests on Windows.
 - **Static binary.** Everything is pure Go (`modernc.org/sqlite`, `CGO_ENABLED=0`), producing one static binary.
@@ -119,7 +136,7 @@ It has no components and no styles; the two UIs are designed independently. The 
 
 ### Desktop client (`desktop/`)
 
-C1 and C2 are built (`docs/CLIENT.md` §11): a tray app with a main window (overview, history, servers, settings) and a popover beside the tray. Keep these constraints:
+C1 and C2 are built (`docs/CLIENT.md` §11) and C3 is paused (see Direction): a tray app with a main window (overview, history, servers, settings) and a popover beside the tray. Keep these constraints:
 
 - **Layout.** `desktop/src` is React + TS + Tailwind + TanStack Query; `desktop/src-tauri` is Rust.
   - Two pages: `index.html` (main window) and `tray.html` (popover, `TrayApp.tsx`).

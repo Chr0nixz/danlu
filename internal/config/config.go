@@ -52,8 +52,10 @@ type TLS struct {
 }
 
 type Auth struct {
-	Username     string   `toml:"username"`
-	PasswordHash string   `toml:"password_hash"`
+	Username string `toml:"username"`
+	// PasswordHash 是旧版本放密码哈希的地方。现在密码存在数据库里（danlu passwd 修改），
+	// 这里只在第一次启动新版本时导入一次，之后 danlu passwd 会把它删掉。
+	PasswordHash string   `toml:"password_hash,omitempty"`
 	SessionTTL   Duration `toml:"session_ttl"`
 	MaxFailures  int      `toml:"max_failures"`
 	Lockout      Duration `toml:"lockout"`
@@ -179,8 +181,8 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("未知的 tls.mode %q", c.TLS.Mode)
 	}
-	if c.Auth.Username == "" || c.Auth.PasswordHash == "" {
-		return errors.New("缺少用户名或密码")
+	if c.Auth.Username == "" {
+		return errors.New("缺少用户名")
 	}
 	if c.Runtime.SnapshotMaxFileMB <= 0 || c.Runtime.SnapshotMaxTotalMB <= 0 {
 		return errors.New("快照大小上限必须大于 0")

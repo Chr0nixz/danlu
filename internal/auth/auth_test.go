@@ -21,9 +21,11 @@ func setup(t *testing.T) (*httptest.Server, *http.Client) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	hash, _ := HashPassword("secret-pw")
+	if err := SetPassword(st, "secret-pw"); err != nil {
+		t.Fatal(err)
+	}
 	a := New(st, Options{Entrance: "k3x9p2qa7m4z", Secret: []byte("0123456789abcdef"),
-		Username: "admin", PasswordHash: hash, SessionTTL: time.Hour, MaxFailures: 3, Lockout: time.Minute})
+		Username: "admin", SessionTTL: time.Hour, MaxFailures: 3, Lockout: time.Minute})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
@@ -170,5 +172,38 @@ func TestDeviceToken(t *testing.T) {
 	st.RevokeDeviceToken(id)
 	if got := do("GET", "/api/me", "Bearer "+tok); got != 404 {
 		t.Fatalf("吊销后应立即失效，实际 %d", got)
+	}
+}
+
+func TestPasswordInDatabase(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	a := New(st, Options{Username: "admin"})
+	if a.CheckPassword("") {
+		t.Fatal("还没有密码时不能通过")
+	}
+	if _, err := ImportPasswordHash(st, ""); err == nil {
+		t.Fatal("库里和配置里都没有密码时应该报错")
+	}
+	// 旧版本的安装：哈希在 config.toml 里，第一次启动时导入
+	old, _ := HashPassword("from-config")
+	if imported, err := ImportPasswordHash(st, old); err != nil || !imported {
+		t.Fatalf("应该导入配置里的哈希: %v %v", imported, err)
+	}
+	if !a.CheckPassword("from-config") {
+		t.Fatal("导入后应该能用旧密码登录")
+	}
+	// 改过密码以后，配置里残留的旧哈希不再导入
+	if err := SetPassword(st, "new-password"); err != nil {
+		t.Fatal(err)
+	}
+	if imported, _ := ImportPasswordHash(st, old); imported {
+		t.Fatal("库里已经有密码时不应该再导入")
+	}
+	if a.CheckPassword("from-config") || !a.CheckPassword("new-password") {
+		t.Fatal("改密码应该立即生效，不用重启")
 	}
 }

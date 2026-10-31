@@ -3,6 +3,7 @@ import { ArrowRight } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { GpuGrid, gpuBusy, shortName, useGpus } from '../components/GpuGrid'
+import { HostMetrics } from '../components/HostMetrics'
 import { JobList } from '../components/JobRow'
 import { Card, cx, ErrorBox, SkeletonRows, StatusIcon } from '../components/ui'
 import { now, type Job } from '@danlu/core'
@@ -93,6 +94,7 @@ export function Home() {
     <div className="space-y-4 sm:space-y-5">
       <Summary running={running.length} queued={queued.length} />
       <GpuGrid />
+      <HostMetrics />
 
       <ErrorBox error={active.error ?? recent.error} />
       <Card className="overflow-hidden [&>section+section]:border-t [&>section+section]:border-line">

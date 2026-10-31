@@ -13,6 +13,8 @@
 管理多台服务器用桌面客户端（`desktop/`，目前只有 Windows 版）。它常驻托盘，把各台的空卡和任务汇总在一个窗口里，在任务失败或服务器异常时发系统通知；升级和服务管理也在客户端里做，通过 SSH 执行。服务器之间互不连接，汇总都在客户端完成。用法见下文"桌面客户端"。
 
 设计文档：
+- [docs/ROADMAP.md](docs/ROADMAP.md)：当前的开发规划（先做后端和面板，客户端暂停新功能）；
+- [docs/PHASES.md](docs/PHASES.md)：把规划拆成 S0–S5 的阶段方案；
 - [docs/DEMO.md](docs/DEMO.md)：当前 demo 的范围和接口；
 - [docs/DESIGN.md](docs/DESIGN.md)：长期规划，部分已被客户端方案取代；
 - [PRODUCT.md](PRODUCT.md)：面板的产品定位；
@@ -101,6 +103,18 @@ ssh 你的服务器 'chmod +x ~/bin/danlu.new && ~/bin/danlu.new replace ~/bin/d
 
 重启时训练任务不会中断，新进程启动后会重新接管它们；配置和数据都不受影响。桌面客户端「服务器」页的升级走的也是这条命令。
 
+升级时留了两份后路：`replace` 把旧程序留成 `~/bin/danlu.prev`；新版本第一次启动、要升级数据库表结构时，先把旧库备份到 `~/.danlu/backup/danlu-<时间>-v<旧版本>.db`，只保留最近 5 份。新版本有问题时这样回滚：
+
+```bash
+systemctl --user stop danlu
+mv ~/bin/danlu.prev ~/bin/danlu
+cp ~/.danlu/backup/danlu-<时间>-v<旧版本>.db ~/.danlu/danlu.db   # 只有这次升级改过表结构、留下了备份时才需要
+rm -f ~/.danlu/danlu.db-wal ~/.danlu/danlu.db-shm
+systemctl --user start danlu
+```
+
+换回备份的数据库，会丢掉升级以后提交的任务记录；正在跑的训练不受影响，旧程序启动后照样接管。该换数据库却没换的话，旧程序发现库是新版本建的，会拒绝启动并提示换回新版本（带这个检查的版本才会，更早的版本不检查）。
+
 ### 卸载
 
 ```bash
@@ -116,7 +130,7 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 | `danlu info` | 显示访问地址、CA 指纹；加 `--json` 输出给桌面客户端读取 |
 | `danlu token create --name 电脑名` | 给桌面客户端领一个设备令牌（客户端添加服务器时会自动执行） |
 | `danlu token list` / `danlu token revoke <id>` | 查看、吊销设备令牌，吊销立即生效；面板「设置」页也能吊销 |
-| `danlu passwd` | 修改密码（会注销面板上所有已登录的设备，桌面客户端的令牌不受影响） |
+| `danlu passwd` | 修改密码，立即生效，不用重启（会注销面板上所有已登录的设备，桌面客户端的令牌不受影响） |
 | `danlu entrance --reset` | 换一个新的安全入口 |
 | `danlu port 30001` | 修改端口 |
 | `danlu cert --regen` | 公网 IP 变化后重新生成证书（需要重装 CA） |
@@ -127,13 +141,14 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 
 数据都在 `~/.danlu/`，可以用环境变量 `DANLU_HOME` 改到别处：
 
-- `config.toml`：配置文件；
+- `config.toml`：配置文件，只有命令行会改它，服务自己从不写；改完要重启服务才生效；
 - `secret.key`：会话签名用的密钥；
-- `danlu.db`：任务记录，SQLite 格式；
+- `danlu.db`：任务记录和登录密码的哈希，SQLite 格式；
+- `backup/`：升级前自动备份的数据库；
 - `logs/`：每个任务的日志；
 - `snapshots/`：代码快照；
-- `run/`：每个任务的包装脚本和退出码；
-- `tls/`：本地 CA 和服务器证书。
+- `run/`：每个任务的包装脚本、pid 和退出码；
+- `tls/`：本地 CA 和服务器证书。服务器证书快到期时，服务在运行中自己续签；`danlu cert --regen` 换的证书一分钟内生效，改了公网 IP 的话还是要重启，访问地址才会更新。
 
 ## 本地开发
 
@@ -146,7 +161,7 @@ go test ./cmd/... ./internal/...          # 单元测试（Windows 上也能跑�
 在 WSL 或 Linux 里用假 GPU 测试：
 
 ```bash
-bash scripts/e2e.sh      # 端到端测试：入口/登录/调度/取消/重启接管/日志/快照/限速/设备令牌/游标翻页/replace 升级
+bash scripts/e2e.sh      # 端到端测试：入口/登录/调度/Bash 环境/取消/重启接管/日志/快照/设备令牌/游标翻页/改密码/限速/replace 升级/正常停止/nvidia-smi 出错
 bash scripts/dev-wsl.sh  # 启动演示环境（4 张假 GPU，第 3 张模拟被外部占用），打开打印出的地址
 ```
 

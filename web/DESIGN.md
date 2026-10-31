@@ -1,6 +1,6 @@
 ---
 name: 丹炉 Danlu
-description: 每台 GPU 服务器自带的兜底控制面板：安静、密集、只用颜色说状态的控制台。
+description: 每台 GPU 服务器自带的控制面板，现阶段的主力界面：安静、密集、只用颜色说状态的控制台。
 colors:
   bg: "#fafafa"
   surface: "#ffffff"

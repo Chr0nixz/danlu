@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -88,8 +91,20 @@ var migrations = []string{
 	);
 	CREATE INDEX jobs_ended ON jobs(ended_at);`,
 	`ALTER TABLE jobs ADD COLUMN inherit_bashrc INTEGER NOT NULL DEFAULT 0;`,
+	// 占位时记下的开机标识：任务没留下退出码就没了时，用它区分"服务器重启"和"进程被外部终止"
+	`ALTER TABLE jobs ADD COLUMN boot_id TEXT NOT NULL DEFAULT '';`,
+	// 运行中会变的状态（密码哈希等）。config.toml 只放手写的静态配置，服务进程从不写它
+	`CREATE TABLE settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
+	);`,
 }
 
+// keepBackups 是升级前备份最多保留的份数。
+const keepBackups = 5
+
+// Open 打开数据库并执行迁移。要升级表结构时，先把旧库备份到数据库所在目录的 backup/ 下。
 func Open(path string) (*Store, error) {
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
@@ -99,7 +114,7 @@ func Open(path string) (*Store, error) {
 	// 单连接：并发量很小，避免 SQLite 写锁冲突
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
+	if err := s.migrate(filepath.Join(filepath.Dir(path), "backup")); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
@@ -108,20 +123,75 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
+func (s *Store) migrate(backupDir string) error {
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return err
 	}
+	if v > len(migrations) {
+		return fmt.Errorf("数据库是新版本的 danlu 建的（版本 %d，这个程序只认识到 %d），请换回新版本的程序", v, len(migrations))
+	}
+	if v > 0 && v < len(migrations) {
+		if err := s.backup(backupDir, v); err != nil {
+			return fmt.Errorf("升级前备份数据库失败: %w", err)
+		}
+	}
 	for i := v; i < len(migrations); i++ {
-		if _, err := s.db.Exec(migrations[i]); err != nil {
+		// 迁移和版本号放在同一个事务里：要么都生效，要么都不生效，不会留下改了一半的库
+		tx, err := s.db.Begin()
+		if err != nil {
 			return err
 		}
-		if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+		if _, err := tx.Exec(migrations[i]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("第 %d 次迁移失败: %w", i+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// backup 用 VACUUM INTO 生成一份一致的副本（WAL 里还没合并的内容也在里面），只保留最近 keepBackups 份。
+func (s *Store) backup(dir string, version int) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// 文件名以时间开头，按名字排序就是按时间排序
+	dst := filepath.Join(dir, fmt.Sprintf("danlu-%s-v%d.db", time.Now().Format("20060102-150405"), version))
+	if _, err := s.db.Exec("VACUUM INTO ?", dst); err != nil {
+		return err
+	}
+	old, _ := filepath.Glob(filepath.Join(dir, "danlu-*-v*.db"))
+	sort.Strings(old)
+	for len(old) > keepBackups {
+		_ = os.Remove(old[0])
+		old = old[1:]
+	}
+	return nil
+}
+
+// ---------- 运行时设置 ----------
+
+// GetSetting 读一项运行时设置，没有这一项时返回 ErrNotFound。
+func (s *Store) GetSetting(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return v, err
+}
+
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, value, updated_at) VALUES (?,?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, key, value, time.Now().Unix())
+	return err
 }
 
 // ---------- jobs ----------
@@ -141,6 +211,7 @@ type Job struct {
 	MasterPort      int               `json:"master_port"`
 	PID             int               `json:"pid"`
 	PIDStart        uint64            `json:"-"`
+	BootID          string            `json:"-"` // 占位时的开机标识
 	ExitCode        *int              `json:"exit_code"`
 	FailReason      string            `json:"fail_reason"`
 	CancelRequested bool              `json:"cancel_requested"`
@@ -163,7 +234,7 @@ func (j *Job) Finished() bool {
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
 	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
-	inherit_bashrc`
+	inherit_bashrc, boot_id`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -178,7 +249,7 @@ func scanJob(r scanner) (*Job, error) {
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
 		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
-		&j.InheritBashrc)
+		&j.InheritBashrc, &j.BootID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -232,10 +303,10 @@ func (s *Store) SaveJob(j *Job) error {
 	}
 	_, err := s.db.Exec(`UPDATE jobs SET gpus_assigned=?, status=?, master_port=?, pid=?, pid_starttime=?,
 		exit_code=?, fail_reason=?, cancel_requested=?, tracker_url=?, git_commit=?, git_branch=?, git_dirty=?,
-		snapshot_ok=?, snapshot_note=?, started_at=?, ended_at=? WHERE id=?`,
+		snapshot_ok=?, snapshot_note=?, started_at=?, ended_at=?, boot_id=? WHERE id=?`,
 		JoinInts(j.GPUsAssigned), j.Status, j.MasterPort, j.PID, int64(j.PIDStart),
 		exit, j.FailReason, j.CancelRequested, j.TrackerURL, j.GitCommit, j.GitBranch, j.GitDirty,
-		j.SnapshotOK, j.SnapshotNote, j.StartedAt, j.EndedAt, j.ID)
+		j.SnapshotOK, j.SnapshotNote, j.StartedAt, j.EndedAt, j.BootID, j.ID)
 	return err
 }
 

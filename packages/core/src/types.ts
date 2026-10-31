@@ -55,6 +55,14 @@ export interface GPU {
   external: Proc[]
 }
 
+export interface HostSample {
+  at: number
+  cpu_percent: number | null
+  memory_used_bytes: number
+  memory_total_bytes: number
+  memory_percent: number
+}
+
 export interface Me {
   username: string
   version: string

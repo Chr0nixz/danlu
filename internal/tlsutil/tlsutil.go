@@ -113,7 +113,12 @@ func EnsureServer(dir string, ips []net.IP) error {
 	return issueServer(f, ips)
 }
 
-func issueServer(f Files, ips []net.IP) error {
+// 服务器证书的有效期：397 天是浏览器接受的上限
+const serverValidity = 397 * 24 * time.Hour
+
+func issueServer(f Files, ips []net.IP) error { return issueServerFor(f, ips, serverValidity) }
+
+func issueServerFor(f Files, ips []net.IP, validity time.Duration) error {
 	ca, err := loadCert(f.CACert)
 	if err != nil {
 		return err
@@ -133,7 +138,7 @@ func issueServer(f Files, ips []net.IP) error {
 		// 浏览器只看 SAN 里的 IP。
 		Subject: pkix.Name{CommonName: "Danlu Server"},
 		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.AddDate(0, 0, 397),
+		NotAfter:     now.Add(validity),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		IPAddresses:  ips,

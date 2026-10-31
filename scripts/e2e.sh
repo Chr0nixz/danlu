@@ -27,8 +27,20 @@ wait_status() { # id status 超时秒数
     [ "$(job "$1" "d['status']")" = "$2" ] && return 0; sleep 0.5
   done; return 1
 }
+# 等进程真正起来（pid 不为 0）：任务一占位就是 running，那时还在做快照、没有进程
+wait_started() { # id 超时秒数
+  for _ in $(seq 1 $(( ${2:-10} * 2 ))); do
+    [ "$(job "$1" "d['pid'] > 0")" = True ] && return 0; sleep 0.5
+  done; return 1
+}
+wait_until() { # 超时秒数 命令…
+  local n=$1; shift
+  for _ in $(seq 1 $(( n * 2 ))); do "$@" && return 0; sleep 0.5; done; return 1
+}
+# 服务进程用单独的 HOME，里面的 .bashrc 起了一个后台进程（"Bash 环境"一节用）。
+# 参数是只给这个服务进程的 env 参数，比如 -u DANLU_FAKE_GPUS PATH=…
 start_server() {
-  "$BIN" serve >>"$T/server.log" 2>&1 &
+  env "$@" HOME="$T/userhome" "$BIN" serve >>"$T/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 40); do
     # 进程退出了（比如端口被占用）就立刻失败，免得请求打到别的服务上
@@ -38,7 +50,10 @@ start_server() {
   done
   echo "服务没有启动："; cat "$T/server.log"; exit 1
 }
-cleanup() { [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; }
+cleanup() {
+  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+  [ -f "$T/bashrc-bg.pid" ] && kill "$(cat "$T/bashrc-bg.pid")" 2>/dev/null
+}
 trap cleanup EXIT
 
 echo "== 初始化 =="
@@ -54,6 +69,12 @@ echo 'conda() { [ "$1" = activate ] && export FAKE_CONDA_ENV="$2"; }' > "$T/fake
 W=$T/work; mkdir -p "$W"
 git -C "$W" init -q && echo 'print("v1")' > "$W/train.py" && git -C "$W" add . \
   && git -C "$W" -c user.name=t -c user.email=t@t commit -qm init && echo 'print("v2")' > "$W/train.py"
+# 服务进程的 .bashrc：导出一个变量，再起一个占着输出管道的后台进程
+mkdir -p "$T/userhome"
+cat >"$T/userhome/.bashrc" <<EOF
+export E2E_BASHRC=loaded
+sleep 30 & echo \$! > "$T/bashrc-bg.pid"
+EOF
 
 start_server
 
@@ -96,6 +117,18 @@ check "工作目录不存在时拒绝" [ "$(code -X POST -H 'Content-Type: appli
 check "卡数超过总数时拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$W\",\"cmd\":\"x\",\"gpus\":9}" "$BASE/api/jobs")" = 400 ]
 check "不允许覆盖 CUDA_VISIBLE_DEVICES" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$W\",\"cmd\":\"x\",\"gpus\":1,\"env\":{\"CUDA_VISIBLE_DEVICES\":\"0\"}}" "$BASE/api/jobs")" = 400 ]
 
+echo "== Bash 环境（.bashrc 里起了后台进程）=="
+X=$(submit "{\"name\":\"X\",\"workdir\":\"$W\",\"cmd\":\"echo bashrc=\$E2E_BASHRC; sleep 1\",\"gpus\":0,\"inherit_bashrc\":true}")
+sleep 0.5
+t0=$(date +%s%N)
+Y=$(submit "{\"name\":\"Y\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
+t1=$(date +%s%N)
+check "X 加载 .bashrc 期间，提交别的任务不用等（1 秒内返回）" [ $(( (t1 - t0) / 1000000 )) -lt 1000 ]
+check "X 成功" wait_status "$X" succeeded 15
+check "X 的环境里有 .bashrc 导出的变量" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$X/log?tail=10000' | grep -q 'bashrc=loaded'"
+check ".bashrc 起的后台进程已被清理" bash -c "! kill -0 \$(cat '$T/bashrc-bg.pid') 2>/dev/null"
+check "Y 成功" wait_status "$Y" succeeded 10
+
 echo "== 退出码与残留进程 =="
 E=$(submit "{\"name\":\"E\",\"workdir\":\"$W\",\"cmd\":\"echo bye; exit 3\",\"gpus\":1}")
 check "退出码 3 记为失败" wait_status "$E" failed 10
@@ -108,7 +141,7 @@ check "没有遗留 F 的 sleep 进程" bash -c "! grep -l 'DANLU_JOB_ID=$F' /pr
 
 echo "== 取消（忽略 SIGTERM 的进程要被强杀）=="
 G=$(submit "{\"name\":\"G\",\"workdir\":\"$W\",\"cmd\":\"trap '' TERM; python3 -c 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(1000)'\",\"gpus\":2}")
-check "G 开始运行" wait_status "$G" running 10
+check "G 开始运行" wait_started "$G" 10
 api -X POST "$BASE/api/jobs/$G/cancel" -d '{}' >/dev/null
 check "G 在宽限期后被强杀，状态为已取消" wait_status "$G" cancelled 15
 sleep 0.5
@@ -116,7 +149,7 @@ check "G 的所有进程都已结束" bash -c "! grep -l 'DANLU_JOB_ID=$G' /proc
 
 echo "== danlu 重启后接管 =="
 H=$(submit "{\"name\":\"H\",\"workdir\":\"$W\",\"cmd\":\"for i in 1 2 3 4 5 6; do echo step \$i; sleep 1; done\",\"gpus\":1}")
-check "H 开始运行" wait_status "$H" running 10
+check "H 开始运行" wait_started "$H" 10
 kill -9 "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
 sleep 1
 check "danlu 被杀后训练进程还活着" bash -c "grep -l 'DANLU_JOB_ID=$H' /proc/[0-9]*/environ 2>/dev/null | grep -q ."
@@ -166,6 +199,28 @@ rest = $NEXT_IDS
 assert first and rest and not set(first) & set(rest), (first, rest)
 " "$FIRST"
 
+echo "== 配置和密码 =="
+"$BIN" port 30001 >/dev/null # 命令行改了配置，还没重启
+CFG_SUM=$(sha256sum "$DANLU_HOME/config.toml")
+check "面板改密码成功" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"old":"testpass123","new":"newpass1234"}' "$BASE/api/settings/password")" = 200 ]
+check "面板改密码不改写 config.toml（命令行刚改的端口还在）" [ "$(sha256sum "$DANLU_HOME/config.toml")" = "$CFG_SUM" ]
+check "config.toml 里没有密码哈希" bash -c "! grep -q password_hash '$DANLU_HOME/config.toml'"
+login() { # 密码：用新的 cookie 文件过入口、登录，输出状态码
+  rm -f "$T/jar-login"
+  curl -s -c "$T/jar-login" -o /dev/null "$BASE/$ENTRANCE"
+  curl -s -b "$T/jar-login" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d "{\"username\":\"admin\",\"password\":\"$1\"}" "$BASE/api/login"
+}
+check "新密码立即可以登录" [ "$(login newpass1234)" = 200 ]
+# 和客户端发出的脚本一样：密码放在带引号的 heredoc 里，经标准输入传给 passwd
+sh -s >/dev/null <<EOF
+exec "$BIN" passwd --password-stdin <<'DANLU_INPUT_1'
+new\$pass word\`x
+DANLU_INPUT_1
+EOF
+check "passwd --password-stdin 改的密码不用重启就生效" [ "$(login 'new$pass word`x')" = 200 ]
+check "改完以后旧密码失效" [ "$(login newpass1234)" = 401 ]
+
 echo "== 登录限速 =="
 curl -s -c "$T/jar2" -o /dev/null "$BASE/$ENTRANCE"
 for _ in 1 2 3 4 5; do curl -s -b "$T/jar2" -o /dev/null -H 'Content-Type: application/json' -d '{"username":"admin","password":"x"}' "$BASE/api/login"; done
@@ -174,17 +229,55 @@ check "连续输错 5 次后被锁定（429）" [ "$(curl -s -o /dev/null -w '%{
 echo "== 客户端运维用的子命令 =="
 cp "$BIN" "$T/danlu-copy" && cp "$BIN" "$T/danlu-copy.new"
 check "replace 用新程序原子替换旧程序" bash -c "'$T/danlu-copy.new' replace --no-restart --json '$T/danlu-copy' | grep -q '\"restarted\": false' && [ ! -e '$T/danlu-copy.new' ]"
-OLD_HASH=$(grep password_hash "$DANLU_HOME/config.toml")
-# 和客户端发出的脚本一样：密码放在带引号的 heredoc 里，经标准输入传给 passwd
-sh -s >/dev/null <<EOF
-exec "$BIN" passwd --password-stdin <<'DANLU_INPUT_1'
-new\$pass word\`x
-DANLU_INPUT_1
+check "replace 把旧程序留成 .prev" [ -x "$T/danlu-copy.prev" ]
+
+echo "== 停止服务 =="
+kill -TERM "$SERVER_PID"
+check "收到 SIGTERM 后正常停止" wait_until 10 grep -q 'danlu 已停止' "$T/server.log"
+wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+
+echo "== GPU 数据不可信时暂停分卡（假 nvidia-smi）=="
+FB=$T/fakebin; mkdir -p "$FB"
+echo ok >"$T/smi.mode"
+cat >"$FB/nvidia-smi" <<EOF
+#!/bin/bash
+# ok：正常；noprocs：查不到卡上的进程；hang：卡住
+mode=\$(cat "$T/smi.mode")
+case "\$1" in
+  --query-gpu=*)
+    [ "\$mode" = hang ] && sleep 300
+    echo "0, GPU-aaaa, Fake A100, 10, 100, 40960, 40, 60.5"
+    echo "1, GPU-bbbb, Fake A100, 0, 0, 40960, 35, 50.0" ;;
+  --query-compute-apps=*)
+    [ "\$mode" = noprocs ] && exit 6 ;;
+esac
+exit 0
 EOF
-check "passwd --password-stdin 从标准输入读密码" [ "$(grep password_hash "$DANLU_HOME/config.toml")" != "$OLD_HASH" ]
+chmod +x "$FB/nvidia-smi"
+SMI_HOME=$T/home-smi SMI_PORT=$((PORT + 2))
+DANLU_HOME=$SMI_HOME "$BIN" init --yes --tls off --port $SMI_PORT --password testpass123 --public-ip 127.0.0.1 >/dev/null
+BASE=http://127.0.0.1:$SMI_PORT JAR=$T/cookies-smi
+start_server -u DANLU_FAKE_GPUS -u DANLU_FAKE_BUSY DANLU_HOME="$SMI_HOME" PATH="$FB:$PATH"
+curl -s -c "$JAR" -o /dev/null "$BASE/$(DANLU_HOME=$SMI_HOME "$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')"
+api -o /dev/null -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login"
+gpus_has() { api "$BASE/api/gpus" | grep -q "$1"; }
+check "nvidia-smi 正常时看到 2 张卡、没有报错" [ "$(api "$BASE/api/gpus" | json "str(len(d['gpus'])) + (d.get('error') or '')")" = 2 ]
+echo noprocs >"$T/smi.mode"
+check "查不到卡上的进程时报错" wait_until 10 gpus_has '查不到 GPU 上的进程'
+CPU=$(submit "{\"name\":\"cpu\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
+GJ=$(submit "{\"name\":\"gpu\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
+check "排在前面、不用卡的任务照常运行" wait_status "$CPU" succeeded 10
+sleep 2
+check "要卡的任务保持排队" [ "$(job "$GJ" "d['status']")" = queued ]
+echo hang >"$T/smi.mode"
+check "nvidia-smi 卡住时报错" wait_until 25 gpus_has 'nvidia-smi 执行失败'
+check "nvidia-smi 卡住期间要卡的任务还在排队" [ "$(job "$GJ" "d['status']")" = queued ]
+echo ok >"$T/smi.mode"
+check "nvidia-smi 恢复后不再报错" wait_until 25 bash -c "! curl -s -b '$JAR' '$BASE/api/gpus' | grep -q '\"error\"'"
+check "恢复后排队的任务分到卡并成功" wait_status "$GJ" succeeded 15
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
 
 echo "== HTTPS（本地 CA）=="
-kill "$SERVER_PID" 2>/dev/null; SERVER_PID=
 export DANLU_HOME=$T/home-tls
 TLS_PORT=$((PORT + 1))
 "$BIN" init --yes --port $TLS_PORT --password testpass123 --public-ip 127.0.0.1 >/dev/null

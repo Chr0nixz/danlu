@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -29,6 +30,7 @@ import (
 	"danlu/internal/scheduler"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
+	"danlu/internal/system"
 	"danlu/internal/tlsutil"
 	"danlu/internal/webui"
 
@@ -190,11 +192,6 @@ func cmdInit(args []string) error {
 	} else if len(pw) < 8 {
 		return errors.New("密码至少 8 位")
 	}
-	hash, err := auth.HashPassword(pw)
-	if err != nil {
-		return err
-	}
-	c.Auth.PasswordHash = hash
 	c.Server.Entrance = config.RandomEntrance()
 	if err := c.Validate(); err != nil {
 		return err
@@ -209,6 +206,9 @@ func cmdInit(args []string) error {
 		if err := tlsutil.Generate(p.TLS, tlsutil.IPs(c.Server.PublicIP)); err != nil {
 			return fmt.Errorf("生成证书失败: %w", err)
 		}
+	}
+	if err := setPassword(p, pw); err != nil {
+		return err
 	}
 	if err := config.Save(p, c); err != nil {
 		return err
@@ -254,12 +254,19 @@ func cmdServe(args []string) error {
 		return err
 	}
 	defer st.Close()
+	if imported, err := auth.ImportPasswordHash(st, c.Auth.PasswordHash); err != nil {
+		return err
+	} else if imported {
+		log.Printf("已把 config.toml 里的密码哈希导入数据库，以后用 danlu passwd 修改密码")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	mon := gpu.NewMonitor(gpu.NewSource())
-	go mon.Run(ctx, 2*time.Second)
+	go mon.Run(ctx)
+	host := system.NewMonitor(system.NewSource())
+	go host.Run(ctx)
 
 	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, CondaBase: c.Runtime.CondaBase}
 	mgr := scheduler.New(st, mon, run, scheduler.Options{
@@ -272,50 +279,74 @@ func cmdServe(args []string) error {
 		KillGrace:       c.Runtime.KillGrace.Duration,
 	})
 	mgr.Recover()
-	go mgr.Run(ctx)
+	// Run 退出前会等正在启动的任务都落库。数据库要在它之后关：defer 按相反的顺序执行
+	mgrDone := make(chan struct{})
+	go func() { mgr.Run(ctx); close(mgrDone) }()
+	defer func() { stop(); <-mgrDone }()
 
 	au := auth.New(st, auth.Options{
 		Entrance: c.Server.Entrance, Secret: secret, Secure: c.TLS.Mode != config.TLSOff,
-		Username: c.Auth.Username, PasswordHash: c.Auth.PasswordHash, SessionTTL: c.Auth.SessionTTL.Duration,
+		Username: c.Auth.Username, SessionTTL: c.Auth.SessionTTL.Duration,
 		MaxFailures: c.Auth.MaxFailures, Lockout: c.Auth.Lockout.Duration,
 	})
-	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, Auth: au, Runner: run,
+	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, System: host, Auth: au, Runner: run,
 		Static: webui.FS(), Version: version}
 
+	// 请求的 context 都从 base 派生：停止时先取消它，日志 SSE 这类长连接马上退出
+	base, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
 	httpSrv := &http.Server{
 		Addr:              net.JoinHostPort(c.Server.Bind, strconv.Itoa(c.Server.Port)),
 		Handler:           srv.Handler(),
+		BaseContext:       func(net.Listener) context.Context { return base },
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second, // 请求体最多 1MB
+		WriteTimeout:      30 * time.Second, // 日志 SSE 每次写之前续期，下载时清掉（见 api）
+		IdleTimeout:       2 * time.Minute,  // 面板直接开在公网上，空闲连接不能一直挂着
+		MaxHeaderBytes:    64 << 10,
 		// 公网上扫描器很多，TLS 握手失败的日志直接丢掉
 		ErrorLog: log.New(filteredWriter{}, "", log.LstdFlags),
 	}
-	go func() {
-		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		httpSrv.Shutdown(sctx)
-	}()
 
 	log.Printf("danlu %s 启动，数据目录 %s", version, p.Home)
 	log.Printf("访问地址 %s", c.URL())
+	listen := httpSrv.ListenAndServe
 	switch c.TLS.Mode {
-	case config.TLSLocalCA:
-		if err := tlsutil.EnsureServer(p.TLS, tlsutil.IPs(c.Server.PublicIP)); err != nil {
+	case config.TLSLocalCA, config.TLSFile:
+		certFile, keyFile := c.TLS.CertFile, c.TLS.KeyFile
+		var renew func() error // file 模式：证书是用户自己管的，只在文件变了时重新加载
+		if c.TLS.Mode == config.TLSLocalCA {
+			f, ips := tlsutil.FilesIn(p.TLS), tlsutil.IPs(c.Server.PublicIP)
+			certFile, keyFile = f.Cert, f.Key
+			renew = func() error { return tlsutil.EnsureServer(p.TLS, ips) }
+		}
+		// 证书放在内存里，每次握手时取当前那张：续期和 cert --regen 都不用重启
+		certs, err := tlsutil.NewCertManager(certFile, keyFile, renew)
+		if err != nil {
 			return err
 		}
-		f := tlsutil.FilesIn(p.TLS)
-		err = httpSrv.ListenAndServeTLS(f.Cert, f.Key)
-	case config.TLSFile:
-		err = httpSrv.ListenAndServeTLS(c.TLS.CertFile, c.TLS.KeyFile)
+		go certs.Run(ctx)
+		httpSrv.TLSConfig = &tls.Config{GetCertificate: certs.GetCertificate}
+		listen = func() error { return httpSrv.ListenAndServeTLS("", "") }
 	default:
 		log.Printf("⚠ 没有启用 HTTPS，只能用于本地测试")
-		err = httpSrv.ListenAndServe()
 	}
-	if errors.Is(err, http.ErrServerClosed) {
-		log.Printf("danlu 已停止（正在运行的训练任务不受影响）")
-		return nil
+	errc := make(chan error, 1)
+	go func() { errc <- listen() }()
+	select {
+	case err := <-errc:
+		return err // 端口被占用之类的启动错误
+	case <-ctx.Done():
 	}
-	return err
+
+	log.Printf("正在停止 danlu")
+	cancelBase()
+	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(sctx) // 等正在处理的请求（比如提交任务）完成
+	<-mgrDone                  // 等调度循环和正在启动的任务都落库
+	log.Printf("danlu 已停止（正在运行的训练任务不受影响）")
+	return nil
 }
 
 type filteredWriter struct{}
@@ -497,21 +528,31 @@ func cmdPasswd(args []string) error {
 	if len(*pw) < 8 {
 		return errors.New("密码至少 8 位")
 	}
-	hash, err := auth.HashPassword(*pw)
+	if err := setPassword(p, *pw); err != nil {
+		return err
+	}
+	// 旧版本把哈希放在配置文件里，删掉免得留着两份
+	if c.Auth.PasswordHash != "" {
+		c.Auth.PasswordHash = ""
+		if err := config.Save(p, c); err != nil {
+			return err
+		}
+	}
+	fmt.Println("密码已修改，立即生效，所有已登录的会话已注销")
+	return nil
+}
+
+// setPassword 把密码存进数据库，并让所有已登录的会话失效。服务正在运行时也立即生效。
+func setPassword(p config.Paths, pw string) error {
+	st, err := store.Open(p.DB)
 	if err != nil {
 		return err
 	}
-	c.Auth.PasswordHash = hash
-	if err := config.Save(p, c); err != nil {
+	defer st.Close()
+	if err := auth.SetPassword(st, pw); err != nil {
 		return err
 	}
-	// 让所有已登录的会话失效
-	if st, err := store.Open(p.DB); err == nil {
-		st.DeleteSessionsExcept("")
-		st.Close()
-	}
-	fmt.Println("密码已修改，所有已登录的会话已注销。" + restartHint)
-	return nil
+	return st.DeleteSessionsExcept("")
 }
 
 func cmdEntrance(args []string) error {
@@ -625,6 +666,9 @@ func cmdReplace(args []string) error {
 	if self == target {
 		return errors.New("新程序和要替换的是同一个文件")
 	}
+	if err := keepPrevious(target); err != nil {
+		return fmt.Errorf("备份旧程序失败: %w", err)
+	}
 	if filepath.Dir(self) == filepath.Dir(target) {
 		err = os.Rename(self, target)
 	} else {
@@ -645,6 +689,20 @@ func cmdReplace(args []string) error {
 	}
 	fmt.Printf("已把 %s 换成 %s\n", target, version)
 	return nil
+}
+
+// keepPrevious 把要被替换的旧程序留一份 <路径>.prev，回滚时换回来（README「升级与回滚」）。
+// 优先用硬链接：不用复制，替换后它还指向旧文件。
+func keepPrevious(target string) error {
+	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	prev := target + ".prev"
+	_ = os.Remove(prev)
+	if os.Link(target, prev) == nil {
+		return nil
+	}
+	return copyExecutable(target, prev)
 }
 
 // copyExecutable 先复制到同目录的临时文件，再改名过去，保证替换是原子的。

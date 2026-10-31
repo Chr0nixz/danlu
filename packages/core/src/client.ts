@@ -2,6 +2,7 @@ import type {
   AuditEntry,
   DeviceToken,
   GPU,
+  HostSample,
   Job,
   JobsQuery,
   JobStatus,
@@ -85,6 +86,7 @@ export function createApi(t: Transport, opt: ApiOptions) {
     me: () => get<Me>('/api/me'),
 
     gpus: () => get<{ gpus: GPU[]; updated_at: number; error?: string }>('/api/gpus'),
+    hostMetrics: () => get<{ samples: HostSample[]; updated_at: number; error?: string }>('/api/system'),
     condaEnvs: () =>
       get<{ available: boolean; base?: string; envs: { name: string; path: string }[]; error?: string }>('/api/conda-envs'),
     dirs: (path: string) => get<{ dirs: string[] }>(`/api/fs/dirs${qs({ path })}`),

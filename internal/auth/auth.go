@@ -44,20 +44,18 @@ var (
 )
 
 type Options struct {
-	Entrance     string
-	Secret       []byte
-	Secure       bool // 走 HTTPS 时给 cookie 加 Secure
-	Username     string
-	PasswordHash string
-	SessionTTL   time.Duration
-	MaxFailures  int
-	Lockout      time.Duration
+	Entrance    string
+	Secret      []byte
+	Secure      bool // 走 HTTPS 时给 cookie 加 Secure
+	Username    string
+	SessionTTL  time.Duration
+	MaxFailures int
+	Lockout     time.Duration
 }
 
 type Auth struct {
 	opt   Options
 	store *store.Store
-	mu    sync.RWMutex // 保护 opt.PasswordHash
 
 	usedMu sync.Mutex
 	used   map[int64]time.Time // 设备令牌上次写入"最后使用时间"的时刻，避免每个请求都写库
@@ -72,16 +70,41 @@ func HashPassword(pw string) (string, error) {
 	return string(b), err
 }
 
-func (a *Auth) SetPasswordHash(h string) {
-	a.mu.Lock()
-	a.opt.PasswordHash = h
-	a.mu.Unlock()
+// 密码哈希存在数据库的 settings 表里，不在 config.toml：服务进程从不写配置文件，
+// 面板上改密码不会把命令行刚改过的配置写回旧值；danlu passwd 改完也立即生效。
+const passwordKey = "auth.password_hash"
+
+// SetPassword 把新密码的哈希存进数据库，立即生效。面板改密码、danlu passwd、danlu init 都走这里。
+func SetPassword(st *store.Store, pw string) error {
+	h, err := HashPassword(pw)
+	if err != nil {
+		return err
+	}
+	return st.SetSetting(passwordKey, h)
 }
 
+// ImportPasswordHash 兼容旧版本的安装：库里还没有密码哈希时，导入 config.toml 里的 auth.password_hash，
+// 返回是否导入了。两边都没有时返回错误。
+func ImportPasswordHash(st *store.Store, fromConfig string) (bool, error) {
+	_, err := st.GetSetting(passwordKey)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	if fromConfig == "" {
+		return false, errors.New("还没有设置登录密码，请先运行 danlu passwd")
+	}
+	return true, st.SetSetting(passwordKey, fromConfig)
+}
+
+// CheckPassword 每次从库里读哈希（只有登录和改密码时用到）。读不到就当作密码错误。
 func (a *Auth) CheckPassword(pw string) bool {
-	a.mu.RLock()
-	h := a.opt.PasswordHash
-	a.mu.RUnlock()
+	h, err := a.store.GetSetting(passwordKey)
+	if err != nil {
+		return false
+	}
 	return bcrypt.CompareHashAndPassword([]byte(h), []byte(pw)) == nil
 }
 

@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"danlu/internal/execx"
 	"danlu/internal/procfs"
+	"danlu/internal/sample"
 )
 
 type Proc struct {
@@ -59,10 +60,21 @@ type SMI struct{}
 
 const gpuQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
 
-func (SMI) Query(ctx context.Context) ([]GPU, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+// ErrProcsUnknown 表示卡的数据拿到了，但查不到卡上的进程。这时被外部进程占着的卡看起来是空的，
+// 所以 Query 照常返回卡的数据（面板能显示），同时带上这个错误，调度器据此不分配 GPU。
+var ErrProcsUnknown = errors.New("查不到 GPU 上的进程，没法判断哪些卡被外部占用")
+
+// 每次调用单独计时：没开 persistence mode 的机器上，nvidia-smi 调一次就可能要几秒
+const smiTimeout = 8 * time.Second
+
+func smi(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, smiTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu="+gpuQuery, "--format=csv,noheader,nounits").Output()
+	return execx.Output(execx.Command(ctx, "nvidia-smi", append(args, "--format=csv,noheader,nounits")...))
+}
+
+func (SMI) Query(ctx context.Context) ([]GPU, error) {
+	out, err := smi(ctx, "--query-gpu="+gpuQuery)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi 执行失败: %w", err)
 	}
@@ -70,9 +82,9 @@ func (SMI) Query(ctx context.Context) ([]GPU, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err = exec.CommandContext(ctx, "nvidia-smi", "--query-compute-apps=pid,gpu_uuid,used_memory", "--format=csv,noheader,nounits").Output()
+	out, err = smi(ctx, "--query-compute-apps=pid,gpu_uuid,used_memory")
 	if err != nil {
-		return gpus, nil // 查不到进程不致命，只是无法识别外部占用
+		return gpus, fmt.Errorf("%w（nvidia-smi: %v）", ErrProcsUnknown, err)
 	}
 	apps := ParseApps(string(out))
 	byUUID := map[string]int{}
@@ -194,45 +206,20 @@ func (f *Fake) Query(context.Context) ([]GPU, error) {
 
 // ---------- 监控器：定时采集并缓存最新结果 ----------
 
-type Monitor struct {
-	src Source
-	mu  sync.RWMutex
-	gpu []GPU
-	err error
-	at  time.Time
+type Monitor = sample.Sampler[[]GPU]
+
+// NewMonitor 每 2 秒采集一次。超过 20 秒没有一次采集完成（两次 nvidia-smi 各 8 秒超时，再留点余量），
+// Latest 就返回错误，调度器暂停分配 GPU。
+func NewMonitor(src Source) *Monitor {
+	return &Monitor{Name: "GPU 数据", Hint: "（nvidia-smi 可能卡住了）",
+		Every: 2 * time.Second, Stale: 20 * time.Second, Query: src.Query, Clone: cloneGPUs}
 }
 
-func NewMonitor(src Source) *Monitor { return &Monitor{src: src} }
-
-func (m *Monitor) Run(ctx context.Context, every time.Duration) {
-	m.refresh(ctx)
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			m.refresh(ctx)
-		}
-	}
-}
-
-func (m *Monitor) refresh(ctx context.Context) {
-	g, err := m.src.Query(ctx)
-	m.mu.Lock()
-	m.gpu, m.err, m.at = g, err, time.Now()
-	m.mu.Unlock()
-}
-
-// Latest 返回最近一次采集结果的副本。
-func (m *Monitor) Latest() ([]GPU, time.Time, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]GPU, len(m.gpu))
-	for i, g := range m.gpu {
+func cloneGPUs(gpus []GPU) []GPU {
+	out := make([]GPU, len(gpus))
+	for i, g := range gpus {
 		g.Procs = append([]Proc(nil), g.Procs...)
 		out[i] = g
 	}
-	return out, m.at, m.err
+	return out
 }

@@ -14,12 +14,13 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"danlu/internal/execx"
 )
 
 type Options struct {
@@ -218,9 +219,9 @@ func walkFiles(ctx context.Context, root string, meta *Meta) ([]string, error) {
 }
 
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd := execx.Command(ctx, "git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
-	return cmd.Output()
+	return execx.Output(cmd)
 }
 
 func gitOK(ctx context.Context, dir string) bool {

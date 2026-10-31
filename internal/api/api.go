@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -21,12 +20,14 @@ import (
 
 	"danlu/internal/auth"
 	"danlu/internal/config"
+	"danlu/internal/execx"
 	"danlu/internal/gpu"
 	"danlu/internal/logs"
 	"danlu/internal/runner"
 	"danlu/internal/scheduler"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
+	"danlu/internal/system"
 	"danlu/internal/tlsutil"
 )
 
@@ -39,12 +40,12 @@ type Server struct {
 	Store   *store.Store
 	Mgr     *scheduler.Manager
 	GPUs    *gpu.Monitor
+	System  *system.Monitor
 	Auth    *auth.Auth
 	Runner  *runner.Runner
 	Static  fs.FS
 	Version string
 
-	cfgMu sync.Mutex
 	conda condaCache
 }
 
@@ -55,6 +56,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.me)
 
 	mux.HandleFunc("GET /api/gpus", s.gpus)
+	mux.HandleFunc("GET /api/system", s.systemMetrics)
 	mux.HandleFunc("GET /api/conda-envs", s.condaEnvs)
 	mux.HandleFunc("GET /api/fs/dirs", s.dirs)
 	mux.HandleFunc("GET /api/fs/git", s.gitHead)
@@ -139,6 +141,14 @@ func attachment(w http.ResponseWriter, name, contentType string) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, name))
 }
 
+// sseWriteTimeout 是日志 SSE 每次写的期限，每写一次续期一次。
+const sseWriteTimeout = 30 * time.Second
+
+// noWriteTimeout 清掉服务器的写超时：下载大日志和快照时，手机网络慢也能下完。
+func noWriteTimeout(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+}
+
 // ---------- 登录 ----------
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +222,15 @@ func (s *Server) gpus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
+func (s *Server) systemMetrics(w http.ResponseWriter, r *http.Request) {
+	samples, at, err := s.System.Latest()
+	resp := map[string]any{"samples": samples, "updated_at": at.Unix()}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	writeJSON(w, 200, resp)
+}
+
 // ---------- conda 环境 ----------
 
 type condaEnv struct {
@@ -249,7 +268,7 @@ func listCondaEnvs(base string) ([]condaEnv, string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "env", "list", "--json").Output()
+	out, err := execx.Output(execx.Command(ctx, bin, "env", "list", "--json"))
 	if err != nil {
 		return []condaEnv{}, "执行 conda env list 失败: " + err.Error()
 	}
@@ -473,18 +492,26 @@ func (s *Server) jobLogStream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeErr(w, 500, "不支持流式输出")
-		return
-	}
+	rc := http.NewResponseController(w)
 	off, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
-	flusher.Flush()
+	// 服务器的 WriteTimeout 管整个响应，长连接要每次写之前续期：
+	// 客户端不读数据时，这个处理函数最多卡 sseWriteTimeout 就退出
+	send := func(format string, a ...any) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		if _, err := fmt.Fprintf(w, format, a...); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+	_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	if rc.Flush() != nil {
+		return
+	}
 
 	p := s.Runner.LogPath(j.ID)
 	tick := time.NewTicker(500 * time.Millisecond)
@@ -499,20 +526,21 @@ func (s *Server) jobLogStream(w http.ResponseWriter, r *http.Request) {
 		if len(data) > 0 {
 			// o: 这段内容的起始字节偏移，n: 下一段的起始偏移（前端据此去重和续传）
 			b, _ := json.Marshal(map[string]any{"o": next - int64(len(data)), "n": next, "t": string(data)})
-			fmt.Fprintf(w, "data: %s\n\n", b)
-			flusher.Flush()
+			if !send("data: %s\n\n", b) {
+				return
+			}
 			off = next
 			if next < size {
 				continue
 			}
 		} else if cur, err := s.Store.GetJob(j.ID); err == nil && cur.Finished() && (rerr != nil || off >= size) {
-			fmt.Fprintf(w, "event: end\ndata: {\"status\":%q}\n\n", cur.Status)
-			flusher.Flush()
+			send("event: end\ndata: {\"status\":%q}\n\n", cur.Status)
 			return
 		}
 		if time.Since(lastBeat) > 15*time.Second {
-			fmt.Fprint(w, ": ping\n\n")
-			flusher.Flush()
+			if !send(": ping\n\n") {
+				return
+			}
 			lastBeat = time.Now()
 		}
 		select {
@@ -535,6 +563,7 @@ func (s *Server) jobLogDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	attachment(w, fmt.Sprintf("danlu-%d.log", j.ID), "text/plain; charset=utf-8")
+	noWriteTimeout(w)
 	io.Copy(w, f)
 }
 
@@ -600,6 +629,7 @@ func (s *Server) snapshotDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	attachment(w, fmt.Sprintf("danlu-%d-code.tar.gz", j.ID), "application/gzip")
+	noWriteTimeout(w)
 	io.Copy(w, f)
 }
 
@@ -645,20 +675,11 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "新密码至少 8 位")
 		return
 	}
-	hash, err := auth.HashPassword(body.New)
-	if err != nil {
-		writeErr(w, 500, err.Error())
+	// 只写数据库，不碰 config.toml：配置文件只有命令行会写
+	if err := auth.SetPassword(s.Store, body.New); err != nil {
+		writeErr(w, 500, "保存密码失败: "+err.Error())
 		return
 	}
-	s.cfgMu.Lock()
-	s.Cfg.Auth.PasswordHash = hash
-	err = config.Save(s.Paths, s.Cfg)
-	s.cfgMu.Unlock()
-	if err != nil {
-		writeErr(w, 500, "保存配置失败: "+err.Error())
-		return
-	}
-	s.Auth.SetPasswordHash(hash)
 	_ = s.Store.DeleteSessionsExcept(s.Auth.CurrentSessionHash(r))
 	s.Store.Audit(auth.ClientIP(r), "password_change", "其他会话已注销")
 	writeJSON(w, 200, map[string]any{"ok": true})

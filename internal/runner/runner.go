@@ -1,12 +1,16 @@
 // Package runner 负责把一个任务真正跑起来：生成包装脚本、注入环境变量、启动、结束进程。
+// *Runner 实现了 scheduler.Executor。
 package runner
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"danlu/internal/procfs"
 )
 
 type Runner struct {
@@ -16,15 +20,14 @@ type Runner struct {
 }
 
 type Spec struct {
-	JobID         int64
-	Name          string
-	Workdir       string
-	CondaEnv      string
-	Cmd           string
-	Env           map[string]string
-	InheritBashrc bool
-	GPUs          []int
-	Port          int
+	JobID    int64
+	Name     string
+	Workdir  string
+	CondaEnv string
+	Cmd      string
+	Env      map[string]string
+	GPUs     []int
+	Port     int
 }
 
 func (r *Runner) RunDir(id int64) string  { return filepath.Join(r.RunRoot, strconv.FormatInt(id, 10)) }
@@ -40,8 +43,10 @@ func ReservedEnv(key string) bool {
 }
 
 // 用环境变量传参，脚本里不拼接任何用户输入，不用担心引号转义。
+// 第一件事是写 pid 文件：danlu 在启动途中退出时，重启后靠它把进程认回来，而不是再启动一次。
 const runScript = `#!/usr/bin/env bash
 # 由 danlu 生成，请勿修改
+echo $$ > "$DANLU_RUN_DIR/pid.tmp" && mv -f "$DANLU_RUN_DIR/pid.tmp" "$DANLU_RUN_DIR/pid"
 finish() { echo "$1" > "$DANLU_RUN_DIR/exitcode.tmp" && mv -f "$DANLU_RUN_DIR/exitcode.tmp" "$DANLU_RUN_DIR/exitcode"; exit "$1"; }
 cd "$DANLU_WORKDIR" || { echo "[danlu] 无法进入工作目录: $DANLU_WORKDIR"; finish 1; }
 if [ -n "$DANLU_CONDA_ENV" ]; then
@@ -64,6 +69,7 @@ func (r *Runner) prepare(s Spec) (string, error) {
 		return "", err
 	}
 	_ = os.Remove(filepath.Join(dir, "exitcode"))
+	_ = os.Remove(filepath.Join(dir, "pid"))
 	if err := os.WriteFile(filepath.Join(dir, "cmd.sh"), []byte(s.Cmd+"\n"), 0o600); err != nil {
 		return "", err
 	}
@@ -131,9 +137,66 @@ func (r *Runner) BuildEnv(base []string, s Spec) []string {
 	return out
 }
 
+// LoadEnv 返回任务的基础环境：默认是 danlu 自己的环境，勾选了"Bash 环境"时是加载 ~/.bashrc 之后的环境。
+func (r *Runner) LoadEnv(ctx context.Context, inheritBashrc bool) ([]string, error) {
+	if !inheritBashrc {
+		return os.Environ(), nil
+	}
+	return loadBashrcEnvironment(ctx)
+}
+
 // ReadExitCode 读取包装脚本写下的退出码；进程被强杀时没有这个文件。
 func (r *Runner) ReadExitCode(id int64) (int, bool) {
-	b, err := os.ReadFile(filepath.Join(r.RunDir(id), "exitcode"))
+	return readInt(filepath.Join(r.RunDir(id), "exitcode"))
+}
+
+// Launched 表示包装脚本运行过（留下了 pid 文件）。
+func (r *Runner) Launched(id int64) bool {
+	_, err := os.Stat(filepath.Join(r.RunDir(id), "pid"))
+	return err == nil
+}
+
+// Alive 判断任务的包装脚本还在不在。没有记下启动时间时（启动后马上读 /proc 失败），
+// 改为核对进程环境里的 DANLU_JOB_ID，防止 pid 被别的进程复用后认错。
+func (r *Runner) Alive(id int64, pid int, start uint64) bool {
+	if !procfs.Alive(pid, start) {
+		return false
+	}
+	if start != 0 {
+		return true
+	}
+	v, ok := procfs.EnvVar(pid, "DANLU_JOB_ID")
+	return ok && v == strconv.FormatInt(id, 10)
+}
+
+// Adopt 找回 danlu 启动途中退出时留下的任务进程，返回包装脚本的 pid 和启动时间。
+// 先读 pid 文件；没有的话（脚本还没来得及写），再按 DANLU_JOB_ID 找会话首进程：
+// 包装脚本是用 setsid 启动的，它的 pid 就是进程组号。
+func (r *Runner) Adopt(id int64) (int, uint64, bool) {
+	if pid, ok := readInt(filepath.Join(r.RunDir(id), "pid")); ok && r.Alive(id, pid, 0) {
+		if st, err := procfs.ReadStat(pid); err == nil {
+			return pid, st.StartTime, true
+		}
+	}
+	for _, pid := range procfs.FindByEnv("DANLU_JOB_ID", strconv.FormatInt(id, 10)) {
+		if st, err := procfs.ReadStat(pid); err == nil && st.PGID == pid {
+			return pid, st.StartTime, true
+		}
+	}
+	return 0, 0, false
+}
+
+// BootID 是这次开机的标识，服务器重启后会变。读不到时返回空字符串。
+func (r *Runner) BootID() string {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func readInt(path string) (int, bool) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0, false
 	}

@@ -1,0 +1,110 @@
+# 持续集成：把 AGENTS.md「Commands」一节里的检查自动跑一遍。
+# push 到 main 和所有 PR 时触发。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一个 PR 有新提交时取消还没跑完的旧运行；main 上的每次 push 都跑完
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Go、前端与 e2e（Linux）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      # 版本取 go.mod 里的 go 指令；setup-go 默认按 go.sum 缓存 module 和构建缓存
+      - name: 安装 Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # 在 Linux 上跑，*_linux.go 和 *_linux_test.go 也会一起编译和测试（Windows 上跑不到）
+      - name: Go 单元测试
+        run: go test ./cmd/... ./internal/...
+
+      - name: go vet
+        run: go vet ./cmd/... ./internal/...
+
+      # pnpm 11 要求 Node.js 22.13 以上，所以先装 Node，再装 pnpm
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      # 根目录 package.json 没写 packageManager，这里显式指定版本。
+      # pnpm 11 读写的 lockfileVersion 是 9.0，和 pnpm-lock.yaml 一致；换大版本前先确认锁文件格式
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+          cache: true # 按 pnpm-lock.yaml 缓存 pnpm store
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（packages/core）
+        run: pnpm -C packages/core typecheck
+
+      - name: 类型检查（web）
+        run: pnpm -C web typecheck
+
+      - name: 类型检查（desktop）
+        run: pnpm -C desktop typecheck
+
+      - name: 构建前端和 dist/danlu-linux-amd64
+        run: bash scripts/build.sh
+
+      # 假 GPU，占用 17699（HTTP）和 17700（本地 CA 的 HTTPS）端口；需要 python3、git、curl、openssl，runner 上都有
+      - name: 端到端测试
+        run: bash scripts/e2e.sh
+
+  desktop-rust:
+    name: 桌面客户端 Rust 层（Windows）
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop/src-tauri
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 安装 Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      # 不需要先构建前端，也不用建 desktop/dist：generate_context! 只在开了 tauri 的 custom-protocol
+      # feature 时（tauri build 才会开）读取 tauri.conf.json 的 frontendDist（../dist）并要求它存在；
+      # 平时的 cargo clippy / cargo test 是开发模式，配置了 devUrl 就嵌入空资源，不碰这个目录。
+      # 以后如果在这里改用 tauri build 或打开 custom-protocol，要先跑 pnpm -C desktop build
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # http::tests::live_server 标了 #[ignore]，需要真实服务器，这里不跑
+      - name: cargo test
+        run: cargo test

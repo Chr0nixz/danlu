@@ -4,6 +4,7 @@
 > 长期规划见 [DESIGN.md](DESIGN.md)。Demo 直接用正式版的技术栈，做完后在它上面继续迭代，不会推倒重写。
 > 状态：第 9 节的 1–7 步都已完成，在 WSL 里用假 GPU 跑通了端到端测试（`scripts/e2e.sh`）。还差第 8 步：部署到真实的 GPU 服务器上，逐条验证第 0 节的完成标准。
 > 多服务器由桌面客户端负责，见 [CLIENT.md](CLIENT.md)。客户端要求服务器端做的改动（设备令牌、`info --json`、游标翻页等）已经合进本文的接口和命令。
+> 接下来先迭代后端和面板，客户端暂停新功能。工作项、先后顺序和完成标准见 [ROADMAP.md](ROADMAP.md)。
 
 ## 0. 完成标准（全部通过才算 demo 做完）
 
@@ -19,9 +20,9 @@
 
 **要做**：安全入口和登录、HTTPS、GPU 面板、在网页上提交任务、先来先跑的整卡调度、任务执行（含 conda 环境、danlu 重启后接管任务、取消）、实时日志、代码快照、重跑、手机适配。
 
-**不做**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。其中多服务器和通知后来交给了桌面客户端（[CLIENT.md](CLIENT.md)），面板本身仍然不做。
+**不做**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。其中多服务器后来交给了桌面客户端（[CLIENT.md](CLIENT.md)），面板本身仍然不做；通知改由服务器通过 ntfy 推送，和优先级、自动重试、告警一起排进了下一阶段（[ROADMAP.md](ROADMAP.md)）。
 
-**有余力再做**：两次任务之间的代码和参数 diff；"用当时的代码重跑"；申请 Let's Encrypt 的 IP 证书；TOTP 两步验证。
+**有余力再做**：两次任务之间的代码和参数 diff；"用当时的代码重跑"；申请 Let's Encrypt 的 IP 证书；TOTP 两步验证。其中 diff、"用当时的代码重跑"和 TOTP 已经排进下一阶段的定版线，IP 证书不再做，证书方案见 [ROADMAP.md](ROADMAP.md) 第 7.1 节。
 
 ## 2. 使用流程
 
@@ -116,6 +117,7 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
   - 属于某个正在运行、并且分到了这张卡的 danlu 任务 → 这张卡显示为**该任务占用**；
   - 其他情况（没有标记、任务已结束、跑到了没分给它的卡上）→ 显示为**外部进程**（附上 pid 和进程所属用户），调度时不分配这张卡。
   - 为什么不用进程组：torchrun 会把每个 worker 放进**新的 session**，进程组追踪不到它们；环境变量会一路继承下去，靠它识别最可靠。
+- **数据不可信时不分卡**：两次查询各有 8 秒超时，超时连子进程一起杀掉。查不到卡上的进程、`nvidia-smi` 出错，或者超过 20 秒没有一次采集完成（驱动卡死时 `nvidia-smi` 可能连信号都杀不掉），`/api/gpus` 都带 `error`，面板提示"暂停分配新任务"，调度器不再分配 GPU；排在前面、不用卡的任务照常启动。
 - **假 GPU 模式**：设置 `DANLU_FAKE_GPUS=4` 后会模拟 4 张卡，利用率和显存随机波动；设置 `DANLU_FAKE_BUSY=2` 可以模拟第 2 号卡被外部进程占用。用于在 WSL 或没有显卡的机器上测试。
 
 ### 4.2 提交任务
@@ -146,6 +148,8 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
 
 ```bash
 #!/usr/bin/env bash
+# 第一件事是写 pid 文件：danlu 在启动途中退出时，重启后靠它把进程认回来
+echo $$ > "$DANLU_RUN_DIR/pid.tmp" && mv -f "$DANLU_RUN_DIR/pid.tmp" "$DANLU_RUN_DIR/pid"
 # 原子写入退出码：先写临时文件再改名，danlu 不会读到写了一半的内容
 finish() { echo "$1" > "$DANLU_RUN_DIR/exitcode.tmp" && mv "$DANLU_RUN_DIR/exitcode.tmp" "$DANLU_RUN_DIR/exitcode"; exit "$1"; }
 cd "$DANLU_WORKDIR" || { echo "[danlu] 工作目录不存在"; finish 1; }
@@ -155,7 +159,11 @@ bash "$DANLU_RUN_DIR/cmd.sh"          # 用户填写的命令
 finish $?
 ```
 
-- **启动方式**：`setsid` 新建一个进程组；stdin 指向 `/dev/null`；stdout 和 stderr 合并写入 `logs/<id>.log`。记录 pid，以及 `/proc/<pid>/stat` 里的进程启动时间，用来防止 pid 被复用时认错进程。
+- **启动分三步**，慢的事不占着调度锁：
+  1. 占位（锁内）：选好卡和端口，任务写成 running、pid 为 0，同时记下开机标识 `boot_id`。写库失败就不启动，下一轮再试；
+  2. 准备（锁外）：做快照、加载 `.bashrc`，都有超时。这期间提交、取消、其他任务的收尾都不用等；
+  3. 启动（锁内）：这期间被取消了就直接记为已取消，danlu 正在停止就放回队列；否则 fork/exec，毫秒级。
+- **启动方式**：`setsid` 新建一个进程组；stdin 指向 `/dev/null`；stdout 和 stderr 合并写入 `logs/<id>.log`。记录 pid，以及 `/proc/<pid>/stat` 里的进程启动时间，用来防止 pid 被复用时认错进程；读不到启动时间时改为核对进程的 `DANLU_JOB_ID`。启动后写库失败时，任务留在内存里接着监控，下一轮重试写库，不会再启动一次。
 - **注入的环境变量**：
 
   | 变量 | 值 | 作用 |
@@ -167,14 +175,16 @@ finish $?
   | `DANLU_JOB_ID`、`DANLU_JOB_NAME` | | 方便在代码里引用 |
   | `WANDB_TAGS` | 追加 `danlu-<id>` | 在 W&B 里按标签找回任务 |
 
-- 勾选“Bash 环境”时，danlu 用交互式 Bash 加载服务器用户的 `~/.bashrc`，把其中导出的变量加入任务环境。任务表单里的自定义变量优先于 `.bashrc`，danlu 管理的变量仍由 danlu 注入。文件缺失、加载失败或超过 10 秒时，任务会启动失败。
+- 勾选“Bash 环境”时，danlu 用交互式 Bash 加载服务器用户的 `~/.bashrc`，把其中导出的变量加入任务环境。任务表单里的自定义变量优先于 `.bashrc`，danlu 管理的变量仍由 danlu 注入。文件缺失、加载失败或超过 10 秒时，任务会启动失败。`.bashrc` 里用 `&` 起的后台进程，读完环境后会被结束掉，不会留在服务器上。
 
 - **取消**：向整个进程组，以及所有带 `DANLU_JOB_ID=<id>` 标记的进程发 SIGTERM，等 30 秒（可配置），还没退出就发 SIGKILL。
 - **收尾**：任务结束后，扫描 `/proc`，找出仍带着这个任务标记的残留进程（比如 DDP 的孤儿 worker）并全部结束掉，在任务上注明"已清理 N 个残留进程"。收尾时只按标记清理、不按进程组号清理，因为包装脚本退出后，进程组号可能已经被别的进程复用了。
 - **重启后接管**：danlu 启动时，检查所有状态为 running 的任务：
   - pid 还在，并且进程启动时间和记录的一致 → 继续监控（改为每 2 秒轮询一次）；
   - 进程已经不在了 → 读取 `exitcode` 文件来确定结果；
-  - 进程不在，也没有 `exitcode` 文件 → 标记为失败，原因写"进程被外部终止"。
+  - 进程不在，也没有 `exitcode` 文件 → 标记为失败。开机标识变了，原因写"服务器重启，任务中断"，否则写"进程被外部终止"；
+  - pid 为 0（占位以后 danlu 就退出了）→ 有 pid 文件、进程还在就认领；跑过、已经结束的按上面两条收尾；从没启动过的放回队列。
+- **停止服务**：收到 SIGTERM 后，先断开日志 SSE 这类长连接，等正在处理的请求完成（最多 5 秒），再等正在启动的任务落库，最后才关数据库。正在跑的训练不受影响。
 - ⚠ **systemd 的坑**：systemd 停止服务时，默认会杀掉这个服务 cgroup 里的所有进程，**训练进程也在其中**。所以 unit 文件里必须写 `KillMode=process`。`install-service` 生成 unit 文件时会自动加上这一行，还会执行 `loginctl enable-linger`，保证退出 SSH 后服务继续运行。
 - **结束状态的判定**：退出码为 0 → succeeded；不为 0 → failed；用户取消的 → cancelled（以用户取消为准，不看退出码）。
 
@@ -209,7 +219,7 @@ finish $?
 | 页面 | 电脑 | 手机 |
 |---|---|---|
 | **登录** | 用户名、密码 | 同左 |
-| **首页** | 一行状态摘要（运行中、排队、空闲卡数）；GPU 面板每行 4 张；下面是一个分组列表：运行中、排队、最近完成，每行一个任务 | GPU 每张卡一行；分组列表直接展开，不用标签页切换 |
+| **首页** | 一行状态摘要（运行中、排队、空闲卡数）；GPU 面板每行 4 张；CPU 和内存当前使用率及最近 1 分钟趋势；下面是一个分组列表：运行中、排队、最近完成，每行一个任务 | GPU 每张卡一行；CPU 和内存当前值及趋势并排显示；分组列表直接展开，不用标签页切换 |
 | **新建 / 重跑** | 标签在左、输入框在右的表单；Ctrl+Enter 提交 | 上下排列的表单 |
 | **任务详情** | 标题和"W&B / 重跑 / 取消"按钮；一排关键信息（状态、GPU、环境、时长、代码版本、时间）；下面三个标签页：日志、详情、代码 | 同左，关键信息排成两列 |
 | **全部任务** | 和首页同样的任务行，支持按状态筛选、搜索（快捷键 /）、分页 | 同左，每个任务两行 |
@@ -217,6 +227,7 @@ finish $?
 
 GPU 卡片显示的内容：卡号、型号、利用率条、显存（已用/总量）、温度、功耗，以及当前占用者（"任务名"链接 / "外部进程 pid" / "空闲"）。
 数据刷新：GPU 状态和任务列表每 3 秒轮询一次（TanStack Query）；日志通过 SSE 实时推送。
+CPU 和内存由服务端每 2 秒采样一次，首页每 3 秒读取，并保留最近 1 分钟的数据。
 
 视觉规范见 [../web/DESIGN.md](../web/DESIGN.md)：中性灰阶，颜色只用来表示状态（排队灰色虚线圈、运行蓝色转圈、成功绿色对勾、失败红色叉、取消灰色斜杠、外部占卡琥珀色），系统字体，支持深色模式。快捷键：N 新建任务，/ 搜索任务。
 
@@ -228,6 +239,7 @@ POST /api/login        POST /api/logout
 GET  /api/me                           用户名、版本、api_version（接口版本号，不兼容的改动时加一）
 
 GET  /api/gpus                         GPU 状态和占用者
+GET  /api/system                       CPU 和内存当前值及最近 1 分钟采样
 GET  /api/conda-envs                   conda 环境列表
 GET  /api/fs/dirs?path=                目录自动补全
 GET  /api/workdirs/recent              最近用过的工作目录
@@ -267,8 +279,7 @@ mode = "local-ca"            # local-ca | file | off
 # cert_file = ""; key_file = ""
 
 [auth]
-username      = "admin"
-password_hash = "$2a$12$…"
+username      = "admin"      # 密码哈希不在这里，存在数据库的 settings 表里（danlu passwd 修改）
 session_ttl   = "168h"
 max_failures  = 5
 lockout       = "15m"
@@ -284,11 +295,14 @@ snapshot_max_total_mb = 50
 ~/.danlu/
   config.toml   secret.key（HMAC 密钥）
   danlu.db                           # SQLite
+  backup/danlu-<时间>-v<旧版本>.db   # 升级表结构前的备份，保留最近 5 份
   tls/ca.crt ca.key server.crt server.key
   logs/<id>.log
   snapshots/<id>.tar.gz <id>.meta.json <id>.diff   # 代码、清单和 git 信息、未提交的改动
-  run/<id>/run.sh cmd.sh exitcode
+  run/<id>/run.sh cmd.sh pid exitcode               # pid 是包装脚本第一行写的，启动途中 danlu 退出时靠它认领
 ```
+
+服务进程从不写 `config.toml`，只有命令行（`init`、`port`、`entrance`、`cert`）写它，改完重启生效。运行中会变的状态放在数据库的 `settings` 表里。旧版本放在 `[auth] password_hash` 的哈希，新版本第一次启动时导入一次，`danlu passwd` 会把它从配置里删掉。
 
 ```
 jobs(id, name, workdir, conda_env, cmd, env_json, inherit_bashrc,
@@ -302,6 +316,8 @@ login_failures(ip, count, locked_until)
 recent_workdirs(path, last_used_at)
 device_tokens(id, name, token_hash, created_at, last_used_at, last_ip)   -- 第 2 次迁移，同时加了 jobs(ended_at) 索引
 -- 第 3 次迁移：给 jobs 增加 inherit_bashrc，已有任务默认关闭
+-- 第 4 次迁移：给 jobs 增加 boot_id（占位时的开机标识）
+settings(key, value, updated_at)   -- 第 5 次迁移：运行时状态，目前只有 auth.password_hash
 ```
 
 最后一行日志和失败时的报错行不存数据库，列任务时从日志文件末尾读出来。快照文件按任务编号放在 `snapshots/` 下，表里只记 `snapshot_ok`。迁移只能往后追加，按 `PRAGMA user_version` 执行。
@@ -325,6 +341,7 @@ D:\Projects\danlu\
   internal/auth/           # 安全入口、登录、会话、设备令牌、限速、审计
   internal/tlsutil/        # 本地 CA 和服务器证书
   internal/gpu/            # 解析 nvidia-smi，假 GPU 模式
+  internal/system/         # 从 /proc/stat 和 /proc/meminfo 采集 CPU 与内存
   internal/procfs/         # 读 /proc：进程启动时间、环境变量里的任务标记
   internal/store/          # SQLite 和数据库迁移
   internal/scheduler/      # 先来先跑的调度
@@ -337,7 +354,7 @@ D:\Projects\danlu\
   packages/core/           # 面板和客户端共享的 TS 代码
   desktop/                 # 桌面客户端（Tauri）
   scripts/                 # build.ps1 / build.sh（构建前端 + 交叉编译）、e2e.sh、dev-wsl.sh
-  docs/DEMO.md  docs/DESIGN.md  docs/CLIENT.md
+  docs/DEMO.md  docs/DESIGN.md  docs/CLIENT.md  docs/ROADMAP.md
 ```
 
 ## 9. 开发步骤（每一步都能单独验证）
