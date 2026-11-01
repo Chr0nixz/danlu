@@ -8,6 +8,10 @@ T=$(mktemp -d /tmp/danlu-e2e.XXXX)
 BIN=$T/danlu
 cp "$BIN_SRC" "$BIN" && chmod +x "$BIN"
 export DANLU_HOME=$T/home DANLU_FAKE_GPUS=4 DANLU_FAKE_BUSY=3
+# 清掉代理设置：WSL 的登录 shell 里常设着 http_proxy / all_proxy，
+# 带着它们 curl 连 127.0.0.1 也要走代理，代理不通时整套测试会卡在超时上
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost
 PORT=${E2E_PORT:-17699} # 和演示环境（17600）错开
 BASE=http://127.0.0.1:$PORT
 JAR=$T/cookies

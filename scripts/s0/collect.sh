@@ -6,6 +6,9 @@
 # 打包前会把公网 IP、安全入口和令牌替换成占位符。
 set -uo pipefail
 
+# 连 127.0.0.1 不走代理：有些机器上设了 http_proxy / all_proxy，带着它请求本机会连不上
+export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost
+
 DANLU=${1:-$HOME/bin/danlu}
 HOST=$(hostname -s 2>/dev/null || hostname)
 OUT=$(mktemp -d "/tmp/s0-report-$HOST.XXXX")
