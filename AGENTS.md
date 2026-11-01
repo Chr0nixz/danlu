@@ -54,6 +54,8 @@ bash scripts/e2e.sh      # end-to-end suite with fake GPUs, on port 17699
 bash scripts/dev-wsl.sh  # demo server on 127.0.0.1:17600 (TLS off, fake GPUs, sample git project)
 ```
 
+`scripts/s0/` is the S0 real-machine kit, run on the GPU server itself: `collect.sh` gathers a redacted report (system, systemd, cgroup `memory.events`, raw `nvidia-smi` output, per-process ownership, danlu's own state and a few API responses), `CHECKLIST.md` walks DEMO.md §0 item by item, and `jobs/` holds the submit-time test scripts (a fake multi-GPU DDP run plus CUDA OOM, Python exception, NCCL timeout and killing one worker).
+
 - **Fake GPUs:** set `DANLU_FAKE_GPUS=N`. Use `DANLU_FAKE_BUSY=i,j` to mark cards as held by an external process.
 - **Data directory:** `DANLU_HOME` replaces `~/.danlu`.
 - **Frontend dev server:** `pnpm dev` proxies `/api` to the `dev-wsl.sh` server. Open that server's entrance URL once first to get the gate cookie.

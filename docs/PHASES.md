@@ -9,7 +9,7 @@
 | 阶段 | 主题 | 定版线的工作项 | 场景 | 规模 | 依赖 |
 |---|---|---|---|---|---|
 | S0 | 上真机 | 1 真机验证、5 主机状态 | DEMO.md 第 0 节 | 小 | — |
-| S1 | 状态可信 | 2 异常路径、3 失败原因、9 完整配方（只做记录） | 1、5 | 中 | S0 |
+| S1 | 状态可信 | 2 异常路径、3 失败原因、9 完整配方（只做记录）；先做状态转换和事件表（REVIEW.md 阶段 B） | 1、5 | 中到大 | S0 |
 | S2 | 无人值守 | 6 磁盘余量、7 自动清理、11 快速失败暂停、4 手机推送 | 3、5 | 中到大 | S1 |
 | S3 | 手机顺手 | 8 剩余时间、12 网页终端、13 手机接入 | 1、2、6 | 中 | S0 |
 | S4 | 追溯到底 | 9 完整配方（展示和反查）、10 对比和复现 | 4 | 大 | S1 |
@@ -39,17 +39,23 @@
 
 **目标**：在真实的 GPU 服务器上逐条走完 DEMO.md 第 0 节，先把现有功能在真机上的问题暴露出来。
 
+**工具包**：具体怎么做已经写成 `scripts/s0/`，照着它走，不用再重新设计。
+
+- `collect.sh`：在服务器上采集一份报告。系统和 systemd 的状态、danlu 服务的 cgroup 和 `memory.events`（S1 判断主机内存不足要用）、`nvidia-smi` 的原始输出（和 `internal/gpu` 用的两条查询完全一致）、卡上每个进程属于谁、danlu 自己的状态和几个接口的响应。打包前把公网 IP、安全入口和令牌替换成占位符。
+- `CHECKLIST.md`：逐条写明怎么做、应该看到什么、要留下什么。
+- `jobs/`：提交用的测试脚本。多卡 DDP 的假训练（排队、接管、取消都用它），以及显存不足、Python 异常、NCCL 超时和杀掉一个 worker 四种失败。
+
 **要做的事**
 
 1. 收尾正在做的主机状态（`internal/system`、`/api/system`、`HostMetrics.tsx`），和这次部署一起上真机。
 2. 用 `scripts/build.*` 构建，然后 scp、`danlu init`、`danlu install-service`，确认 linger 已开启。
-3. 逐条走 DEMO.md 第 0 节的 7 条完成标准。另外重点看几处只有真机才能验证的地方：
+3. 逐条走 DEMO.md 第 0 节的 7 条完成标准（`scripts/s0/CHECKLIST.md` 的 A 节）。另外重点看几处只有真机才能验证的地方（同一份清单的 B 节）：
    - 不同驱动版本下 `nvidia-smi` 的输出能否正确解析；`--query-compute-apps` 能不能看到其他用户和容器里的进程；
    - 取消一个 4 卡 torchrun 任务后，所有 worker 都退出，显存全部释放；
    - `systemctl --user restart danlu` 期间训练不中断，重启后能接管回来；
    - 如果允许，重启一次机器：确认 danlu 随开机启动，并记下重启前在跑的任务现在显示成什么样（预计是"进程被外部终止"，交给 S1 处理）；
    - 安卓 Chrome 装上 CA 后访问，确认不再有警告。
-4. 故意制造几种失败，收集真实日志作为 S1 的测试样本：CUDA 显存不足、`kill -9` 杀掉一个 worker、Python 异常、NCCL 超时（能造出来的话）。
+4. 故意制造几种失败，收集真实日志作为 S1 的测试样本（清单的 C 节，脚本在 `scripts/s0/jobs/`）：CUDA 显存不足、`kill -9` 杀掉一个 worker、Python 异常、NCCL 超时（能造出来的话）。主机内存不足不在真机上造，怕误杀别人的进程，留到 S1 用 cgroup 限额在 WSL 里造。
 
 **产出**
 
@@ -63,6 +69,18 @@
 ## 4. S1 · 状态可信
 
 **目标**：不管出了什么意外，任务状态都不撒谎；失败任务一眼就能看出原因；从这一阶段起，每个任务都记下完整的配方。
+
+**顺序**：先做第 4.0 节，失败归类（4.2）建立在它上面；4.1 剩下的几项和 4.3 可以穿插着做。
+
+### 4.0 状态转换和事件表（REVIEW.md 阶段 B 的前半部分）
+
+失败归类、推送、快速失败暂停都要知道"发生了什么"，所以先把改状态的地方收拢到一处，并且每次都记一条事件。设计见 [REVIEW.md](REVIEW.md) 第 7.1 节，这里只写这一阶段做哪些。
+
+- **只有一个入口。** 调度器里所有改状态的地方（`finalize`、`failQueued`、`reconcile` 放回队列和直接取消、`launch` 的取消和启动失败分支、`Cancel`）都改为调用 `m.transition(j, to, reason)`。它通过新的 `store.Transition` 在同一个事务里写任务和对应的事件。`save()` 只留给不改状态的字段，比如 pid、`tracker_url`。
+- **写库失败。** 和现在一样记进 `pending`，下一轮重试。事件跟着任务一起重试：重试成功时写进去的是同一条事件，不会丢，也不会写两遍。
+- **这一阶段的事件**：`job_started`、`job_finished`（成功、失败、取消）、`job_requeued`。数据格式见 REVIEW.md 第 7.1 节的表。`queue_*` 和 `alert_*` 两类在 S2 里和推送一起做。
+- **备注和原因分开。** `jobs` 加 `notes` 列，"已清理 N 个残留进程"这类说明写进 `notes`，`fail_reason` 只放失败原因。成功的任务也可能有备注，面板上和原因分开显示。
+- **测试**：`manager_test.go` 里每个改状态的用例都检查对应的事件；`JobStore` 的测试包装层也能让 `Transition` 失败，验证重试以后事件只有一条。
 
 ### 4.1 异常路径
 
@@ -112,10 +130,10 @@
 
 ### 4.4 改动清单
 
-- **数据库**：`jobs` 表增加 `fail_kind`、`ext_seen`、`oom_base`（任务启动时的 oom_kill 计数）、`recipe_json`、`output_dir`。`boot_id` 已经在阶段 A 加上了（第 4 次迁移）。
+- **数据库**：新增 `events` 表（第 4.0 节）；`jobs` 表增加 `notes`、`fail_kind`、`ext_seen`、`oom_base`（任务启动时的 oom_kill 计数）、`recipe_json`、`output_dir`。`boot_id` 已经在阶段 A 加上了（第 4 次迁移）。
 - **配置**：`runtime.output_root`。
 - **接口**：
-  - 任务对象增加 `fail_kind`、`ext_seen`、`recipe`、`output_dir`、`traceback_offset`；
+  - 任务对象增加 `notes`、`fail_kind`、`ext_seen`、`recipe`、`output_dir`、`traceback_offset`；
   - `/api/gpus` 增加 `error_since`；
   - 新增 `GET /api/jobs/{id}/env`，返回环境包列表的原文。
 - **面板**：
@@ -128,6 +146,7 @@
 
 **e2e 新增**：
 
+- 一个任务从提交到结束，`events` 表里依次有 `job_started` 和 `job_finished`，不多也不少；
 - 任务输出 `torch.OutOfMemoryError: CUDA out of memory` 后以 1 退出，归类为 `cuda_oom`；
 - 任务输出 NCCL watchdog 那一行，归类为 `nccl`；
 - 任务 `kill -9 $$`，同时把假 `memory.events` 里的 `oom_kill` 加一，归类为 `host_oom`；
@@ -171,6 +190,8 @@
 - **面板**：已清理的任务，日志页显示"日志已按保留策略清理（保留 90 天）"。
 
 ### 5.5 手机推送（ntfy）
+
+事件表和 `job_*` 事件在 S1 第 4.0 节已经做好，这一阶段补上 `queue_paused`、`queue_resumed`、`alert_raised`、`alert_cleared` 四类，以及 REVIEW.md 第 7.1 节第 4、5 条：告警只在出现和消失的那一刻写，danlu 启动时从每个 `key` 的最后一条事件恢复出"现在有哪些告警"；队首在等什么通过 `wait_reason` 给面板显示。推送从事件表往后读，游标存在 `settings` 里。
 
 - **配置。** `[notify] ntfy = "https://ntfy.sh/<topic>"`，也支持自建的服务器；需要鉴权时再填 `token`。
   - 推荐用 `danlu notify setup` 配置：生成一个很长的随机 topic，写进配置，再在终端里打印订阅地址和二维码，ntfy App 扫码就能订阅。
@@ -393,4 +414,5 @@ ROADMAP.md 第 10 节已经列过的不再重复。
 
 ---
 变更记录
+- v1.1（2026-11-01）：S0 补上 `scripts/s0/` 工具包的说明；REVIEW.md 的阶段 B 并进 S1，新增第 4.0 节"状态转换和事件表"，告警事件留在 S2 第 5.5 节。
 - v1（2026-11-01）：初稿。把定版线拆成 S0–S5 六个阶段，写明每个阶段的改动、数据库迁移、配置、接口和验收。
