@@ -60,7 +60,7 @@
 | 11 | 快照按内容寻址 | 结构 | 设计 | 7.4 | L | 待做 |
 | 12 | 统一的采样器 | 结构 | 设计 | 7.5 | S，随 2 一起做 | 完成 |
 | 13 | API 契约：响应结构体、拆文件、接口测试 | 结构 | 设计 | 7.6 | M | 待做 |
-| 14 | CI | 结构 | 设计 | 7.7 | S | 已加入仓库，还没在 GitHub 上跑过 |
+| 14 | CI | 结构 | 设计 | 7.7 | S | 完成 |
 | 15 | 前端：共享逻辑收进 core，日志增量渲染 | 结构 | 设计 | 7.8 | M | 待做 |
 
 "依据"一栏：**复现**是用附录 A 的脚本实际跑出来过；**代码**是读代码能确定，但没有专门复现；**设计**不是 bug，是为后面的功能先补上的接口。
@@ -544,12 +544,12 @@ GPU、主机资源、磁盘余量都用它。主机资源的 1 分钟历史留�
 
 仓库现在没有 CI。"改 `/api` 时 `web/` 和 `desktop/` 都要能编译"全靠自觉，e2e 也只能在 WSL 里手动跑。
 
-[.github/workflows/ci.yml](../.github/workflows/ci.yml) 已经加进仓库（还没提交）。push 到 main 和所有 PR 时触发：
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) 已经在跑了。push 到 main 和所有 PR 时触发：
 
 - **ubuntu**：`go test`（`*_linux_test.go` 也会跑）、`go vet`、三个 TS 包的 `typecheck`、`scripts/build.sh`、`scripts/e2e.sh`。
 - **windows**：在 `desktop/src-tauri` 里跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`。不用先建 `desktop/dist`：只有 `tauri build` 打开 `custom-protocol` 时，`generate_context!` 才要求 `frontendDist` 存在。
 
-用到的 Action 版本（checkout v7、setup-go v7、setup-node v7、pnpm/action-setup v6、rust-cache v2）核对过都已发布；pnpm 固定为 11.19.0，和本地一致，读写的锁文件格式是 9.0。各步骤在本地都跑过（Go 单测和 vet、Linux 单测在 WSL 里、e2e、构建）。还要做的：推到 GitHub 跑一次，缓存和 runner 环境只能在那里确认。
+用到的 Action 版本（checkout v7、setup-go v7、setup-node v7、pnpm/action-setup v6、rust-cache v2）核对过都已发布；pnpm 固定为 11.19.0，和本地一致，读写的锁文件格式是 9.0。各步骤在本地都跑过（Go 单测和 vet、Linux 单测在 WSL 里、e2e、构建）。2026-11-01 第一次推到 GitHub，两个 job 全部通过。
 
 ### 7.8 前端
 
@@ -591,7 +591,7 @@ GPU、主机资源、磁盘余量都用它。主机资源的 1 分钟历史留�
 |---|---|
 | 附录 A 的三个场景进 e2e | 完成：e2e 新增"Bash 环境"、"配置和密码"、"GPU 数据不可信时暂停分卡（假 nvidia-smi）"三节，另加"停止服务"（SIGTERM 正常退出）和 `replace` 留 `.prev`。共 82 项全部通过（原来 62 项） |
 | 调度器单测 | 完成：第 7.2 节列的情况都有，事件那一条等第 7.1 节 |
-| CI 通过 | 未完成：workflow 在本地逐步跑过，还没推到 GitHub |
+| CI 通过 | 完成：2026-11-01 推到 GitHub，ubuntu 和 windows 两个 job 都通过 |
 | 总表第 1–6 项 | 完成，第 9、10、12 项也一起完成 |
 
 附录 A 的复现脚本对新程序的输出见附录末尾。阶段 A 也覆盖了定版线第 2 项"异常路径"的一部分（服务器重启的原因、`nvidia-smi` 卡住、升级前备份、启动途中被打断），PHASES.md 第 4.1 节已经按实际做法更新。
