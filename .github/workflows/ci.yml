@@ -58,6 +58,9 @@ jobs:
       - name: 类型检查（packages/core）
         run: pnpm -C packages/core typecheck
 
+      - name: 测试（packages/core）
+        run: pnpm -C packages/core test
+
       - name: 类型检查（web）
         run: pnpm -C web typecheck
 

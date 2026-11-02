@@ -81,6 +81,31 @@ export function compactProgress(line: string): { text: string; short: string; pc
   return { text, short, pct: m ? Math.min(100, Number(m[1])) : null }
 }
 
+/** 读取 tqdm 方括号里的剩余时间；未知值或非标准格式不展示 */
+export function progressRemaining(line: string): string | null {
+  const matches = [...line.matchAll(/\d{1,3}%\s*\|[^|]*\|[^[]*\[[^\]]*?<\s*([^,\]]+?)\s*,/g)]
+  if (matches.length === 0) return null
+
+  let value = matches[matches.length - 1][1].trim()
+  if (!value || value === '?') return null
+
+  let days = ''
+  const dayMatch = value.match(/^(\d+)d\s+(.+)$/)
+  if (dayMatch) {
+    days = dayMatch[1]
+    value = dayMatch[2]
+  }
+
+  const parts = value.split(':')
+  if ((parts.length !== 2 && parts.length !== 3) || parts.some((part) => !/^\d+$/.test(part))) return null
+
+  const padded = parts.slice(1).map((part) => part.padStart(2, '0'))
+  const normalized = parts.length === 2
+    ? `${Number(parts[0])}:${padded[0]}`
+    : `${Number(parts[0])}:${padded[0]}:${padded[1]}`
+  return days ? `${Number(days)}天${normalized}` : normalized
+}
+
 /** 失败任务的原因：退出码加报错行（找不到报错行时用最后一行输出） */
 export function failText(j: Job): string {
   const why = j.fail_reason || (j.exit_code !== null ? `退出码 ${j.exit_code}` : '失败')

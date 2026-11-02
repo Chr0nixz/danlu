@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Copy, X } from 'lucide-react'
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, now, timeAgo, type Job } from '@danlu/core'
+import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, now, progressRemaining, timeAgo, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 import { StarButton } from './StarButton'
 import { Button, buttonClass, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
@@ -61,7 +61,7 @@ function useFlash(id: number, status: string) {
 }
 
 /** 一行任务的说明文字：运行中显示最后一行日志，排队显示位置，失败显示原因 */
-function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: string; pct?: number | null } {
+function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: string; pct?: number | null; remaining?: string | null } {
   if (j.status === 'queued') {
     const pos = j.queue_pos ? `第 ${j.queue_pos} 位` : '排队中'
     const need = j.gpus_pinned.length ? `等 GPU ${j.gpus_pinned.join(',')}` : j.gpus_req ? `等 ${j.gpus_req} 张卡` : '不用 GPU'
@@ -72,7 +72,15 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
   if (j.pruned_at) return { text: '日志和代码快照已清理' }
   if (j.last_line) {
     const p = compactProgress(j.last_line)
-    return { text: p.text, short: p.short, mono: true, pct: j.status === 'running' ? p.pct : null }
+    const remaining = j.status === 'running' ? progressRemaining(j.last_line) : null
+    const eta = /\s*\[[^\]]*?<\s*(?:\d+d\s+)?(?:\d+:)?\d+:\d{2}\s*,[^\]]*\]/
+    return {
+      text: remaining ? p.text.replace(eta, '').replace(/\s{2,}/g, ' ').trim() : p.text,
+      short: remaining ? p.short.replace(eta, '').replace(/\s{2,}/g, ' ').trim() : p.short,
+      mono: true,
+      pct: j.status === 'running' ? p.pct : null,
+      remaining,
+    }
   }
   if (!j.started_at) return { text: '未开始运行' }
   return { text: j.status === 'running' ? '等待输出…' : '没有输出' }
@@ -123,6 +131,14 @@ export function JobRow({ job: j, showCopy = false }: { job: Job; showCopy?: bool
           {info.pct != null && (
             <span className="w-10 shrink-0 max-md:hidden" title={`${info.pct}%`}>
               <Meter value={info.pct} className="bg-run" />
+            </span>
+          )}
+          {info.remaining && (
+            <span
+              className="shrink-0 whitespace-nowrap text-xs text-fg-2"
+              title="tqdm 对当前进度条的剩余时间估计；如果按 epoch 统计，这里是当前 epoch 的剩余时间"
+            >
+              剩 {info.remaining}
             </span>
           )}
           <span
