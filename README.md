@@ -45,7 +45,7 @@
 
 ### 1. 构建
 
-需要 Go 1.26+、Node 和 pnpm。
+需要 Go 1.26+、Node.js 22.22+ 和 pnpm 12.16.1（版本固定在根目录 `package.json` 的 `packageManager`）。
 
 ```powershell
 .\scripts\build.ps1                # Windows，生成 dist\danlu-linux-amd64

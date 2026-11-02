@@ -40,18 +40,16 @@ jobs:
       - name: go vet
         run: go vet ./cmd/... ./internal/...
 
-      # pnpm 11 要求 Node.js 22.13 以上，所以先装 Node，再装 pnpm
+      # React Router 8 要求 Node.js 22.22 以上，使用当前 LTS
       - name: 安装 Node.js
         uses: actions/setup-node@v7
         with:
           node-version: lts/*
 
-      # 根目录 package.json 没写 packageManager，这里显式指定版本。
-      # pnpm 11 读写的 lockfileVersion 是 9.0，和 pnpm-lock.yaml 一致；换大版本前先确认锁文件格式
+      # 版本取根目录 package.json 的 packageManager，和本地开发保持一致
       - name: 安装 pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 11.19.0
           cache: true # 按 pnpm-lock.yaml 缓存 pnpm store
 
       - name: 安装前端依赖

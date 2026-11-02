@@ -25,8 +25,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1", features = ["process", "io-util", "time", "macros", "sync"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-keyring = { version = "3", features = ["windows-native", "apple-native"] }
-sha2 = "0.10"
+keyring = "4.2"
+sha2 = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

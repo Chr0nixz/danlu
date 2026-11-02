@@ -2,6 +2,3 @@ packages:
   - web
   - desktop
   - packages/*
-
-allowBuilds:
-  esbuild: true

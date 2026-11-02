@@ -1,4 +1,8 @@
 {
   "name": "danlu",
-  "private": true
+  "private": true,
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=22.22.0"
+  }
 }
