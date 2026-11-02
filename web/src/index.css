@@ -157,6 +157,11 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+
+  /* 状态变化时整行闪一下只是底色淡出，没有位移，而且是这一行状态变了的唯一提示，保留 */
+  .animate-flash {
+    animation-duration: 1.2s !important;
+  }
 }
 
 /* 日志和代码：终端风格，两种主题下都是深色 */

@@ -15,6 +15,15 @@ export const shortName = (name: string) => name.replace(/^NVIDIA\s+/, '').replac
 
 const gb = (used: number, total: number) => `${(used / 1024).toFixed(1)} / ${Math.round(total / 1024)} GB`
 
+function errorDuration(since: number) {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - since))
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  return `${hours} 小时 ${minutes % 60} 分钟`
+}
+
 type State = 'job' | 'external' | 'idle'
 const stateOf = (g: GPU): State => (g.job ? 'job' : g.external.length ? 'external' : 'idle')
 const barColor: Record<State, string> = { job: 'bg-run', external: 'bg-warn', idle: 'bg-fg-4' }
@@ -37,7 +46,12 @@ export function GpuGrid() {
 
   return (
     <div className="space-y-2">
-      {data?.error && <Alert tone="warn">GPU 信息读取失败，暂停分配新任务：{data.error}</Alert>}
+      {data?.error && (
+        <Alert tone="warn">
+          GPU 信息读取失败，暂停分配新任务：{data.error}
+          {data.error_since && <span className="ml-1">（已持续 {errorDuration(data.error_since)}）</span>}
+        </Alert>
+      )}
       {gpus.length === 0 && !data?.error && <Alert>没有检测到 GPU。只能提交不用 GPU 的任务。</Alert>}
 
       {/* 手机：每张卡一行 */}

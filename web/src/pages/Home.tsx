@@ -1,10 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useSyncExternalStore, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { GpuGrid, gpuBusy, shortName, useGpus } from '../components/GpuGrid'
 import { HostMetrics } from '../components/HostMetrics'
 import { JobList } from '../components/JobRow'
+import { QueueBanner, QueuePauseButton, QueuePauseError } from '../components/QueueControls'
+import { StarError } from '../components/StarButton'
 import { Card, cx, ErrorBox, SkeletonRows, StatusIcon } from '../components/ui'
 import { now, type Job } from '@danlu/core'
 import { api } from '../lib/api'
@@ -81,7 +83,24 @@ function Summary({ running, queued }: { running: number; queued: number }) {
   )
 }
 
+/**
+ * 手机上主机资源排到任务列表后面：首屏要回答的是任务跑完没有、跑到哪了、卡空不空，CPU 和内存不在其中，
+ * 放在 GPU 下面会把任务列表挤出首屏。用媒体查询换位置而不是 CSS order，读屏的顺序也跟着换
+ */
+const WIDE = '(min-width: 640px)'
+function useWide() {
+  return useSyncExternalStore(
+    (onChange) => {
+      const m = matchMedia(WIDE)
+      m.addEventListener('change', onChange)
+      return () => m.removeEventListener('change', onChange)
+    },
+    () => matchMedia(WIDE).matches,
+  )
+}
+
 export function Home() {
+  const wide = useWide()
   const active = useActiveJobs()
   const recent = useQuery({ queryKey: ['jobs', 'recent'], queryFn: () => api.jobs({ status: 'succeeded,failed,cancelled', size: 8 }), refetchInterval: 5000 })
 
@@ -92,9 +111,11 @@ export function Home() {
 
   return (
     <div className="space-y-4 sm:space-y-5">
+      <QueueBanner />
+      <StarError />
       <Summary running={running.length} queued={queued.length} />
       <GpuGrid />
-      <HostMetrics />
+      {wide && <HostMetrics />}
 
       <ErrorBox error={active.error ?? recent.error} />
       <Card className="overflow-hidden [&>section+section]:border-t [&>section+section]:border-line">
@@ -103,10 +124,11 @@ export function Home() {
         ) : (
           <>
             <Group icon={<StatusIcon status="running" decorative />} title="运行中" count={running.length}>
-              <JobList jobs={running} empty={<GroupEmpty>炉子空着，没有正在运行的任务</GroupEmpty>} />
+              <JobList jobs={running} showCopy empty={<GroupEmpty>炉子空着，没有正在运行的任务</GroupEmpty>} />
             </Group>
-            <Group icon={<StatusIcon status="queued" decorative />} title="排队" count={queued.length}>
-              <JobList jobs={queued} empty={<GroupEmpty>队列是空的</GroupEmpty>} />
+            <Group icon={<StatusIcon status="queued" decorative />} title="排队" count={queued.length} extra={<QueuePauseButton />}>
+              <QueuePauseError />
+              <JobList jobs={queued} showCopy empty={<GroupEmpty>队列是空的</GroupEmpty>} />
             </Group>
           </>
         )}
@@ -120,9 +142,10 @@ export function Home() {
             </Link>
           }
         >
-          {recent.isLoading ? <SkeletonRows rows={2} /> : <JobList jobs={done} empty={<GroupEmpty>还没有出炉的任务</GroupEmpty>} />}
+          {recent.isLoading ? <SkeletonRows rows={2} /> : <JobList jobs={done} showCopy empty={<GroupEmpty>还没有出炉的任务</GroupEmpty>} />}
         </Group>
       </Card>
+      {!wide && <HostMetrics />}
     </div>
   )
 }

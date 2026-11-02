@@ -1,10 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { X } from 'lucide-react'
+import { Copy, X } from 'lucide-react'
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, now, timeAgo, type Job } from '@danlu/core'
 import { api } from '../lib/api'
-import { Button, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
+import { StarButton } from './StarButton'
+import { Button, buttonClass, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
 
 /** 取消任务前的确认框：写清已经跑了多久、结束后不能恢复。出错时留在框里显示原因 */
 export function CancelDialog({ job: j, onClose }: { job: Job; onClose: () => void }) {
@@ -64,10 +65,11 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
   if (j.status === 'queued') {
     const pos = j.queue_pos ? `第 ${j.queue_pos} 位` : '排队中'
     const need = j.gpus_pinned.length ? `等 GPU ${j.gpus_pinned.join(',')}` : j.gpus_req ? `等 ${j.gpus_req} 张卡` : '不用 GPU'
-    return { text: `${pos} · ${need}` }
+    return { text: `${pos} · ${j.wait_reason || need}` }
   }
   if (j.status === 'running' && j.cancel_requested) return { text: '正在结束进程…', tone: 'text-warn' }
   if (j.status === 'failed') return { text: failText(j), tone: 'text-fail' }
+  if (j.pruned_at) return { text: '日志和代码快照已清理' }
   if (j.last_line) {
     const p = compactProgress(j.last_line)
     return { text: p.text, short: p.short, mono: true, pct: j.status === 'running' ? p.pct : null }
@@ -77,10 +79,10 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
 }
 
 /**
- * 一行任务。整行可点（名字是链接，用 ::after 铺满整行），commit 和取消按钮浮在上面单独可点。
+ * 一行任务。整行可点（名字是链接，用 ::after 铺满整行），commit、复制和取消操作浮在上面单独可点。
  * 电脑上是固定列；手机上折成两行：第一行名字和时间，第二行卡号、说明文字和 commit，字段一个不少。
  */
-export function JobRow({ job: j }: { job: Job }) {
+export function JobRow({ job: j, showCopy = false }: { job: Job; showCopy?: boolean }) {
   const [confirming, setConfirming] = useState(false)
   const flash = useFlash(j.id, j.status)
   const d = jobDuration(j)
@@ -99,7 +101,11 @@ export function JobRow({ job: j }: { job: Job }) {
     >
       <StatusIcon status={j.status} cancelling={j.cancel_requested} className="self-start mt-0.5 md:mt-0 md:self-center" />
       <div className="flex min-w-0 flex-1 flex-col gap-1 md:flex-row md:items-center md:gap-4">
-        <div className="flex min-w-0 items-baseline gap-2 md:w-[240px] md:shrink-0 lg:w-[280px]">
+        {/* 首页从名称列调配复制入口的宽度，保留卡号和最新输出列的空间 */}
+        <div className={cx('flex min-w-0 items-baseline gap-2 md:shrink-0', showCopy ? 'md:w-[208px] lg:w-[248px]' : 'md:w-[240px] lg:w-[280px]')}>
+          <div className="relative h-5 w-11 shrink-0 md:hidden">
+            <div className="absolute inset-x-0 top-1/2 z-10 -translate-y-1/2"><StarButton job={j} /></div>
+          </div>
           <Link
             to={`/jobs/${j.id}`}
             title={j.name}
@@ -151,20 +157,33 @@ export function JobRow({ job: j }: { job: Job }) {
           </span>
         </div>
       </div>
-      {canCancel ? (
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          className="relative z-10 text-fg-3 hover:text-fail max-md:-mr-2 max-md:size-11 md:pointer-fine:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
-          title="取消任务"
-          aria-label={`取消任务 #${j.id}`}
-          onClick={() => setConfirming(true)}
-        >
-          <X />
-        </Button>
-      ) : (
-        <span className="hidden size-8 shrink-0 md:block" />
-      )}
+      <div className={cx('relative z-10 flex shrink-0 items-center max-md:-mr-2', !showCopy && !canCancel && 'max-md:hidden')}>
+        <div className="max-md:hidden"><StarButton job={j} /></div>
+        {showCopy && (
+          <Link
+            to={`/new?copy=${j.id}`}
+            className={cx(buttonClass('ghost', 'icon-sm'), 'text-fg-3 max-md:-my-0.5 max-md:size-11')}
+            title="复制任务"
+            aria-label={`复制任务 #${j.id}`}
+          >
+            <Copy aria-hidden />
+          </Link>
+        )}
+        {canCancel ? (
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            className="text-fg-3 hover:text-fail max-md:size-11 md:pointer-fine:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+            title="取消任务"
+            aria-label={`取消任务 #${j.id}`}
+            onClick={() => setConfirming(true)}
+          >
+            <X />
+          </Button>
+        ) : (
+          <span className="hidden size-8 shrink-0 md:block" />
+        )}
+      </div>
       {confirming && <CancelDialog job={j} onClose={() => setConfirming(false)} />}
     </div>
   )
@@ -182,19 +201,19 @@ export function JobListHeader() {
         <span className="w-[4.5rem] shrink-0 text-right">结束于</span>
         <span className="w-[4.5rem] shrink-0">代码</span>
       </div>
-      <span className="size-8 shrink-0" />
+      <span className="h-8 w-16 shrink-0" />
     </div>
   )
 }
 
-export function JobList({ jobs, empty, header }: { jobs: Job[]; empty: ReactNode; header?: ReactNode }) {
+export function JobList({ jobs, empty, header, showCopy = false }: { jobs: Job[]; empty: ReactNode; header?: ReactNode; showCopy?: boolean }) {
   if (!jobs.length) return typeof empty === 'string' ? <Empty>{empty}</Empty> : <>{empty}</>
   return (
     <>
       {header}
       <div className="divide-y divide-line">
         {jobs.map((j) => (
-          <JobRow key={j.id} job={j} />
+          <JobRow key={j.id} job={j} showCopy={showCopy} />
         ))}
       </div>
     </>

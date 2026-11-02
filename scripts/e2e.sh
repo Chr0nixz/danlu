@@ -17,14 +17,20 @@ BASE=http://127.0.0.1:$PORT
 JAR=$T/cookies
 PASS=0 FAIL=0
 SERVER_PID=
+NTFY_PID=
+API_AUTH=()
 
 ok()   { echo "  ✔ $*"; PASS=$((PASS+1)); }
 bad()  { echo "  ✘ $*"; FAIL=$((FAIL+1)); }
 check() { local desc=$1; shift; if "$@"; then ok "$desc"; else bad "$desc"; fi; }
 json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1" 2>/dev/null; }
-api()  { curl -s -b "$JAR" -c "$JAR" -H 'Content-Type: application/json' "$@"; }
-code() { curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" "$@"; }
+api()  { curl -s -b "$JAR" -c "$JAR" "${API_AUTH[@]}" -H 'Content-Type: application/json' "$@"; }
+code() { curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" "${API_AUTH[@]}" "$@"; }
 job()  { api "$BASE/api/jobs/$1" | json "$2"; }
+manifest() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2]))" "$1" "$2"; }
+event_kinds() {
+  python3 -c 'import sqlite3,sys; db=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); print(" ".join(r[0] for r in db.execute("SELECT kind FROM events WHERE job_id=? AND kind NOT IN (\"alert_raised\",\"alert_cleared\") ORDER BY id",(int(sys.argv[2]),))))' "$DANLU_HOME/danlu.db" "$1"
+}
 submit() { api -X POST "$BASE/api/jobs" -d "$1" | json "d['id']"; }
 wait_status() { # id status 超时秒数
   for _ in $(seq 1 $(( ${3:-20} * 2 ))); do
@@ -36,6 +42,23 @@ wait_started() { # id 超时秒数
   for _ in $(seq 1 $(( ${2:-10} * 2 ))); do
     [ "$(job "$1" "d['pid'] > 0")" = True ] && return 0; sleep 0.5
   done; return 1
+}
+wait_recipe() { # id 超时秒数
+  for _ in $(seq 1 $(( ${2:-20} * 2 ))); do
+    [ "$(job "$1" "bool(d.get('recipe') and (d['recipe'].get('env_hash') or d['recipe'].get('env_error')))" )" = True ] && return 0; sleep 0.5
+  done; return 1
+}
+wait_manifest() { # id 超时秒数
+  for _ in $(seq 1 $(( ${2:-20} * 2 ))); do
+    out=$(job "$1" "d.get('output_dir', '')")
+    if [ -n "$out" ] && [ -f "$out/danlu.json" ] \
+      && [ "$(manifest "$out/danlu.json" "d['status']")" = succeeded ] \
+      && [ "$(manifest "$out/danlu.json" "d['recipe']['env_hash']")" = "$(job "$1" "d['recipe']['env_hash']")" ]; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
 }
 wait_until() { # 超时秒数 命令…
   local n=$1; shift
@@ -56,6 +79,7 @@ start_server() {
 }
 cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+  [ -n "$NTFY_PID" ] && kill "$NTFY_PID" 2>/dev/null
   [ -f "$T/bashrc-bg.pid" ] && kill "$(cat "$T/bashrc-bg.pid")" 2>/dev/null
 }
 trap cleanup EXIT
@@ -65,10 +89,24 @@ echo "== 初始化 =="
   && ok "init 成功" || { bad "init 失败"; cat "$T/init.log"; exit 1; }
 ENTRANCE=$("$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')
 [ -n "$ENTRANCE" ] || { bad "读不到安全入口"; exit 1; }
+check "快速失败阈值默认为 2 分钟" grep -q 'fail_fast = "2m0s"' "$DANLU_HOME/config.toml"
 sed -i 's/kill_grace = .*/kill_grace = "3s"/' "$DANLU_HOME/config.toml"
-# 假 conda：activate 时只设置一个环境变量
-mkdir -p "$T/fakeconda/etc/profile.d"
+# 假 conda：activate 时只设置一个环境变量；包清单固定，便于验证哈希去重
+mkdir -p "$T/fakeconda/etc/profile.d" "$T/fakeconda/bin"
 echo 'conda() { [ "$1" = activate ] && export FAKE_CONDA_ENV="$2"; }' > "$T/fakeconda/etc/profile.d/conda.sh"
+cat > "$T/fakeconda/bin/conda" <<'EOF'
+#!/bin/sh
+if [ "$1" = "list" ]; then
+  printf 'python=3.12\nnumpy=2.1\n'
+  exit 0
+fi
+if [ "$1" = "env" ]; then
+  printf '{"envs":[]}'
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$T/fakeconda/bin/conda"
 # 工作目录：一个有未提交改动的 git 仓库
 W=$T/work; mkdir -p "$W"
 git -C "$W" init -q && echo 'print("v1")' > "$W/train.py" && git -C "$W" add . \
@@ -98,12 +136,13 @@ sleep 2
 GPUS=$(api "$BASE/api/gpus")
 check "看到 4 张假 GPU" [ "$(echo "$GPUS" | json "len(d['gpus'])")" = 4 ]
 check "GPU 3 显示为外部进程占用" [ "$(echo "$GPUS" | json "len(d['gpus'][3]['external'])")" = 1 ]
+check "磁盘采集返回数据分区和实际可用容量" [ "$(api "$BASE/api/system" | json "any(x['data'] and x['total_bytes']>0 and x['available_bytes']<=x['total_bytes'] for x in d['disks'])")" = True ]
 
 echo "== 调度 =="
 A=$(submit "{\"name\":\"A\",\"workdir\":\"$W\",\"cmd\":\"echo hello; python3 train.py; sleep 4\",\"gpus\":2,\"conda_env\":\"myenv\"}")
 B=$(submit "{\"name\":\"B\",\"workdir\":\"$W\",\"cmd\":\"echo \$CUDA_VISIBLE_DEVICES; sleep 1\",\"gpus\":1}")
 C=$(submit "{\"name\":\"C\",\"workdir\":\"$W\",\"cmd\":\"sleep 1\",\"pinned_gpus\":[3]}")
-D=$(submit "{\"name\":\"D\",\"workdir\":\"$W\",\"cmd\":\"echo conda=\$FAKE_CONDA_ENV\",\"gpus\":2,\"conda_env\":\"myenv\"}")
+D=$(submit "{\"name\":\"D\",\"workdir\":\"$W\",\"cmd\":\"echo conda=\$FAKE_CONDA_ENV; echo out=\$DANLU_OUTPUT_DIR\",\"gpus\":2,\"conda_env\":\"myenv\"}")
 check "A 开始运行" wait_status "$A" running 10
 check "A 分到 GPU 0,1" [ "$(job "$A" "d['gpus_assigned']")" = "[0, 1]" ]
 check "B 和 A 同时开始（只要 1 张卡，GPU 2 空闲）" wait_status "$B" succeeded 10
@@ -114,6 +153,14 @@ check "取消排队中的 C" [ "$(api -X POST "$BASE/api/jobs/$C/cancel" -d '{}'
 check "A 结束后 D 开始并成功" wait_status "$D" succeeded 20
 check "A 成功" [ "$(job "$A" "d['status']")" = succeeded ]
 check "D 激活了 conda 环境" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$D/log?tail=10000' | grep -q 'conda=myenv'"
+check "A 和 D 的环境包记录完成" wait_recipe "$A" 10
+check "D 的环境包记录完成" wait_recipe "$D" 10
+check "相同包清单使用相同哈希" [ "$(job "$A" "d['recipe']['env_hash']")" = "$(job "$D" "d['recipe']['env_hash']")" ]
+OUTDIR=$(job "$D" "d['output_dir']")
+check "任务收到独立输出目录" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$D/log?tail=10000' | grep -Fq 'out=$OUTDIR'"
+check "机器配方记录主机、驱动、CUDA 和 GPU 型号" [ "$(job "$D" "d['recipe']['machine']['driver_version'] + ' ' + d['recipe']['machine']['cuda_version'] + ' ' + d['recipe']['machine']['gpus'][0]['name']")" = "fake fake Fake GPU 24GB" ]
+check "danlu.json 记录结束状态和环境包哈希" wait_manifest "$D" 10
+check "环境包接口返回原文" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$D/env' | grep -q '^numpy=2.1$'"
 check "B 的日志里 CUDA_VISIBLE_DEVICES=2" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$B/log?tail=10000' | grep -q '\"data\":\"[^\"]*\\\\n2\\\\n'"
 
 echo "== 校验 =="
@@ -139,7 +186,8 @@ check "退出码 3 记为失败" wait_status "$E" failed 10
 check "记录了退出码 3" [ "$(job "$E" "d['exit_code']")" = 3 ]
 F=$(submit "{\"name\":\"F\",\"workdir\":\"$W\",\"cmd\":\"setsid sleep 1000 & sleep 1\",\"gpus\":0}")
 check "F 成功结束" wait_status "$F" succeeded 10
-check "F 用 setsid 留下的残留进程被清理" bash -c "[[ \"\$(curl -s -b '$JAR' '$BASE/api/jobs/$F' | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"fail_reason\"])')\" == *已清理* ]]"
+check "F 用 setsid 留下的残留进程被清理，记在备注里" [ "$(job "$F" "'已清理' in d['notes']")" = True ]
+check "成功任务的失败原因保持为空" [ "$(job "$F" "d['fail_reason']")" = "" ]
 sleep 0.5
 check "没有遗留 F 的 sleep 进程" bash -c "! grep -l 'DANLU_JOB_ID=$F' /proc/[0-9]*/environ 2>/dev/null | grep -q ."
 
@@ -154,6 +202,8 @@ check "G 的所有进程都已结束" bash -c "! grep -l 'DANLU_JOB_ID=$G' /proc
 echo "== danlu 重启后接管 =="
 H=$(submit "{\"name\":\"H\",\"workdir\":\"$W\",\"cmd\":\"for i in 1 2 3 4 5 6; do echo step \$i; sleep 1; done\",\"gpus\":1}")
 check "H 开始运行" wait_started "$H" 10
+# 模拟任务已结束、包采集尚未落库时服务被杀的磁盘状态。
+python3 -c 'import json,sqlite3,sys; db=sqlite3.connect(sys.argv[1]); d=json.loads(db.execute("SELECT recipe_json FROM jobs WHERE id=?",(int(sys.argv[2]),)).fetchone()[0]); d["pending"]=True; d.pop("env_hash",None); db.execute("UPDATE jobs SET recipe_json=? WHERE id=?",(json.dumps(d),int(sys.argv[2]))); db.commit()' "$DANLU_HOME/danlu.db" "$E"
 kill -9 "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
 sleep 1
 check "danlu 被杀后训练进程还活着" bash -c "grep -l 'DANLU_JOB_ID=$H' /proc/[0-9]*/environ 2>/dev/null | grep -q ."
@@ -161,6 +211,72 @@ start_server
 check "重启后 H 仍是运行中" [ "$(job "$H" "d['status']")" = running ]
 check "H 最终成功" wait_status "$H" succeeded 15
 check "服务日志里有接管记录" grep -q "接管运行中的任务 #$H" "$T/server.log"
+check "重启后结束任务不再等待已中断的包采集" [ "$(job "$E" "not d['recipe'].get('pending') and '重启' in d['recipe'].get('env_error','')")" = True ]
+
+echo "== 手动暂停和恢复队列 =="
+check "队列默认未暂停" [ "$(api "$BASE/api/queue" | json "d['paused']")" = False ]
+QR=$(submit "{\"name\":\"queue-running\",\"workdir\":\"$W\",\"cmd\":\"sleep 5; echo done\",\"gpus\":1}")
+check "暂停前的任务已启动" wait_started "$QR" 10
+check "手动暂停队列" [ "$(api -X POST "$BASE/api/queue/pause" -d '{}' | json "d['paused'] and d['kind']=='manual' and d['since']>0")" = True ]
+QP=$(submit "{\"name\":\"queue-pending\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
+check "暂停时仍可提交任务" [ "$(job "$QP" "d['status']")" = queued ]
+check "暂停不影响运行任务正常收尾" wait_status "$QR" succeeded 15
+check "卡已空闲时排队任务也不启动" [ "$(job "$QP" "d['status']")" = queued ]
+kill -9 "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+start_server
+check "重启保留队列暂停状态" [ "$(api "$BASE/api/queue" | json "d['paused'] and d['kind']=='manual'")" = True ]
+check "重启后排队任务仍未启动" [ "$(job "$QP" "d['status']")" = queued ]
+api -X POST "$BASE/api/queue/pause" -d '{}' >/dev/null
+check "手动恢复队列" [ "$(api -X POST "$BASE/api/queue/resume" -d '{}' | json "d['paused']")" = False ]
+check "恢复后排队任务开始运行并成功" wait_status "$QP" succeeded 10
+api -X POST "$BASE/api/queue/resume" -d '{}' >/dev/null
+check "重复暂停和恢复不重复记队列事件" \
+  [ "$(python3 -c 'import sqlite3,sys; db=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); print(" ".join(r[0] for r in db.execute("SELECT kind FROM events WHERE kind IN (?,?) ORDER BY id",("queue_paused","queue_resumed"))))' "$DANLU_HOME/danlu.db")" = "queue_paused queue_resumed" ]
+check "暂停和恢复均记审计日志" \
+  [ "$(api "$BASE/api/audit" | json "sorted(e['action'] for e in d['entries'] if e['action'].startswith('queue_'))")" = "['queue_pause', 'queue_resume']" ]
+
+echo "== 快速失败自动暂停 =="
+FF=$(submit "{\"name\":\"fail-fast\",\"workdir\":\"$W\",\"cmd\":\"while [ ! -f $T/finish-fast ]; do sleep 0.1; done; exit 7\",\"gpus\":3}")
+check "快速失败测试任务已启动" wait_started "$FF" 10
+FN=$(submit "{\"name\":\"after-fast-failure\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
+check "后续任务等待前一个释放 GPU" [ "$(job "$FN" "d['status']")" = queued ]
+touch "$T/finish-fast"
+check "快速失败任务记录为失败" wait_status "$FF" failed 10
+check "自动暂停带触发任务和原因" [ "$(api "$BASE/api/queue" | json "d['paused'] and d['kind']=='fail_fast' and d['job_id']==$FF and bool(d['reason'])")" = True ]
+check "失败后后续任务不启动" [ "$(job "$FN" "d['status']")" = queued ]
+check "任务结束与自动暂停事件各记一次" [ "$(event_kinds "$FF")" = "job_started job_finished queue_paused" ]
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+start_server
+check "自动暂停重启后保留" [ "$(api "$BASE/api/queue" | json "d['paused'] and d['kind']=='fail_fast' and d['job_id']==$FF")" = True ]
+check "自动暂停重启后仍不启动后续任务" [ "$(job "$FN" "d['status']")" = queued ]
+check "自动暂停可通过面板接口手动恢复" [ "$(api -X POST "$BASE/api/queue/resume" -d '{}' | json "d['paused']")" = False ]
+check "手动继续后后续任务成功" wait_status "$FN" succeeded 10
+
+echo "== 关闭快速失败自动暂停 =="
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+sed -i 's/fail_fast = .*/fail_fast = "0s"/' "$DANLU_HOME/config.toml"
+start_server
+F0=$(submit "{\"name\":\"fail-fast-disabled\",\"workdir\":\"$W\",\"cmd\":\"while [ ! -f $T/finish-disabled ]; do sleep 0.1; done; exit 8\",\"gpus\":3}")
+check "关闭后测试任务已启动" wait_started "$F0" 10
+N0=$(submit "{\"name\":\"after-failure-disabled\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
+check "关闭后也先确认后续任务在排队" [ "$(job "$N0" "d['status']")" = queued ]
+touch "$T/finish-disabled"
+check "关闭后失败状态仍正常记录" wait_status "$F0" failed 10
+check "关闭后队列照常执行后续任务" wait_status "$N0" succeeded 10
+check "关闭后不会暂停队列" [ "$(api "$BASE/api/queue" | json "d['paused']")" = False ]
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+sed -i 's/fail_fast = .*/fail_fast = "2m"/' "$DANLU_HOME/config.toml"
+start_server
+
+echo "== 任务状态事件 =="
+check "任务可标星" [ "$(api -X POST "$BASE/api/jobs/$A/star" -d '{"starred":true}' | json "d['starred']")" = True ]
+check "只看标星返回对应任务" [ "$(api "$BASE/api/jobs?starred=true" | json "[j['id'] for j in d['jobs']]")" = "[$A]" ]
+check "标星请求必须明确 true 或 false" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/jobs/$A/star")" = 400 ]
+check "成功任务的启动、结束事件各一条" [ "$(event_kinds "$A")" = "job_started job_finished" ]
+check "排队时取消只记结束事件" [ "$(event_kinds "$C")" = "job_finished" ]
+check "失败任务的启动、结束事件各一条" [ "$(event_kinds "$E")" = "job_started job_finished" ]
+check "运行中取消记为一次启动、一次结束" [ "$(event_kinds "$G")" = "job_started job_finished" ]
+check "重启接管不会重复记启动事件" [ "$(event_kinds "$H")" = "job_started job_finished" ]
 
 echo "== 日志 =="
 check "tail 读取到 H 的输出" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$H/log?tail=100000' | grep -q 'step 6'"
@@ -235,10 +351,60 @@ cp "$BIN" "$T/danlu-copy" && cp "$BIN" "$T/danlu-copy.new"
 check "replace 用新程序原子替换旧程序" bash -c "'$T/danlu-copy.new' replace --no-restart --json '$T/danlu-copy' | grep -q '\"restarted\": false' && [ ! -e '$T/danlu-copy.new' ]"
 check "replace 把旧程序留成 .prev" [ -x "$T/danlu-copy.prev" ]
 
+echo "== 保留策略与清理预览 =="
+# 前面故意改过密码、吊销了会话并锁定登录；后续检查使用新建的隔离测试设备令牌。
+PRUNE_TOKEN=$("$BIN" token create --name prune-check --json | json "d['token']")
+API_AUTH=(-H "Authorization: Bearer $PRUNE_TOKEN")
+PR=$(submit "{\"name\":\"prune-running\",\"workdir\":\"$W\",\"cmd\":\"sleep 300\",\"gpus\":0}")
+check "清理前的运行任务已启动" wait_started "$PR" 10
+printf 'trained checkpoint\n' >"$OUTDIR/checkpoint.pt"
+MANIFEST_SUM=$(sha256sum "$OUTDIR/danlu.json")
+PREVIEW=$(env HOME="$T/userhome" "$BIN" prune --dry-run --older-than 0s --json)
+check "清理预览包含普通完成任务，排除标星与运行任务" [ "$(echo "$PREVIEW" | json "any(j['job_id']==$D for j in d['jobs']) and not any(j['job_id'] in [$A,$PR] for j in d['jobs'])")" = True ]
+check "预览不删除日志或改变清理标记" [ "$(job "$D" "d['pruned_at'] is None")" = True ]
+check "预览后日志仍在" [ -f "$DANLU_HOME/logs/$D.log" ]
+prune_now() { env HOME="$T/userhome" "$BIN" prune --older-than 0s --json >"$T/prune.json"; }
+check "实际清理命令成功" prune_now
+check "清理后任务记录保留并写入清理时间" [ "$(job "$D" "d['pruned_at'] is not None and d['status']=='succeeded'")" = True ]
+check "完成任务的日志、快照和运行目录已清理" bash -c "test ! -e '$DANLU_HOME/logs/$D.log' && test ! -e '$DANLU_HOME/snapshots/$D.tar.gz' && test ! -e '$DANLU_HOME/run/$D'"
+check "标星任务的日志和快照保留" bash -c "test -f '$DANLU_HOME/logs/$A.log' && test -f '$DANLU_HOME/snapshots/$A.tar.gz'"
+check "运行任务继续运行且保留日志" [ "$(job "$PR" "d['status']")" = running ]
+check "清理不改训练输出或任务清单" [ "$(sha256sum "$OUTDIR/danlu.json")" = "$MANIFEST_SUM" ]
+check "checkpoint 仍保留" grep -q 'trained checkpoint' "$OUTDIR/checkpoint.pt"
+check "清理后的日志接口明确返回 410" [ "$(code "$BASE/api/jobs/$D/log?tail=100")" = 410 ]
+check "清理后的快照接口明确返回 410" [ "$(code "$BASE/api/jobs/$D/snapshot")" = 410 ]
+api -X POST "$BASE/api/jobs/$PR/cancel" -d '{}' >/dev/null
+check "清理后仍能取消运行任务" wait_status "$PR" cancelled 10
+
 echo "== 停止服务 =="
 kill -TERM "$SERVER_PID"
 check "收到 SIGTERM 后正常停止" wait_until 10 grep -q 'danlu 已停止' "$T/server.log"
 wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+API_AUTH=()
+
+echo "== 磁盘保护暂停和恢复 =="
+MAIN_HOME=$DANLU_HOME
+export DANLU_HOME=$T/home-disk
+DISK_PORT=$((PORT + 3))
+"$BIN" init --yes --tls off --port "$DISK_PORT" --password testpass123 --public-ip 127.0.0.1 >/dev/null
+sed -i 's/disk_min_gb = .*/disk_min_gb = 1000000000/; s/disk_warn_gb = .*/disk_warn_gb = 1000000000/' "$DANLU_HOME/config.toml"
+BASE=http://127.0.0.1:$DISK_PORT JAR=$T/cookies-disk
+start_server
+curl -s -c "$JAR" -o /dev/null "$BASE/$("$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')"
+api -o /dev/null -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login"
+disk_paused() { [ "$(api "$BASE/api/queue" | json "d['paused'] and d['kind']=='disk'")" = True ]; }
+check "容量低于暂停线时自动暂停" wait_until 10 disk_paused
+check "磁盘低余量标为告警" [ "$(api "$BASE/api/system" | json "any(x['data'] and x['warn'] for x in d['disks'])")" = True ]
+DP=$(submit "{\"name\":\"disk-pending\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
+check "磁盘保护也阻止不用 GPU 的新任务" [ "$(job "$DP" "d['status']")" = queued ]
+check "磁盘仍不足时不能人工绕过保护" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/queue/resume")" = 409 ]
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+sed -i 's/disk_min_gb = .*/disk_min_gb = 1/; s/disk_warn_gb = .*/disk_warn_gb = 20/' "$DANLU_HOME/config.toml"
+start_server
+check "空间达到恢复线后自动恢复调度" wait_status "$DP" succeeded 10
+check "磁盘恢复后清除暂停状态" [ "$(api "$BASE/api/queue" | json "d['paused']")" = False ]
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+export DANLU_HOME=$MAIN_HOME
 
 echo "== GPU 数据不可信时暂停分卡（假 nvidia-smi）=="
 FB=$T/fakebin; mkdir -p "$FB"
@@ -265,9 +431,12 @@ start_server -u DANLU_FAKE_GPUS -u DANLU_FAKE_BUSY DANLU_HOME="$SMI_HOME" PATH="
 curl -s -c "$JAR" -o /dev/null "$BASE/$(DANLU_HOME=$SMI_HOME "$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')"
 api -o /dev/null -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login"
 gpus_has() { api "$BASE/api/gpus" | grep -q "$1"; }
+gpus_error_since() { [ "$(api "$BASE/api/gpus" | json "d.get('error_since', 0) > 0")" = True ]; }
+gpus_error_cleared() { [ "$(api "$BASE/api/gpus" | json "'error' not in d and 'error_since' not in d")" = True ]; }
 check "nvidia-smi 正常时看到 2 张卡、没有报错" [ "$(api "$BASE/api/gpus" | json "str(len(d['gpus'])) + (d.get('error') or '')")" = 2 ]
 echo noprocs >"$T/smi.mode"
 check "查不到卡上的进程时报错" wait_until 10 gpus_has '查不到 GPU 上的进程'
+check "GPU 错误返回持续时间起点" wait_until 5 gpus_error_since
 CPU=$(submit "{\"name\":\"cpu\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
 GJ=$(submit "{\"name\":\"gpu\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
 check "排在前面、不用卡的任务照常运行" wait_status "$CPU" succeeded 10
@@ -278,8 +447,121 @@ check "nvidia-smi 卡住时报错" wait_until 25 gpus_has 'nvidia-smi 执行失�
 check "nvidia-smi 卡住期间要卡的任务还在排队" [ "$(job "$GJ" "d['status']")" = queued ]
 echo ok >"$T/smi.mode"
 check "nvidia-smi 恢复后不再报错" wait_until 25 bash -c "! curl -s -b '$JAR' '$BASE/api/gpus' | grep -q '\"error\"'"
+check "GPU 恢复后清除错误持续时间" wait_until 25 gpus_error_cleared
 check "恢复后排队的任务分到卡并成功" wait_status "$GJ" succeeded 15
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+
+echo "== ntfy 手机推送（本地记录服务）=="
+export DANLU_HOME=$T/home-notify
+NOTIFY_PORT=$((PORT + 4))
+"$BIN" init --yes --tls off --port "$NOTIFY_PORT" --password testpass123 --public-ip 127.0.0.1 >/dev/null
+sed -i 's/fail_fast = .*/fail_fast = "0s"/; s/disk_warn_gb = .*/disk_warn_gb = 0/' "$DANLU_HOME/config.toml"
+cat >"$T/ntfy.py" <<'PY'
+import http.server, json, sys
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length', '0'))).decode('utf-8')
+        with open(sys.argv[1], 'a') as f:
+            f.write(json.dumps({'path': self.path, 'headers': dict(self.headers), 'body': body}, ensure_ascii=False) + '\n')
+        self.send_response(503 if self.path == '/broken-topic' else 200)
+        self.end_headers()
+        self.wfile.write(b'{}')
+    def log_message(self, *args): pass
+server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+with open(sys.argv[2], 'w') as f: f.write(str(server.server_port))
+server.serve_forever()
+PY
+python3 "$T/ntfy.py" "$T/ntfy.jsonl" "$T/ntfy.port" >"$T/ntfy.log" 2>&1 &
+NTFY_PID=$!
+check "本地 ntfy 记录服务启动" wait_until 5 test -s "$T/ntfy.port"
+NTFY_URL=http://127.0.0.1:$(cat "$T/ntfy.port")
+printf 'notify-local-token\n' | "$BIN" notify setup --server "$NTFY_URL" --topic notify-test --token-stdin --json >"$T/notify-setup.json"
+check "CLI 保存推送地址且不回显令牌" [ "$(cat "$T/notify-setup.json" | json "d['enabled'] and d['url']=='$NTFY_URL/notify-test' and 'notify-local-token' not in str(d)")" = True ]
+"$BIN" notify setup >"$T/notify-qr.txt"
+check "重复 setup 保留现有订阅并输出二维码" grep -q "$NTFY_URL/notify-test" "$T/notify-qr.txt"
+BASE=http://127.0.0.1:$NOTIFY_PORT JAR=$T/cookies-notify
+start_server
+curl -s -c "$JAR" -o /dev/null "$BASE/$("$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')"
+api -o /dev/null -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login"
+check "设置页返回开启状态且不泄露 topic 或令牌" [ "$(api "$BASE/api/settings" | json "d['notify']['enabled'] and 'notify-test' not in str(d) and 'notify-local-token' not in str(d)")" = True ]
+check "测试推送接口需要登录和安全入口" [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/notify/test")" = 404 ]
+check "面板测试推送成功" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/notify/test")" = 200 ]
+check "CLI 测试推送成功" "$BIN" notify test
+ntfy_count() { python3 -c 'import json,sys; print(sum(sys.argv[2] in json.loads(line)["body"] for line in open(sys.argv[1])))' "$T/ntfy.jsonl" "$1"; }
+check "两个测试入口各发送一次" [ "$(ntfy_count '丹炉手机推送已连通')" = 2 ]
+NF1=$(submit "{\"name\":\"notify-failure-one\",\"workdir\":\"$W\",\"cmd\":\"echo SECRET_LOG_PATH; exit 1\",\"gpus\":0}")
+NF2=$(submit "{\"name\":\"notify-failure-two\",\"workdir\":\"$W\",\"cmd\":\"exit 2\",\"gpus\":0}")
+check "通知测试的第一个任务失败" wait_status "$NF1" failed 10
+check "通知测试的第二个任务失败" wait_status "$NF2" failed 10
+check "合并窗口结束前不发送失败通知" [ "$(ntfy_count 'notify-failure-one')" = 0 ]
+sleep 2
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+start_server
+failure_sent() { [ "$(ntfy_count 'notify-failure-one')" = 1 ]; }
+check "重启后保留待发批次，两个失败合成一条" wait_until 40 failure_sent
+python3 - "$T/ntfy.jsonl" "$NF1" "$NF2" <<'PY' && ok "失败推送包含任务和原因，正文不含日志、路径或安全入口" || bad "失败推送内容不正确"
+import json,sys
+messages = [json.loads(line) for line in open(sys.argv[1])]
+failure = [m for m in messages if 'notify-failure-one' in m['body']]
+assert len(failure) == 1
+m = failure[0]
+assert '#'+sys.argv[2] in m['body'] and '#'+sys.argv[3] in m['body']
+assert 'notify-failure-two' in m['body'] and '退出码' in m['body']
+assert 'SECRET_LOG_PATH' not in m['body'] and '/tmp/' not in m['body']
+assert m['headers']['Priority'] == '3' and m['headers']['Authorization'] == 'Bearer notify-local-token'
+assert m['headers']['Click'].endswith('/jobs?status=failed')
+PY
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+start_server
+sleep 2
+check "重启后不重发已经送达的失败批次" [ "$(ntfy_count 'notify-failure-one')" = 1 ]
+check "设置页记录最近发送时间和结果" [ "$(api "$BASE/api/settings" | json "d['notify']['last_sent_at'] is not None and not d['notify']['last_error']")" = True ]
+NB=$(submit "{\"name\":\"notify-blocked\",\"workdir\":\"$W\",\"cmd\":\"true\",\"pinned_gpus\":[3]}")
+blocked_reason() { [ "$(job "$NB" "'外部进程' in d.get('wait_reason','')")" = True ]; }
+check "任务视图说明队首等待的外部进程" wait_until 10 blocked_reason
+blocked_sent() { [ "$(ntfy_count '正在等待外部进程释放 GPU')" = 1 ]; }
+check "队首被外部进程阻塞时推送一次" wait_until 10 blocked_sent
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+start_server
+sleep 2
+check "重启恢复告警状态，不重复推送队首阻塞" [ "$(ntfy_count '正在等待外部进程释放 GPU')" = 1 ]
+api -X POST "$BASE/api/jobs/$NB/cancel" -d '{}' >/dev/null
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+# 快速失败：失败原因随队列暂停一起推送，手机只响一次（ROADMAP.md 场景 3）。
+# 不留外部占卡，免得排队任务同时触发"队首等待外部进程"的推送。
+sed -i 's/fail_fast = .*/fail_fast = "2m"/' "$DANLU_HOME/config.toml"
+start_server -u DANLU_FAKE_BUSY
+NFF=$(submit "{\"name\":\"notify-fast-fail\",\"workdir\":\"$W\",\"cmd\":\"sleep 1; exit 3\",\"gpus\":4}")
+NFQ=$(submit "{\"name\":\"notify-after-fast-fail\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
+fast_fail_sent() { [ "$(ntfy_count 'notify-fast-fail')" -ge 1 ]; }
+check "快速失败后推送队列暂停" wait_until 15 fast_fail_sent
+python3 - "$T/ntfy.jsonl" "$DANLU_HOME/danlu.db" "$NFF" <<'PY' && ok "快速失败只推一条，带上失败原因，不再进入失败批次" || bad "快速失败推送不正确"
+import json,sqlite3,sys
+messages = [m for m in map(json.loads, open(sys.argv[1])) if 'notify-fast-fail' in m['body']]
+assert len(messages) == 1
+m = messages[0]
+assert m['headers']['Priority'] == '4' and m['headers']['Click'].endswith('/jobs/'+sys.argv[3])
+assert '#'+sys.argv[3]+' notify-fast-fail：退出码 3' in m['body'] and '很快失败' in m['body']
+db = sqlite3.connect('file:'+sys.argv[2]+'?mode=ro', uri=True)
+state = json.loads(db.execute("SELECT value FROM settings WHERE key='ntfy.state'").fetchone()[0])
+assert not state.get('batch') and not state.get('outbox')
+PY
+check "快速失败后的任务保持排队" [ "$(job "$NFQ" "d['status']")" = queued ]
+api -X POST "$BASE/api/queue/resume" -d '{}' >/dev/null
+check "继续队列后排队任务完成" wait_status "$NFQ" succeeded 15
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+"$BIN" notify setup --server "$NTFY_URL" --topic broken-topic --json >/dev/null
+start_server
+check "发送失败向面板返回明确错误" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/notify/test")" = 502 ]
+check "设置页保留最后错误" [ "$(api "$BASE/api/settings" | json "'503' in d['notify']['last_error']")" = True ]
+check "首次请求加三次重试" [ "$(python3 -c 'import json,sys; print(sum(json.loads(l)["path"]=="/broken-topic" for l in open(sys.argv[1])))' "$T/ntfy.jsonl")" = 4 ]
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+"$BIN" notify setup --disable --json >/dev/null
+start_server
+check "关闭推送后状态正确" [ "$(api "$BASE/api/settings" | json "d['notify']['enabled']")" = False ]
+check "关闭推送时测试接口说明尚未开启" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/notify/test")" = 409 ]
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+kill "$NTFY_PID"; wait "$NTFY_PID" 2>/dev/null; NTFY_PID=
 
 echo "== HTTPS（本地 CA）=="
 export DANLU_HOME=$T/home-tls

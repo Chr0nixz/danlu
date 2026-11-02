@@ -5,6 +5,8 @@ import type { JobStatus } from './types'
 export interface JobLogOptions {
   /** 先读末尾多少字节 */
   tail?: number
+  /** 从指定字节开始读取，用于跳到 traceback */
+  offset?: number
   /** 内存里最多保留多少字符，超过后丢掉前面的 70% */
   maxChars?: number
 }
@@ -20,19 +22,22 @@ export interface JobLog {
   loadingOlder: boolean
   /** 往前多读一段，接在开头 */
   loadOlder(): Promise<void>
+  /** 初始内容从明确的字节偏移开始，而非从日志中段截取 */
+  exactStart: boolean
 }
 
 /**
  * 先读日志末尾，再用 SSE 接收增量，断线 2 秒后从已读到的位置续上。
  * 偏移量都以字节计，由服务端给出（o = 本段起点，n = 下一段起点），这里只负责拼接和去重。
  */
-export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars = 3_000_000 }: JobLogOptions = {}): JobLog {
+export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars = 3_000_000, offset }: JobLogOptions = {}): JobLog {
   const [raw, setRaw] = useState('')
   const [start, setStart] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
   const [ended, setEnded] = useState<JobStatus | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
+  const [exactStart, setExactStart] = useState(false)
   const next = useRef(0)
 
   useEffect(() => {
@@ -44,6 +49,8 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
     setError(null)
     setEnded(null)
     setLoading(true)
+    setExactStart(offset !== undefined)
+    next.current = 0
 
     const append = (t: string) =>
       setRaw((r) => {
@@ -73,8 +80,8 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
       })
     }
 
-    api
-      .log(jobId, { tail })
+    const initial = offset === undefined ? api.log(jobId, { tail }) : api.log(jobId, { offset, limit: tail })
+    initial
       .then((r) => {
         if (closed) return
         setRaw(r.data)
@@ -94,7 +101,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
       close?.()
       clearTimeout(retry)
     }
-  }, [api, jobId, tail, maxChars])
+  }, [api, jobId, tail, maxChars, offset])
 
   const loadOlder = useCallback(async () => {
     if (start <= 0) return
@@ -104,6 +111,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
       const r = await api.log(jobId, { offset: from, limit: start - from })
       setRaw((cur) => r.data + cur)
       setStart(r.start)
+      setExactStart(false)
     } catch (e) {
       setError(e)
     } finally {
@@ -111,5 +119,5 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
     }
   }, [api, jobId, start, tail])
 
-  return { raw, start, loading, error, ended, loadingOlder, loadOlder }
+  return { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart }
 }

@@ -19,3 +19,8 @@ export function useRecentFailures() {
     select: (r) => r.total,
   })
 }
+
+/** 队列状态，暂停或恢复后其他页面也立即看到 */
+export function useQueueState() {
+  return useQuery({ queryKey: ['queue'], queryFn: api.queue, refetchInterval: 3000 })
+}

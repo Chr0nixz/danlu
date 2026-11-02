@@ -31,10 +31,12 @@ func (d *Duration) UnmarshalText(b []byte) error {
 func (d Duration) MarshalText() ([]byte, error) { return []byte(d.String()), nil }
 
 type Config struct {
-	Server  Server  `toml:"server"`
-	TLS     TLS     `toml:"tls"`
-	Auth    Auth    `toml:"auth"`
-	Runtime Runtime `toml:"runtime"`
+	Server    Server    `toml:"server"`
+	TLS       TLS       `toml:"tls"`
+	Auth      Auth      `toml:"auth"`
+	Runtime   Runtime   `toml:"runtime"`
+	Retention Retention `toml:"retention"`
+	Notify    Notify    `toml:"notify"`
 }
 
 type Server struct {
@@ -63,9 +65,18 @@ type Auth struct {
 
 type Runtime struct {
 	CondaBase          string   `toml:"conda_base"`
+	OutputRoot         string   `toml:"output_root"`
 	KillGrace          Duration `toml:"kill_grace"`
+	FailFast           Duration `toml:"fail_fast"`
+	DiskWarnGB         int64    `toml:"disk_warn_gb"`
+	DiskMinGB          int64    `toml:"disk_min_gb"`
 	SnapshotMaxFileMB  int      `toml:"snapshot_max_file_mb"`
 	SnapshotMaxTotalMB int      `toml:"snapshot_max_total_mb"`
+}
+
+type Retention struct {
+	KeepDays   int64 `toml:"keep_days"`
+	MaxTotalGB int64 `toml:"max_total_gb"`
 }
 
 const (
@@ -85,11 +96,44 @@ func Default() *Config {
 			Lockout:     Duration{15 * time.Minute},
 		},
 		Runtime: Runtime{
+			OutputRoot:         DefaultOutputRoot,
 			KillGrace:          Duration{30 * time.Second},
+			FailFast:           Duration{2 * time.Minute},
+			DiskWarnGB:         20,
+			DiskMinGB:          2,
 			SnapshotMaxFileMB:  1,
 			SnapshotMaxTotalMB: 50,
 		},
+		Retention: Retention{KeepDays: 90, MaxTotalGB: 50},
 	}
+}
+
+const DefaultOutputRoot = "~/danlu-outputs"
+
+// ResolvePath 展开配置里的 ~ 并返回绝对路径。
+func ResolvePath(path string) (string, error) {
+	if path == "" {
+		path = DefaultOutputRoot
+	}
+	if strings.ContainsRune(path, '\x00') {
+		return "", errors.New("路径包含无效字符")
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("读取用户主目录失败: %w", err)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("解析路径 %q 失败: %w", path, err)
+	}
+	return filepath.Clean(abs), nil
 }
 
 // Home 返回数据目录：优先 $DANLU_HOME，否则 ~/.danlu。
@@ -105,7 +149,7 @@ func Home() string {
 }
 
 type Paths struct {
-	Home, Config, Secret, DB, Logs, Snapshots, Run, TLS string
+	Home, Config, Secret, DB, Logs, Snapshots, Run, TLS, Envs string
 }
 
 func PathsFor(home string) Paths {
@@ -118,11 +162,12 @@ func PathsFor(home string) Paths {
 		Snapshots: filepath.Join(home, "snapshots"),
 		Run:       filepath.Join(home, "run"),
 		TLS:       filepath.Join(home, "tls"),
+		Envs:      filepath.Join(home, "envs"),
 	}
 }
 
 func (p Paths) MkdirAll() error {
-	for _, d := range []string{p.Home, p.Logs, p.Snapshots, p.Run, p.TLS} {
+	for _, d := range []string{p.Home, p.Logs, p.Snapshots, p.Run, p.TLS, p.Envs} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
@@ -187,7 +232,24 @@ func (c *Config) Validate() error {
 	if c.Runtime.SnapshotMaxFileMB <= 0 || c.Runtime.SnapshotMaxTotalMB <= 0 {
 		return errors.New("快照大小上限必须大于 0")
 	}
-	return nil
+	if c.Runtime.FailFast.Duration < 0 {
+		return errors.New("runtime.fail_fast 不能为负数；设为 0s 可关闭快速失败暂停")
+	}
+	for name, value := range map[string]int64{
+		"runtime.disk_warn_gb": c.Runtime.DiskWarnGB, "runtime.disk_min_gb": c.Runtime.DiskMinGB,
+		"retention.max_total_gb": c.Retention.MaxTotalGB,
+	} {
+		if value < 0 || value > (1<<33)-1 {
+			return fmt.Errorf("%s 超出范围（0–8589934591）", name)
+		}
+	}
+	if c.Retention.KeepDays < 0 || c.Retention.KeepDays > 36500 {
+		return errors.New("retention.keep_days 超出范围（0–36500）")
+	}
+	if _, err := ResolvePath(c.Runtime.OutputRoot); err != nil {
+		return fmt.Errorf("runtime.output_root 无效: %w", err)
+	}
+	return c.Notify.Validate()
 }
 
 func (c *Config) Scheme() string {

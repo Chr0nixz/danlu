@@ -5,7 +5,8 @@ import { Link, useParams, useSearchParams } from 'react-router'
 import { CancelDialog } from '../components/JobRow'
 import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
-import { Alert, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
+import { StarButton, StarError } from '../components/StarButton'
+import { Alert, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, hitArea, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
 import { ApiError, compactProgress, duration, fmtTime, isActive, jobDuration, now, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 
@@ -17,16 +18,25 @@ export function JobDetail() {
   const q = useQuery({
     queryKey: ['job', id],
     queryFn: () => api.job(id),
-    refetchInterval: (query) => (query.state.data && !isActive(query.state.data) ? false : 2000),
+    refetchInterval: (query) => {
+      const job = query.state.data
+      return job && !isActive(job) && !job.recipe?.pending ? false : 2000
+    },
   })
   // 标签页放在地址里（?tab=code），commit 链接可以直接打开代码快照，刷新也不丢
   const [params, setParams] = useSearchParams()
   const tab = tabs.find((t) => t === params.get('tab')) ?? 'log'
+  const offsetParam = params.get('offset')
+  const parsedOffset = offsetParam === null ? undefined : Number(offsetParam)
+  const logOffset = parsedOffset !== undefined && Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : undefined
   const setTab = (t: Tab) =>
     setParams(
       (p) => {
         if (t === 'log') p.delete('tab')
-        else p.set('tab', t)
+        else {
+          p.set('tab', t)
+          p.delete('offset')
+        }
         return p
       },
       { replace: true },
@@ -34,9 +44,18 @@ export function JobDetail() {
   const [confirming, setConfirming] = useState(false)
   const panel = useRef<HTMLDivElement>(null)
 
-  const showLogEnd = () => {
-    setTab('log')
-    requestAnimationFrame(() => panel.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+  const showLog = (offset?: number) => {
+    setParams(
+      (p) => {
+        p.delete('tab')
+        if (offset === undefined) p.delete('offset')
+        else p.set('offset', String(offset))
+        return p
+      },
+      { replace: true },
+    )
+    const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches
+    requestAnimationFrame(() => panel.current?.scrollIntoView({ block: 'start', behavior: smooth ? 'smooth' : 'auto' }))
   }
 
   if (q.isLoading) {
@@ -81,6 +100,7 @@ export function JobDetail() {
             </span>
           </h1>
           <div className="flex gap-2 [&>*]:flex-1 sm:[&>*]:flex-none">
+            <StarButton job={j} label />
             {j.tracker_url && (
               <a href={j.tracker_url} target="_blank" rel="noreferrer" className={buttonClass('secondary', 'sm')}>
                 {trackerName}
@@ -102,9 +122,11 @@ export function JobDetail() {
       </div>
 
       <MetaStrip j={j} />
+      <StarError />
 
-      {j.status === 'failed' && <FailBox j={j} onShowLog={showLogEnd} />}
+      {j.status === 'failed' && <FailBox j={j} onShowLog={showLog} />}
       {j.status !== 'failed' && j.fail_reason && <Alert>{j.fail_reason}</Alert>}
+      {j.notes && <Alert>备注：{j.notes}</Alert>}
       {j.cancel_requested && j.status === 'running' && <Alert tone="warn">已发送结束信号，正在等进程退出；超时会强制结束。</Alert>}
 
       <div ref={panel} className="scroll-mt-16">
@@ -120,19 +142,29 @@ export function JobDetail() {
         />
         <div className="pt-4" {...tabPanelProps('job', tab)}>
           {tab === 'log' &&
-            (j.status === 'queued' ? (
+            (j.pruned_at ? <PrunedFiles job={j} /> : j.status === 'queued' ? (
               <Card className="px-4 py-12 text-center text-ui text-fg-3">
                 任务还在排队{j.queue_pos ? `（第 ${j.queue_pos} 位）` : ''}，开始运行后这里会显示日志
+                {j.wait_reason && <p className="mt-2 px-2 break-words text-fg-2">{j.wait_reason}</p>}
               </Card>
             ) : (
-              <LogViewer jobId={j.id} />
+              <LogViewer key={`${j.id}:${logOffset ?? 'tail'}`} jobId={j.id} offset={logOffset} />
             ))}
           {tab === 'info' && <Overview j={j} />}
-          {tab === 'code' && <CodeBrowser jobId={j.id} />}
+          {tab === 'code' && (j.pruned_at ? <PrunedFiles job={j} /> : <CodeBrowser jobId={j.id} />)}
         </div>
       </div>
       {confirming && <CancelDialog job={j} onClose={() => setConfirming(false)} />}
     </div>
+  )
+}
+
+function PrunedFiles({ job }: { job: Job }) {
+  return (
+    <Card className="space-y-2 px-4 py-8 text-center text-ui">
+      <p className="font-medium">日志和代码快照已按保留策略清理</p>
+      <p className="text-fg-3">清理于 {fmtTime(job.pruned_at)}。任务记录、环境信息和训练产物仍保留，可在“详情”中查看。</p>
+    </Card>
   )
 }
 
@@ -147,9 +179,9 @@ function BackLink() {
 
 /**
  * 失败原因。最醒目的位置放最有用的信息：日志里的报错行（找不到时用最后一行输出），
- * 而不是状态栏里已经有的退出码；退出码以外的原因（被外部终止、启动失败、清理了残留进程）单独写一行。
+ * 而不是状态栏里已经有的退出码；退出码以外的原因（被外部终止、启动失败）单独写一行。
  */
-function FailBox({ j, onShowLog }: { j: Job; onShowLog: () => void }) {
+function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => void }) {
   const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
   const extra = j.fail_reason && !/^退出码 -?\d+$/.test(j.fail_reason) ? j.fail_reason : ''
   return (
@@ -163,9 +195,13 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: () => void }) {
       ) : (
         <div>{j.fail_reason || '任务失败，没有留下输出'}</div>
       )}
-      {j.started_at && (
-        <button type="button" onClick={onShowLog} className="mt-1 inline-flex items-center gap-1 text-xs font-medium underline decoration-fail/40 underline-offset-2 hover:decoration-fail">
-          看日志末尾
+      {j.started_at && !j.pruned_at && (
+        <button
+          type="button"
+          onClick={() => onShowLog(j.traceback_offset)}
+          className={cx(hitArea, 'mt-1 inline-flex items-center gap-1 text-xs font-medium underline decoration-fail/40 underline-offset-2 hover:decoration-fail')}
+        >
+          {j.traceback_offset !== undefined ? '跳到报错' : '看日志末尾'}
           <ArrowDown className="size-3.5" aria-hidden />
         </button>
       )}
@@ -236,24 +272,74 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
+/**
+ * 复制到剪贴板，结果如实反馈：浏览器只在 HTTPS（或本机地址）下开放剪贴板，tls = off 时用 IP 打开面板就复制不了；
+ * 开放了也可能被拒绝（例如页面没有焦点）。失败时不能照样显示对勾。结果也读给读屏听。
+ */
+function useCopy(text: string) {
+  const [state, setState] = useState<'idle' | 'ok' | 'fail'>('idle')
+  const [why, setWhy] = useState('')
+  const timer = useRef<number>(undefined)
+  const copy = async () => {
+    window.clearTimeout(timer.current)
+    if (!navigator.clipboard) {
+      setWhy('浏览器只在 HTTPS 下允许复制')
+      setState('fail')
+    } else {
+      try {
+        await navigator.clipboard.writeText(text)
+        setState('ok')
+      } catch {
+        setWhy('浏览器拒绝了复制')
+        setState('fail')
+      }
+    }
+    timer.current = window.setTimeout(() => setState('idle'), 3000)
+  }
+  const icon = state === 'ok' ? <Check className="size-4" aria-hidden /> : state === 'fail' ? <X className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />
+  const status = (
+    <span role="status" className="sr-only">
+      {state === 'ok' ? '已复制' : state === 'fail' ? `复制失败，${why}` : ''}
+    </span>
+  )
+  const title = state === 'fail' ? `复制失败：${why}，请手动选中` : undefined
+  return { state, copy, icon, status, title }
+}
+
 function CopyBlock({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
+  const c = useCopy(text)
   return (
     <div className="group relative">
       <pre className="term overflow-x-auto rounded-md p-3 pr-10 whitespace-pre-wrap break-all">{text}</pre>
       <button
         type="button"
-        className="absolute right-1.5 top-1.5 grid size-7 place-items-center rounded text-[#8f8f8f] hover:bg-white/10 hover:text-white"
-        onClick={() => {
-          navigator.clipboard?.writeText(text)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
-        }}
+        className={cx('absolute right-1.5 top-1.5 grid size-7 place-items-center rounded hover:bg-white/10', c.state === 'fail' ? 'text-[#ff7b72]' : 'text-[#8f8f8f] hover:text-white')}
+        onClick={c.copy}
         aria-label="复制命令"
-        title="复制"
+        title={c.title ?? '复制'}
       >
-        {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+        {c.icon}
       </button>
+      {c.status}
+    </div>
+  )
+}
+
+function CopyValue({ text }: { text: string }) {
+  const c = useCopy(text)
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 break-all font-mono text-[12.5px]">{text}</span>
+      <button
+        type="button"
+        className={cx('grid size-7 shrink-0 place-items-center rounded hover:bg-hover', c.state === 'fail' ? 'text-fail' : 'text-fg-3 hover:text-fg')}
+        onClick={c.copy}
+        aria-label="复制输出目录"
+        title={c.title ?? '复制输出目录'}
+      >
+        {c.icon}
+      </button>
+      {c.status}
     </div>
   )
 }
@@ -270,6 +356,44 @@ function Overview({ j }: { j: Job }) {
         <Row label="工作目录">
           <span className="font-mono text-[12.5px]">{j.workdir}</span>
         </Row>
+        {j.started_at && (
+          <Row label="环境包">
+            {j.recipe?.env_hash ? (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="font-mono text-xs" title={j.recipe.env_hash}>{j.recipe.env_hash.slice(0, 12)}</span>
+                <a href={`/api/jobs/${j.id}/env`} target="_blank" rel="noreferrer" className={link}>查看包列表</a>
+              </div>
+            ) : j.recipe?.pending ? (
+              <span className="text-fg-3">正在记录</span>
+            ) : j.recipe?.env_error ? (
+              <span className="text-warn">记录失败：{j.recipe.env_error}</span>
+            ) : (
+              <span className="text-fg-3">没有记录</span>
+            )}
+          </Row>
+        )}
+        {j.recipe?.machine && (
+          <Row label="运行环境">
+            <div className="space-y-1">
+              <div>
+                {j.recipe.machine.hostname || '主机信息未记录'}
+                {j.recipe.machine.driver_version && <> · 驱动 {j.recipe.machine.driver_version}</>}
+                {j.recipe.machine.cuda_version && <> · CUDA {j.recipe.machine.cuda_version}</>}
+              </div>
+              {j.recipe.machine.gpus?.map((gpu) => (
+                <div key={gpu.index} className="font-mono text-xs">
+                  GPU {gpu.index}{gpu.name ? ` · ${gpu.name}` : ''}{gpu.uuid ? ` · ${gpu.uuid}` : ''}
+                </div>
+              ))}
+              {j.recipe.machine_error && <div className="text-warn">{j.recipe.machine_error}</div>}
+            </div>
+          </Row>
+        )}
+        {j.output_dir && (
+          <Row label="输出目录">
+            <CopyValue text={j.output_dir} />
+          </Row>
+        )}
         <Row label="GPU">
           申请 {j.gpus_pinned.length ? `指定卡 ${j.gpus_pinned.join(', ')}` : `${j.gpus_req} 张`}
           {j.gpus_assigned.length > 0 && <>，分到 GPU {j.gpus_assigned.join(', ')}</>}

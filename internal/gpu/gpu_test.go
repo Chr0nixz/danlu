@@ -29,6 +29,17 @@ func TestParseApps(t *testing.T) {
 	}
 }
 
+func TestParseMachineVersions(t *testing.T) {
+	output := "| NVIDIA-SMI 560.94 Driver Version: 560.94 CUDA Version: 12.6 |"
+	driver, cuda, err := parseMachineVersions(output)
+	if err != nil || driver != "560.94" || cuda != "12.6" {
+		t.Fatalf("parseMachineVersions = %q %q %v", driver, cuda, err)
+	}
+	if _, _, err := parseMachineVersions("no version info"); err == nil {
+		t.Fatal("缺少版本信息时应该返回错误")
+	}
+}
+
 func TestFakeBusy(t *testing.T) {
 	f := &Fake{N: 4, Busy: map[int]bool{2: true}}
 	gpus, _ := f.Query(context.Background())

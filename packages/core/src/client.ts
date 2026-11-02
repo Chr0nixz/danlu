@@ -1,13 +1,14 @@
 import type {
+  HostMetricsResponse,
   AuditEntry,
   DeviceToken,
   GPU,
-  HostSample,
   Job,
   JobsQuery,
   JobStatus,
   LogChunk,
   Me,
+  QueueState,
   Settings,
   SnapshotMeta,
   SubmitReq,
@@ -77,6 +78,21 @@ export function createApi(t: Transport, opt: ApiOptions) {
     }
     return data as T
   }
+
+  async function getText(url: string): Promise<string> {
+    const res = await t.request('GET', url)
+    if (res.status === 404 && !res.body) throw new ApiError(404, opt.emptyNotFound)
+    if (res.status < 200 || res.status >= 300) {
+      let message = `HTTP ${res.status}`
+      try {
+        message = (JSON.parse(res.body) as { error?: string })?.error ?? message
+      } catch {
+        message = res.body.slice(0, 200) || message
+      }
+      throw new ApiError(res.status, message)
+    }
+    return res.body
+  }
   const get = <T,>(url: string) => req<T>('GET', url)
   const post = <T,>(url: string, body: unknown = {}) => req<T>('POST', url, body)
 
@@ -85,8 +101,11 @@ export function createApi(t: Transport, opt: ApiOptions) {
     logout: () => post('/api/logout'),
     me: () => get<Me>('/api/me'),
 
-    gpus: () => get<{ gpus: GPU[]; updated_at: number; error?: string }>('/api/gpus'),
-    hostMetrics: () => get<{ samples: HostSample[]; updated_at: number; error?: string }>('/api/system'),
+    gpus: () => get<{ gpus: GPU[]; updated_at: number; error?: string; error_since?: number }>('/api/gpus'),
+    queue: () => get<QueueState>('/api/queue'),
+    pauseQueue: () => post<QueueState>('/api/queue/pause'),
+    resumeQueue: () => post<QueueState>('/api/queue/resume'),
+    hostMetrics: () => get<HostMetricsResponse>('/api/system'),
     condaEnvs: () =>
       get<{ available: boolean; base?: string; envs: { name: string; path: string }[]; error?: string }>('/api/conda-envs'),
     dirs: (path: string) => get<{ dirs: string[] }>(`/api/fs/dirs${qs({ path })}`),
@@ -96,8 +115,10 @@ export function createApi(t: Transport, opt: ApiOptions) {
 
     jobs: (p: JobsQuery) => get<{ jobs: Job[]; total: number; page: number; size: number }>(`/api/jobs${qs(p)}`),
     job: (id: number) => get<Job>(`/api/jobs/${id}`),
+    envPackages: (id: number) => getText(`/api/jobs/${id}/env`),
     submit: (r: SubmitReq) => post<Job>('/api/jobs', r),
     cancel: (id: number) => post<Job>(`/api/jobs/${id}/cancel`),
+    star: (id: number, starred: boolean) => post<Job>(`/api/jobs/${id}/star`, { starred }),
     log: (id: number, p: { tail?: number; offset?: number; limit?: number }) =>
       get<LogChunk>(`/api/jobs/${id}/log${qs(p)}`),
     /** 从 offset 开始接收日志增量，任务结束且读完后收到 onEnd。返回关闭函数 */
@@ -115,6 +136,7 @@ export function createApi(t: Transport, opt: ApiOptions) {
     snapshotDiff: (id: number) => get<{ diff: string }>(`/api/jobs/${id}/snapshot/diff`),
 
     settings: () => get<Settings>('/api/settings'),
+    testNotify: () => post<{ ok: boolean }>('/api/notify/test'),
     changePassword: (old: string, next: string) => post('/api/settings/password', { old, new: next }),
     audit: () => get<{ entries: AuditEntry[] }>('/api/audit'),
     tokens: () => get<{ tokens: DeviceToken[] }>('/api/tokens'),

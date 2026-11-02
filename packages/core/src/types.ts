@@ -2,6 +2,27 @@
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
+export interface Recipe {
+  env_hash?: string
+  env_error?: string
+  pending?: boolean
+  machine?: RecipeMachine
+  machine_error?: string
+}
+
+export interface RecipeMachine {
+  hostname?: string
+  driver_version?: string
+  cuda_version?: string
+  gpus?: RecipeGPU[]
+}
+
+export interface RecipeGPU {
+  index: number
+  uuid?: string
+  name?: string
+}
+
 export interface Job {
   id: number
   name: string
@@ -18,6 +39,16 @@ export interface Job {
   pid: number
   exit_code: number | null
   fail_reason: string
+  /** 失败原因分类；旧版服务器没有这个字段 */
+  fail_kind?: string
+  /** 运行备注（如残留进程清理）；旧版服务器没有这个字段 */
+  notes?: string
+  /** 任务运行期间是否观察到卡上有其他进程 */
+  ext_seen?: boolean
+  recipe?: Recipe
+  output_dir?: string
+  starred?: boolean
+  pruned_at?: number | null
   cancel_requested: boolean
   tracker_url: string
   git_commit: string
@@ -32,7 +63,18 @@ export interface Job {
   last_line?: string
   /** 失败任务日志里最后一条像报错的行（Python 异常、Killed 等） */
   error_line?: string
+  /** 日志中第一个 Python traceback 的字节偏移 */
+  traceback_offset?: number
   queue_pos?: number
+  wait_reason?: string
+}
+
+export interface QueueState {
+  paused: boolean
+  kind?: 'manual' | 'fail_fast' | 'disk'
+  reason?: string
+  since?: number
+  job_id?: number
 }
 
 export interface Proc {
@@ -61,6 +103,26 @@ export interface HostSample {
   memory_used_bytes: number
   memory_total_bytes: number
   memory_percent: number
+}
+
+export interface Disk {
+  id: string
+  path: string
+  paths: string[]
+  total_bytes: number
+  available_bytes: number
+  data: boolean
+  warn: boolean
+  error?: string
+}
+
+export interface HostMetricsResponse {
+  samples: HostSample[]
+  updated_at: number
+  error?: string
+  disks?: Disk[]
+  disks_updated_at?: number
+  disks_error?: string
 }
 
 export interface Me {
@@ -92,6 +154,13 @@ export interface Settings {
   conda_base: string
   ca_available: boolean
   ca_fingerprint?: string
+  notify?: NotifyStatus
+}
+
+export interface NotifyStatus {
+  enabled: boolean
+  last_sent_at: number | null
+  last_error: string
 }
 
 export interface DeviceToken {
@@ -123,6 +192,7 @@ export interface SubmitReq {
 }
 
 export interface JobsQuery {
+  starred?: boolean
   status?: string
   q?: string
   page?: number

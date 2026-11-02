@@ -99,6 +99,34 @@ var migrations = []string{
 		value TEXT NOT NULL,
 		updated_at INTEGER NOT NULL
 	);`,
+	// 状态和事件在同一事务里写入；dedupe_key 让写库重试不会重复记同一件事。
+	`ALTER TABLE jobs ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+	UPDATE jobs SET
+		notes = CASE WHEN instr(fail_reason, '；已清理 ') > 0
+			THEN substr(fail_reason, instr(fail_reason, '；已清理 ') + 1) ELSE fail_reason END,
+		fail_reason = CASE WHEN instr(fail_reason, '；已清理 ') > 0
+			THEN substr(fail_reason, 1, instr(fail_reason, '；已清理 ') - 1) ELSE '' END
+	WHERE fail_reason LIKE '已清理 % 个残留进程' OR fail_reason LIKE '%；已清理 % 个残留进程';
+	CREATE TABLE events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts INTEGER NOT NULL,
+		kind TEXT NOT NULL,
+		key TEXT NOT NULL DEFAULT '',
+		job_id INTEGER,
+		data TEXT NOT NULL DEFAULT '{}',
+		dedupe_key TEXT NOT NULL UNIQUE
+	);
+	CREATE INDEX events_ts ON events(ts);
+	CREATE INDEX events_job ON events(job_id, id);`,
+	`ALTER TABLE jobs ADD COLUMN fail_kind TEXT NOT NULL DEFAULT '';
+	ALTER TABLE jobs ADD COLUMN ext_seen INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE jobs ADD COLUMN oom_base INTEGER NOT NULL DEFAULT -1;
+	ALTER TABLE jobs ADD COLUMN traceback_offset INTEGER;`,
+	`ALTER TABLE jobs ADD COLUMN recipe_json TEXT NOT NULL DEFAULT '{}';`,
+	`ALTER TABLE jobs ADD COLUMN output_dir TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE jobs ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE jobs ADD COLUMN pruned_at INTEGER;
+	ALTER TABLE jobs ADD COLUMN pruning INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // keepBackups 是升级前备份最多保留的份数。
@@ -163,7 +191,7 @@ func (s *Store) backup(dir string, version int) error {
 		return err
 	}
 	// 文件名以时间开头，按名字排序就是按时间排序
-	dst := filepath.Join(dir, fmt.Sprintf("danlu-%s-v%d.db", time.Now().Format("20060102-150405"), version))
+	dst := filepath.Join(dir, fmt.Sprintf("danlu-%s-v%d.db", time.Now().Format("20060102-150405.000000000"), version))
 	if _, err := s.db.Exec("VACUUM INTO ?", dst); err != nil {
 		return err
 	}
@@ -214,6 +242,16 @@ type Job struct {
 	BootID          string            `json:"-"` // 占位时的开机标识
 	ExitCode        *int              `json:"exit_code"`
 	FailReason      string            `json:"fail_reason"`
+	FailKind        string            `json:"fail_kind"`
+	Notes           string            `json:"notes"`
+	ExtSeen         bool              `json:"ext_seen"`
+	OOMBase         int64             `json:"-"`
+	TracebackOffset *int64            `json:"-"`
+	Recipe          *Recipe           `json:"recipe,omitempty"`
+	OutputDir       string            `json:"output_dir,omitempty"`
+	Starred         bool              `json:"starred"`
+	PrunedAt        *int64            `json:"pruned_at"`
+	Pruning         bool              `json:"-"`
 	CancelRequested bool              `json:"cancel_requested"`
 	TrackerURL      string            `json:"tracker_url"`
 	GitCommit       string            `json:"git_commit"`
@@ -227,6 +265,27 @@ type Job struct {
 	EndedAt         *int64            `json:"ended_at"`
 }
 
+type Recipe struct {
+	EnvHash      string         `json:"env_hash,omitempty"`
+	EnvError     string         `json:"env_error,omitempty"`
+	Pending      bool           `json:"pending,omitempty"`
+	Machine      *RecipeMachine `json:"machine,omitempty"`
+	MachineError string         `json:"machine_error,omitempty"`
+}
+
+type RecipeMachine struct {
+	Hostname      string      `json:"hostname,omitempty"`
+	DriverVersion string      `json:"driver_version,omitempty"`
+	CUDAVersion   string      `json:"cuda_version,omitempty"`
+	GPUs          []RecipeGPU `json:"gpus,omitempty"`
+}
+
+type RecipeGPU struct {
+	Index int    `json:"index"`
+	UUID  string `json:"uuid,omitempty"`
+	Name  string `json:"name,omitempty"`
+}
+
 func (j *Job) Finished() bool {
 	return j.Status == StatusSucceeded || j.Status == StatusFailed || j.Status == StatusCancelled
 }
@@ -234,22 +293,23 @@ func (j *Job) Finished() bool {
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
 	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
-	inherit_bashrc, boot_id`
+	inherit_bashrc, boot_id, notes, fail_kind, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanJob(r scanner) (*Job, error) {
 	var (
-		j                     Job
-		envJSON, pinned, asgn string
-		exit                  sql.NullInt64
-		rerun, started, ended sql.NullInt64
-		pidStart              int64
+		j                                            Job
+		envJSON, pinned, asgn, recipeJSON, outputDir string
+		exit                                         sql.NullInt64
+		rerun, started, ended, traceback             sql.NullInt64
+		pidStart                                     int64
+		pruned                                       sql.NullInt64
 	)
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
 		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
-		&j.InheritBashrc, &j.BootID)
+		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -276,6 +336,20 @@ func scanJob(r scanner) (*Job, error) {
 	if ended.Valid {
 		j.EndedAt = &ended.Int64
 	}
+	if traceback.Valid {
+		j.TracebackOffset = &traceback.Int64
+	}
+	var recipe Recipe
+	if err := json.Unmarshal([]byte(recipeJSON), &recipe); err != nil {
+		return nil, fmt.Errorf("任务 #%d 的配方 JSON 无效: %w", j.ID, err)
+	}
+	if recipe.EnvHash != "" || recipe.EnvError != "" || recipe.Pending || recipe.Machine != nil || recipe.MachineError != "" {
+		j.Recipe = &recipe
+	}
+	j.OutputDir = outputDir
+	if pruned.Valid {
+		j.PrunedAt = &pruned.Int64
+	}
 	return &j, nil
 }
 
@@ -297,16 +371,41 @@ func (s *Store) InsertJob(j *Job) error {
 
 // SaveJob 写回运行期会变化的字段。
 func (s *Store) SaveJob(j *Job) error {
+	return saveJob(s.db, j)
+}
+
+type jobWriter interface {
+	Exec(string, ...any) (sql.Result, error)
+}
+
+func saveJob(w jobWriter, j *Job) error {
 	var exit any
 	if j.ExitCode != nil {
 		exit = *j.ExitCode
 	}
-	_, err := s.db.Exec(`UPDATE jobs SET gpus_assigned=?, status=?, master_port=?, pid=?, pid_starttime=?,
+	recipeJSON := "{}"
+	if j.Recipe != nil {
+		b, err := json.Marshal(j.Recipe)
+		if err != nil {
+			return err
+		}
+		recipeJSON = string(b)
+	}
+	res, err := w.Exec(`UPDATE jobs SET gpus_assigned=?, status=?, master_port=?, pid=?, pid_starttime=?,
 		exit_code=?, fail_reason=?, cancel_requested=?, tracker_url=?, git_commit=?, git_branch=?, git_dirty=?,
-		snapshot_ok=?, snapshot_note=?, started_at=?, ended_at=?, boot_id=? WHERE id=?`,
+		snapshot_ok=?, snapshot_note=?, started_at=?, ended_at=?, boot_id=?, notes=?, fail_kind=?, ext_seen=?,
+		oom_base=?, traceback_offset=?, recipe_json=?, output_dir=? WHERE id=?`,
 		JoinInts(j.GPUsAssigned), j.Status, j.MasterPort, j.PID, int64(j.PIDStart),
 		exit, j.FailReason, j.CancelRequested, j.TrackerURL, j.GitCommit, j.GitBranch, j.GitDirty,
-		j.SnapshotOK, j.SnapshotNote, j.StartedAt, j.EndedAt, j.BootID, j.ID)
+		j.SnapshotOK, j.SnapshotNote, j.StartedAt, j.EndedAt, j.BootID, j.Notes, j.FailKind, j.ExtSeen,
+		j.OOMBase, j.TracebackOffset, recipeJSON, j.OutputDir, j.ID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return ErrNotFound
+	}
 	return err
 }
 
@@ -319,10 +418,15 @@ func (s *Store) JobsByStatus(status string) ([]*Job, error) {
 	return s.queryJobs("SELECT "+jobCols+" FROM jobs WHERE status=? ORDER BY id", status)
 }
 
+func (s *Store) JobsWithPendingRecipe() ([]*Job, error) {
+	return s.queryJobs("SELECT " + jobCols + " FROM jobs WHERE COALESCE(json_extract(recipe_json,'$.pending'),0)=1 ORDER BY id")
+}
+
 type JobFilter struct {
 	Statuses   []string
 	Query      string
 	EndedAfter int64 // 只要这个时间（unix 秒）之后结束的任务；0 表示不限
+	Starred    bool
 	// ByEnded 为 true 时只要已结束的任务，按结束时间从新到旧排；否则按 id 从新到旧。
 	// 多台服务器的历史要按结束时间合并，所以这种排序配合 Before 游标翻页，不用页码。
 	ByEnded bool
@@ -337,6 +441,9 @@ type JobFilter struct {
 func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
 	var where []string
 	var args []any
+	if f.Starred {
+		where = append(where, "starred=1")
+	}
 	if len(f.Statuses) > 0 {
 		where = append(where, "status IN ("+strings.TrimSuffix(strings.Repeat("?,", len(f.Statuses)), ",")+")")
 		for _, st := range f.Statuses {

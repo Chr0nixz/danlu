@@ -20,11 +20,12 @@ type Sampler[T any] struct {
 	Query func(context.Context) (T, error)
 	Clone func(T) T // 返回副本，调用方改了也不影响缓存；不需要时留空
 
-	mu    sync.RWMutex
-	val   T
-	err   error
-	at    time.Time // 最近一次采集完成的时间，不管成功失败
-	since time.Time // Run 开始的时间：第一次采集就卡住时，用它判断过期
+	mu       sync.RWMutex
+	val      T
+	err      error
+	at       time.Time // 最近一次采集完成的时间，不管成功失败
+	since    time.Time // Run 开始的时间：第一次采集就卡住时，用它判断过期
+	errSince time.Time // 连续采集失败的起点；成功后清空
 }
 
 // Run 立即采集一次，之后每隔 Every 一次。调用是同步的，Query 卡住时不会叠加新的调用。
@@ -48,9 +49,42 @@ func (s *Sampler[T]) Run(ctx context.Context) {
 // Refresh 采集一次并缓存结果。Query 出错时也缓存它返回的值：GPU 查不到进程时，卡的数据照样能显示。
 func (s *Sampler[T]) Refresh(ctx context.Context) {
 	v, err := s.Query(ctx)
+	now := time.Now()
 	s.mu.Lock()
-	s.val, s.err, s.at = v, err, time.Now()
+	if err != nil {
+		if s.errSince.IsZero() {
+			s.errSince = now
+			ref := s.at
+			if ref.IsZero() {
+				ref = s.since
+			}
+			if !ref.IsZero() && now.Sub(ref) > s.Stale {
+				// 卡住后终于报错，仍沿用数据开始过期的时刻。
+				s.errSince = ref.Add(s.Stale)
+			}
+		}
+	} else {
+		s.errSince = time.Time{}
+	}
+	s.val, s.err, s.at = v, err, now
 	s.mu.Unlock()
+}
+
+// ErrorSince 返回当前采集错误的起点。查询卡住时，返回数据超过 Stale 的时刻。
+func (s *Sampler[T]) ErrorSince() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.errSince.IsZero() {
+		return s.errSince
+	}
+	ref := s.at
+	if ref.IsZero() {
+		ref = s.since
+	}
+	if !ref.IsZero() && time.Since(ref) > s.Stale {
+		return ref.Add(s.Stale)
+	}
+	return time.Time{}
 }
 
 // Latest 返回最近一次的结果、采集完成的时间和错误。

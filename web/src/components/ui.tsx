@@ -84,10 +84,12 @@ export function Field({ label, hint, children, className }: { label: ReactNode; 
 /**
  * 桌面上标签在左、控件在右的表单行；手机上上下排列。
  * 单个控件传 htmlFor（控件的 id），说明文字的 id 是 `${htmlFor}-hint`，控件可以用 aria-describedby 引用；
- * 不传时控件区是一个以标签命名的 group，用于分段按钮加步进器这类组合控件。
+ * 不传时控件区是一个以标签命名的 group，用于分段按钮加步进器这类组合控件；说明文字是这个 group 的描述，
+ * 字段错误的 id 用 describedBy 传进来，也挂在 group 上。
  */
-export function FormRow({ label, hint, htmlFor, children }: { label: ReactNode; hint?: ReactNode; htmlFor?: string; children: ReactNode }) {
+export function FormRow({ label, hint, htmlFor, describedBy, children }: { label: ReactNode; hint?: ReactNode; htmlFor?: string; describedBy?: string; children: ReactNode }) {
   const labelId = useId()
+  const hintId = htmlFor ? `${htmlFor}-hint` : `${labelId}-hint`
   const cls = 'block text-ui font-medium text-fg'
   return (
     <div className="grid gap-2 px-4 py-4 sm:px-5 md:grid-cols-[200px_1fr] md:gap-6">
@@ -102,12 +104,15 @@ export function FormRow({ label, hint, htmlFor, children }: { label: ReactNode; 
           </div>
         )}
         {hint && (
-          <div id={htmlFor && `${htmlFor}-hint`} className="mt-1 text-xs leading-relaxed text-fg-3">
+          <div id={hintId} className="mt-1 text-xs leading-relaxed text-fg-3">
             {hint}
           </div>
         )}
       </div>
-      <div className="min-w-0" {...(htmlFor ? {} : { role: 'group', 'aria-labelledby': labelId })}>
+      <div
+        className="min-w-0"
+        {...(htmlFor ? {} : { role: 'group', 'aria-labelledby': labelId, 'aria-describedby': cx(hint ? hintId : undefined, describedBy) || undefined })}
+      >
         {children}
       </div>
     </div>
@@ -173,6 +178,12 @@ export function GpuChips({ ids, className }: { ids: number[]; className?: string
   )
 }
 
+/**
+ * 字号小的链接和按钮：点击区向四周撑出一圈（左右 8px、上下 10px，12px 的字撑到 36px 高），不改变排版。
+ * 撑出去的范围里不能有别的可点元素。
+ */
+export const hitArea = 'relative before:absolute before:-inset-x-2 before:-inset-y-2.5'
+
 /** commit 短哈希；有未提交改动时后面跟一个琥珀色的点。传 to 时是链接，通常指向任务的代码快照 */
 export function Commit({ sha, dirty, to, className }: { sha: string; dirty?: boolean; to?: string; className?: string }) {
   if (!sha) return null
@@ -189,8 +200,9 @@ export function Commit({ sha, dirty, to, className }: { sha: string; dirty?: boo
     </>
   )
   const cls = cx('inline-flex items-center gap-1 font-mono text-xs text-fg-2', className)
+  // 任务行里它浮在整行链接上面，只有字那么大的话手机上很容易点到整行
   return to ? (
-    <Link to={to} className={cx(cls, 'decoration-line-strong hover:text-fg hover:underline')} title={`${title}，查看这次运行的代码`}>
+    <Link to={to} className={cx(cls, hitArea, 'decoration-line-strong hover:text-fg hover:underline')} title={`${title}，查看这次运行的代码`}>
       {body}
     </Link>
   ) : (

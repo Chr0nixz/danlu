@@ -4,7 +4,7 @@ import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { Button, buttonClass, Card, Dialog, ErrorBox, Field, Input, Segmented, Skeleton } from '../components/ui'
 import { api } from '../lib/api'
-import { fmtTime, type DeviceToken } from '@danlu/core'
+import { fmtTime, type DeviceToken, type NotifyStatus } from '@danlu/core'
 import { getTheme, setTheme, type Theme } from '../lib/theme'
 
 const actionLabel: Record<string, string> = {
@@ -17,6 +17,7 @@ const actionLabel: Record<string, string> = {
   password_change: '修改密码',
   token_create: '创建设备令牌',
   token_revoke: '吊销设备令牌',
+  notify_test: '测试手机推送',
 }
 
 function Section({ title, desc, children, footer }: { title: string; desc?: ReactNode; children: ReactNode; footer?: ReactNode }) {
@@ -42,7 +43,7 @@ function KV({ k, v }: { k: string; v: ReactNode }) {
 }
 
 export function Settings() {
-  const s = useQuery({ queryKey: ['settings'], queryFn: api.settings })
+  const s = useQuery({ queryKey: ['settings'], queryFn: api.settings, refetchInterval: 5000 })
   const audit = useQuery({ queryKey: ['audit'], queryFn: api.audit })
   const logout = useMutation({ mutationFn: api.logout, onSuccess: () => (location.href = '/login') })
   const [theme, setThemeState] = useState<Theme>(getTheme)
@@ -88,6 +89,8 @@ export function Settings() {
           ]}
         />
       </Section>
+
+      {st.notify && <NotifySection status={st.notify} />}
 
       {st.ca_available && (
         <Section title="安装 CA 证书" desc="装好后浏览器就不再提示证书不受信任。这个 CA 只能为本服务器的 IP 签发证书，不会影响其他网站。每台设备装一次。">
@@ -143,6 +146,42 @@ export function Settings() {
         退出登录
       </Button>
     </div>
+  )
+}
+
+function NotifySection({ status }: { status: NotifyStatus }) {
+  const qc = useQueryClient()
+  const test = useMutation({
+    mutationFn: api.testNotify,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
+  })
+  return (
+    <Section
+      title="手机推送"
+      desc={status.enabled
+        ? '通过 ntfy 提醒任务失败、队列暂停和资源告警。30 秒内的任务失败会合并发送。'
+        : <>在服务器上运行 <code className="font-mono text-[12px]">danlu notify setup</code>，扫描终端中的二维码订阅，重启服务后生效。</>}
+      footer={
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
+          <span role="status" className="min-w-0 flex-1 text-ui text-fg-2">
+            {test.isPending ? '正在发送测试推送…' : test.isSuccess ? '测试推送已发送，请在 ntfy App 中确认。' : status.enabled ? '通知链接需要手机已访问过安全入口。' : '开启后可发送测试，确认手机能够收到。'}
+          </span>
+          <Button size="sm" loading={test.isPending} disabled={!status.enabled || test.isPending} aria-busy={test.isPending} onClick={() => test.mutate()}>
+            发一条测试
+          </Button>
+        </div>
+      }
+    >
+      <dl className="-my-2 divide-y divide-line">
+        <KV k="推送状态" v={status.enabled ? '已开启' : '未开启'} />
+        <KV k="最近发送" v={status.last_sent_at ? fmtTime(status.last_sent_at) : '尚未发送'} />
+        <KV k="最近错误" v={status.last_error || '无'} />
+      </dl>
+      <ErrorBox error={test.error} className="mt-3" />
+    </Section>
   )
 }
 

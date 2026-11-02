@@ -7,6 +7,8 @@ import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Seg
 import { failText, type GPU, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 
+type JobFormMode = 'new' | 'copy' | 'rerun'
+
 function rerunName(name: string) {
   const m = name.match(/^(.*)-r(\d+)$/)
   return m ? `${m[1]}-r${Number(m[2]) + 1}` : `${name}-r2`
@@ -28,9 +30,11 @@ function parseEnv(text: string): Record<string, string> {
 
 export function NewJob() {
   const [params] = useSearchParams()
-  const fromId = Number(params.get('from')) || null
-  const source = useQuery({ queryKey: ['job', fromId], queryFn: () => api.job(fromId!), enabled: !!fromId })
-  if (fromId && source.isLoading) {
+  const copyId = Number(params.get('copy')) || null
+  const sourceId = copyId ?? (Number(params.get('from')) || null)
+  const formMode: JobFormMode = copyId ? 'copy' : sourceId ? 'rerun' : 'new'
+  const source = useQuery({ queryKey: ['job', sourceId], queryFn: () => api.job(sourceId!), enabled: !!sourceId })
+  if (sourceId && source.isLoading) {
     return (
       <div className="mx-auto max-w-3xl space-y-4">
         <Skeleton className="h-7 w-48" />
@@ -38,13 +42,13 @@ export function NewJob() {
       </div>
     )
   }
-  if (fromId && source.error) return <ErrorBox error={source.error} />
-  return <JobForm key={fromId ?? 'new'} source={source.data ?? null} />
+  if (sourceId && source.error) return <ErrorBox error={source.error} />
+  return <JobForm key={`${formMode}-${sourceId ?? ''}`} source={source.data ?? null} formMode={formMode} />
 }
 
 type Field = 'workdir' | 'cmd' | 'gpu' | 'env'
 
-function JobForm({ source }: { source: Job | null }) {
+function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMode }) {
   const nav = useNavigate()
   const gpus = useGpus()
   const conda = useQuery({ queryKey: ['conda'], queryFn: api.condaEnvs, staleTime: 60_000 })
@@ -53,7 +57,8 @@ function JobForm({ source }: { source: Job | null }) {
   const uid = useId()
   const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, env: `${uid}-env` }
 
-  const [name, setName] = useState(source ? rerunName(source.name) : '')
+  const rerun = formMode === 'rerun'
+  const [name, setName] = useState(source && rerun ? rerunName(source.name) : source?.name ?? '')
   const [workdir, setWorkdir] = useState(source?.workdir ?? '')
   const [condaEnv, setCondaEnv] = useState(source?.conda_env ?? '')
   const [cmd, setCmd] = useState(source?.cmd ?? '')
@@ -116,7 +121,7 @@ function JobForm({ source }: { source: Job | null }) {
       inherit_bashrc: inheritBashrc,
       gpus: mode === 'count' ? count : pinned.length,
       pinned_gpus: mode === 'pinned' ? pinned : [],
-      rerun_of: source?.id ?? null,
+      rerun_of: rerun ? source?.id ?? null : null,
     })
   }
 
@@ -144,17 +149,19 @@ function JobForm({ source }: { source: Job | null }) {
       className="mx-auto max-w-3xl space-y-4"
     >
       <div>
-        <h1 className="text-lg font-semibold">{source ? `重跑任务 #${source.id}` : '新建任务'}</h1>
+        <h1 className="text-lg font-semibold">{source ? `${rerun ? '重跑' : '复制'}任务 #${source.id}` : '新建任务'}</h1>
         <p className="mt-0.5 text-ui text-fg-3">
-          {source ? `设置已从「${source.name}」复制过来，可以先改参数再提交。` : '提交后按顺序排队，有足够的空卡就自动开始。'}
+          {source
+            ? `设置已从「${source.name}」复制过来，${rerun ? '可以先改参数再提交。' : '修改后提交为独立的新任务。'}`
+            : '提交后按顺序排队，有足够的空卡就自动开始。'}
         </p>
-        {source?.status === 'failed' && (
+        {rerun && source?.status === 'failed' && (
           <p className="mt-1 text-ui text-fail [overflow-wrap:anywhere]">
             原任务失败：<span className="font-mono text-[12.5px]">{failText(source)}</span>
           </p>
         )}
       </div>
-      {source && <CodeChangeNotice source={source} workdir={workdir} />}
+      {rerun && source && <CodeChangeNotice source={source} workdir={workdir} />}
 
       <Card className="divide-y divide-line">
         <FormRow label="工作目录" hint="服务器上的绝对路径。启动时会自动保存一份代码快照。" htmlFor={ids.workdir}>
@@ -198,7 +205,7 @@ function JobForm({ source }: { source: Job | null }) {
           </Select>
         </FormRow>
 
-        <FormRow label="GPU" hint={`共 ${total} 张，现在空闲 ${freeCount} 张。整卡独占。`}>
+        <FormRow label="GPU" hint={`共 ${total} 张，现在空闲 ${freeCount} 张。整卡独占。`} describedBy={errors.gpu && `${ids.gpu}-err`}>
           <div className="space-y-3">
             <Segmented
               label="GPU 分配方式"
@@ -225,7 +232,7 @@ function JobForm({ source }: { source: Job | null }) {
                 <span className="text-ui text-fg-2">{count === 0 ? '不使用 GPU' : '张卡，自动挑空闲的'}</span>
               </div>
             ) : (
-              <GpuPicker id={ids.gpu} gpus={gpuList} value={pinned} onChange={edit('gpu', setPinned)} />
+              <GpuPicker id={ids.gpu} describedBy={errors.gpu && `${ids.gpu}-err`} gpus={gpuList} value={pinned} onChange={edit('gpu', setPinned)} />
             )}
             <FieldError id={`${ids.gpu}-err`}>{errors.gpu}</FieldError>
             {pinnedExternal.length > 0 ? (
@@ -287,7 +294,7 @@ function JobForm({ source }: { source: Job | null }) {
   )
 }
 
-function GpuPicker({ id, gpus, value, onChange }: { id: string; gpus: GPU[]; value: number[]; onChange: (v: number[]) => void }) {
+function GpuPicker({ id, describedBy, gpus, value, onChange }: { id: string; describedBy?: string; gpus: GPU[]; value: number[]; onChange: (v: number[]) => void }) {
   return (
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
       {gpus.map((g, n) => {
@@ -298,8 +305,9 @@ function GpuPicker({ id, gpus, value, onChange }: { id: string; gpus: GPU[]; val
           <button
             type="button"
             key={g.index}
-            // 第一张卡带上字段 id，校验失败时焦点落在这里
+            // 第一张卡带上字段 id，校验失败时焦点落在这里，并读出错误说明
             id={n === 0 ? id : undefined}
+            aria-describedby={n === 0 ? describedBy : undefined}
             aria-pressed={on}
             onClick={() => onChange(on ? value.filter((x) => x !== g.index) : [...value, g.index].sort((a, b) => a - b))}
             className={cx(

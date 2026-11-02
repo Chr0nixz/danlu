@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,16 @@ type Source interface {
 	Query(ctx context.Context) ([]GPU, error)
 }
 
+type MachineInfo struct {
+	Hostname      string `json:"hostname"`
+	DriverVersion string `json:"driver_version,omitempty"`
+	CUDAVersion   string `json:"cuda_version,omitempty"`
+}
+
+type MachineSource interface {
+	Machine(context.Context) (MachineInfo, error)
+}
+
 // NewSource 默认用 nvidia-smi；设置 DANLU_FAKE_GPUS=N 时用假 GPU（测试用）。
 func NewSource() Source {
 	if n, _ := strconv.Atoi(os.Getenv("DANLU_FAKE_GPUS")); n > 0 {
@@ -63,6 +74,7 @@ const gpuQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,tempe
 // ErrProcsUnknown 表示卡的数据拿到了，但查不到卡上的进程。这时被外部进程占着的卡看起来是空的，
 // 所以 Query 照常返回卡的数据（面板能显示），同时带上这个错误，调度器据此不分配 GPU。
 var ErrProcsUnknown = errors.New("查不到 GPU 上的进程，没法判断哪些卡被外部占用")
+var ErrMachineInfoNotReady = errors.New("机器 GPU 信息尚未采集完成")
 
 // 每次调用单独计时：没开 persistence mode 的机器上，nvidia-smi 调一次就可能要几秒
 const smiTimeout = 8 * time.Second
@@ -103,6 +115,29 @@ func (SMI) Query(ctx context.Context) ([]GPU, error) {
 		gpus[i].Procs = append(gpus[i].Procs, p)
 	}
 	return gpus, nil
+}
+
+var machineVersionRE = regexp.MustCompile(`Driver Version:\s*([^\s|]+).*CUDA Version:\s*([^\s|]+)`)
+
+func parseMachineVersions(output string) (string, string, error) {
+	match := machineVersionRE.FindStringSubmatch(output)
+	if len(match) != 3 {
+		return "", "", errors.New("无法从 nvidia-smi 输出读取驱动和 CUDA 版本")
+	}
+	return match[1], match[2], nil
+}
+
+func (SMI) Machine(ctx context.Context) (MachineInfo, error) {
+	info := MachineInfo{}
+	info.Hostname, _ = os.Hostname()
+	ctx, cancel := context.WithTimeout(ctx, smiTimeout)
+	defer cancel()
+	out, err := execx.Output(execx.Command(ctx, "nvidia-smi"))
+	if err != nil {
+		return info, fmt.Errorf("读取机器 GPU 版本失败: %w", err)
+	}
+	info.DriverVersion, info.CUDAVersion, err = parseMachineVersions(string(out))
+	return info, err
 }
 
 func ParseGPUs(out string) ([]GPU, error) {
@@ -184,6 +219,11 @@ type Fake struct {
 	util []int
 }
 
+func (f *Fake) Machine(context.Context) (MachineInfo, error) {
+	host, _ := os.Hostname()
+	return MachineInfo{Hostname: host, DriverVersion: "fake", CUDAVersion: "fake"}, nil
+}
+
 func (f *Fake) Query(context.Context) ([]GPU, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -206,13 +246,38 @@ func (f *Fake) Query(context.Context) ([]GPU, error) {
 
 // ---------- 监控器：定时采集并缓存最新结果 ----------
 
-type Monitor = sample.Sampler[[]GPU]
+type Monitor struct {
+	*sample.Sampler[[]GPU]
+	machine *sample.Sampler[MachineInfo]
+}
 
 // NewMonitor 每 2 秒采集一次。超过 20 秒没有一次采集完成（两次 nvidia-smi 各 8 秒超时，再留点余量），
 // Latest 就返回错误，调度器暂停分配 GPU。
 func NewMonitor(src Source) *Monitor {
-	return &Monitor{Name: "GPU 数据", Hint: "（nvidia-smi 可能卡住了）",
-		Every: 2 * time.Second, Stale: 20 * time.Second, Query: src.Query, Clone: cloneGPUs}
+	m := &Monitor{Sampler: &sample.Sampler[[]GPU]{Name: "GPU 数据", Hint: "（nvidia-smi 可能卡住了）",
+		Every: 2 * time.Second, Stale: 20 * time.Second, Query: src.Query, Clone: cloneGPUs}}
+	m.machine = &sample.Sampler[MachineInfo]{Name: "机器 GPU 信息", Every: time.Hour, Stale: 2 * time.Hour,
+		Query: func(ctx context.Context) (MachineInfo, error) {
+			if source, ok := src.(MachineSource); ok {
+				return source.Machine(ctx)
+			}
+			host, _ := os.Hostname()
+			return MachineInfo{Hostname: host}, nil
+		}}
+	return m
+}
+
+func (m *Monitor) Run(ctx context.Context) {
+	go m.machine.Run(ctx)
+	m.Sampler.Run(ctx)
+}
+
+func (m *Monitor) MachineLatest() (MachineInfo, time.Time, error) {
+	info, at, err := m.machine.Latest()
+	if at.IsZero() && err == nil {
+		return info, at, ErrMachineInfoNotReady
+	}
+	return info, at, err
 }
 
 func cloneGPUs(gpus []GPU) []GPU {

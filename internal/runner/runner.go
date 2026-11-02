@@ -9,25 +9,29 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"danlu/internal/procfs"
 )
 
 type Runner struct {
-	RunRoot   string // ~/.danlu/run
-	LogRoot   string // ~/.danlu/logs
-	CondaBase string
+	RunRoot    string // ~/.danlu/run
+	LogRoot    string // ~/.danlu/logs
+	EnvRoot    string // ~/.danlu/envs
+	CondaBase  string
+	manifestMu sync.Mutex
 }
 
 type Spec struct {
-	JobID    int64
-	Name     string
-	Workdir  string
-	CondaEnv string
-	Cmd      string
-	Env      map[string]string
-	GPUs     []int
-	Port     int
+	JobID     int64
+	Name      string
+	Workdir   string
+	CondaEnv  string
+	Cmd       string
+	Env       map[string]string
+	GPUs      []int
+	Port      int
+	OutputDir string
 }
 
 func (r *Runner) RunDir(id int64) string  { return filepath.Join(r.RunRoot, strconv.FormatInt(id, 10)) }
@@ -124,6 +128,9 @@ func (r *Runner) BuildEnv(base []string, s Spec) []string {
 	set("DANLU_WORKDIR", s.Workdir)
 	set("DANLU_CONDA_BASE", r.CondaBase)
 	set("DANLU_CONDA_ENV", s.CondaEnv)
+	if s.OutputDir != "" {
+		set("DANLU_OUTPUT_DIR", s.OutputDir)
+	}
 	tag := "danlu-" + id
 	if old := m["WANDB_TAGS"]; old != "" {
 		tag = old + "," + tag
@@ -150,10 +157,15 @@ func (r *Runner) ReadExitCode(id int64) (int, bool) {
 	return readInt(filepath.Join(r.RunDir(id), "exitcode"))
 }
 
-// Launched 表示包装脚本运行过（留下了 pid 文件）。
-func (r *Runner) Launched(id int64) bool {
-	_, err := os.Stat(filepath.Join(r.RunDir(id), "pid"))
-	return err == nil
+// Launched 返回包装脚本留下的 pid，不要求进程仍然存活。
+// 文件损坏时仍然视为启动过，避免把已执行的任务放回队列再启动一次。
+func (r *Runner) Launched(id int64) (int, bool) {
+	path := filepath.Join(r.RunDir(id), "pid")
+	if _, err := os.Stat(path); err != nil {
+		return 0, false
+	}
+	pid, _ := readInt(path)
+	return pid, true
 }
 
 // Alive 判断任务的包装脚本还在不在。没有记下启动时间时（启动后马上读 /proc 失败），
@@ -188,7 +200,11 @@ func (r *Runner) Adopt(id int64) (int, uint64, bool) {
 
 // BootID 是这次开机的标识，服务器重启后会变。读不到时返回空字符串。
 func (r *Runner) BootID() string {
-	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	path := os.Getenv("DANLU_BOOT_ID_FILE")
+	if path == "" {
+		path = "/proc/sys/kernel/random/boot_id"
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}

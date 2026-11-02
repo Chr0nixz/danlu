@@ -1,8 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronLeft, ChevronRight, Search, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Search, Star, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { JobList, JobListHeader } from '../components/JobRow'
+import { QueueBanner } from '../components/QueueControls'
+import { StarError } from '../components/StarButton'
 import { Button, buttonClass, Card, ErrorBox, Input, Kbd, Segmented, SkeletonRows, StatusIcon, Empty } from '../components/ui'
 import { now, type JobStatus } from '@danlu/core'
 import { api } from '../lib/api'
@@ -25,6 +27,7 @@ export function Jobs() {
   const page = Number(params.get('page')) || 1
   // recent=24h：只看最近 24 小时内结束的，总览摘要里的"失败"链接到这里
   const recent = params.get('recent') === '24h'
+  const starred = params.get('starred') === '1'
   const [text, setText] = useState(params.get('q') ?? '')
   const q = params.get('q') ?? ''
   const searchRef = useRef<HTMLInputElement>(null)
@@ -59,8 +62,8 @@ export function Jobs() {
   }, [])
 
   const res = useQuery({
-    queryKey: ['jobs', 'list', status, q, page, recent],
-    queryFn: () => api.jobs({ status, q, page, size: SIZE, ended_after: recent ? Math.floor(now() - RECENT_SEC) : undefined }),
+    queryKey: ['jobs', 'list', status, q, page, recent, starred],
+    queryFn: () => api.jobs({ status, q, page, size: SIZE, starred: starred || undefined, ended_after: recent ? Math.floor(now() - RECENT_SEC) : undefined }),
     refetchInterval: 5000,
     placeholderData: (prev) => prev,
   })
@@ -71,6 +74,8 @@ export function Jobs() {
 
   return (
     <div className="space-y-3 sm:space-y-4">
+      <QueueBanner />
+      <StarError />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <h1 className="flex items-baseline gap-2 text-lg font-semibold">
           任务
@@ -125,6 +130,9 @@ export function Jobs() {
             }))}
           />
         </div>
+        <Button size="sm" variant={starred ? 'secondary' : 'ghost'} aria-pressed={starred} onClick={() => set({ starred: starred ? '' : '1', page: '' })}>
+          <Star aria-hidden className={starred ? 'fill-current' : ''} />只看标星
+        </Button>
         {recent && (
           <button
             type="button"
@@ -147,7 +155,7 @@ export function Jobs() {
             header={<JobListHeader />}
             jobs={res.data?.jobs ?? []}
             empty={
-              q || status || recent ? (
+              q || status || recent || starred ? (
                 <Empty>没有符合条件的任务</Empty>
               ) : (
                 <Empty action={<Link to="/new" className={buttonClass('primary', 'sm')}>新建任务</Link>}>还没有任务，炉子还没点火</Empty>

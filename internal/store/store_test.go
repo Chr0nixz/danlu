@@ -29,7 +29,12 @@ func TestJobRoundTrip(t *testing.T) {
 	}
 	code := 3
 	now := time.Now().Unix()
+	traceback := int64(456)
 	j.Status, j.ExitCode, j.GPUsAssigned, j.EndedAt, j.PIDStart = StatusFailed, &code, []int{0, 1}, &now, 123456789
+	j.FailKind, j.ExtSeen, j.OOMBase, j.TracebackOffset = "cuda_oom", true, 12, &traceback
+	j.Recipe = &Recipe{EnvHash: "abc123", Machine: &RecipeMachine{Hostname: "node-a", DriverVersion: "560.94",
+		CUDAVersion: "12.6", GPUs: []RecipeGPU{{Index: 0, UUID: "GPU-abc", Name: "A100"}}}}
+	j.OutputDir = "/outputs/project/1-a"
 	if err := s.SaveJob(j); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +43,10 @@ func TestJobRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Status != StatusFailed || *got.ExitCode != 3 || got.Env["K"] != "V" || !got.InheritBashrc ||
-		len(got.GPUsAssigned) != 2 || got.PIDStart != 123456789 || got.EndedAt == nil {
+		len(got.GPUsAssigned) != 2 || got.PIDStart != 123456789 || got.EndedAt == nil ||
+		got.FailKind != "cuda_oom" || !got.ExtSeen || got.OOMBase != 12 || got.TracebackOffset == nil || *got.TracebackOffset != traceback ||
+		got.Recipe == nil || got.Recipe.EnvHash != "abc123" || got.Recipe.Machine == nil ||
+		got.Recipe.Machine.DriverVersion != "560.94" || got.OutputDir != "/outputs/project/1-a" {
 		t.Fatalf("字段没有正确保存: %+v", got)
 	}
 	list, total, err := s.ListJobs(JobFilter{Statuses: []string{StatusFailed}, Query: "x.py"})
@@ -228,6 +236,20 @@ func TestBackupBeforeUpgrade(t *testing.T) {
 	backups, _ = filepath.Glob(filepath.Join(dir, "backup", "*.db"))
 	if len(backups) != keepBackups || !strings.HasSuffix(backups[len(backups)-1], "-v9.db") {
 		t.Fatalf("备份清理不对: %v", backups)
+	}
+}
+
+func TestRepeatedBackupSameVersion(t *testing.T) {
+	s := openTest(t)
+	dir := t.TempDir()
+	for range 2 {
+		if err := s.backup(dir, len(migrations)); err != nil {
+			t.Fatalf("同版本连续备份失败: %v", err)
+		}
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, "danlu-*-v*.db"))
+	if err != nil || len(backups) != 2 {
+		t.Fatalf("连续备份应该保留两个独立文件: %v, %v", backups, err)
 	}
 }
 

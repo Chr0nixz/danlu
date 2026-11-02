@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"danlu/internal/execx"
 	"danlu/internal/gpu"
 	"danlu/internal/logs"
+	"danlu/internal/notify"
 	"danlu/internal/runner"
 	"danlu/internal/scheduler"
 	"danlu/internal/snapshot"
@@ -41,6 +43,8 @@ type Server struct {
 	Mgr     *scheduler.Manager
 	GPUs    *gpu.Monitor
 	System  *system.Monitor
+	Disks   *system.DiskMonitor
+	Notify  *notify.Service
 	Auth    *auth.Auth
 	Runner  *runner.Runner
 	Static  fs.FS
@@ -56,6 +60,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.me)
 
 	mux.HandleFunc("GET /api/gpus", s.gpus)
+	mux.HandleFunc("GET /api/queue", s.queue)
+	mux.HandleFunc("POST /api/queue/pause", s.pauseQueue)
+	mux.HandleFunc("POST /api/queue/resume", s.resumeQueue)
 	mux.HandleFunc("GET /api/system", s.systemMetrics)
 	mux.HandleFunc("GET /api/conda-envs", s.condaEnvs)
 	mux.HandleFunc("GET /api/fs/dirs", s.dirs)
@@ -65,7 +72,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
 	mux.HandleFunc("POST /api/jobs", s.submitJob)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
+	mux.HandleFunc("GET /api/jobs/{id}/env", s.jobEnv)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
+	mux.HandleFunc("POST /api/jobs/{id}/star", s.starJob)
 	mux.HandleFunc("GET /api/jobs/{id}/log", s.jobLog)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.jobLogStream)
 	mux.HandleFunc("GET /api/jobs/{id}/log/download", s.jobLogDownload)
@@ -77,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("GET /api/settings/ca.crt", s.caCert)
 	mux.HandleFunc("POST /api/settings/password", s.changePassword)
+	mux.HandleFunc("POST /api/notify/test", s.notifyTest)
 	mux.HandleFunc("GET /api/audit", s.audit)
 	mux.HandleFunc("GET /api/tokens", s.listTokens)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", s.revokeToken)
@@ -218,6 +228,9 @@ func (s *Server) gpus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"gpus": views, "updated_at": at.Unix()}
 	if err != nil {
 		resp["error"] = err.Error()
+		if since := s.GPUs.ErrorSince(); !since.IsZero() {
+			resp["error_since"] = since.Unix()
+		}
 	}
 	writeJSON(w, 200, resp)
 }
@@ -225,10 +238,65 @@ func (s *Server) gpus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) systemMetrics(w http.ResponseWriter, r *http.Request) {
 	samples, at, err := s.System.Latest()
 	resp := map[string]any{"samples": samples, "updated_at": at.Unix()}
+	if s.Disks != nil {
+		disks, diskAt, diskErr := s.Disks.Latest()
+		if disks == nil {
+			disks = []system.Disk{}
+		}
+		resp["disks"], resp["disks_updated_at"] = disks, diskAt.Unix()
+		if diskErr != nil {
+			resp["disks_error"] = diskErr.Error()
+		}
+	}
 	if err != nil {
 		resp["error"] = err.Error()
 	}
 	writeJSON(w, 200, resp)
+}
+
+func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
+	state, err := s.Mgr.QueueState()
+	if err != nil {
+		writeErr(w, 500, "读取队列状态失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, state)
+}
+
+func (s *Server) pauseQueue(w http.ResponseWriter, r *http.Request) {
+	var body struct{}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	state, changed, err := s.Mgr.PauseQueue("manual", "手动暂停", nil)
+	if err != nil {
+		writeErr(w, 500, "暂停队列失败: "+err.Error())
+		return
+	}
+	if changed {
+		s.Store.Audit(auth.ClientIP(r), "queue_pause", state.Reason)
+	}
+	writeJSON(w, 200, state)
+}
+
+func (s *Server) resumeQueue(w http.ResponseWriter, r *http.Request) {
+	var body struct{}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	state, changed, err := s.Mgr.ResumeQueue()
+	if err != nil {
+		if scheduler.IsValidation(err) {
+			writeErr(w, 409, err.Error())
+			return
+		}
+		writeErr(w, 500, "恢复队列失败: "+err.Error())
+		return
+	}
+	if changed {
+		s.Store.Audit(auth.ClientIP(r), "queue_resume", "")
+	}
+	writeJSON(w, 200, state)
 }
 
 // ---------- conda 环境 ----------
@@ -349,13 +417,19 @@ func (s *Server) recentWorkdirs(w http.ResponseWriter, r *http.Request) {
 
 type jobView struct {
 	*store.Job
-	LastLine  string `json:"last_line,omitempty"`
-	ErrorLine string `json:"error_line,omitempty"`
-	QueuePos  int    `json:"queue_pos,omitempty"`
+	LastLine        string `json:"last_line,omitempty"`
+	ErrorLine       string `json:"error_line,omitempty"`
+	TracebackOffset *int64 `json:"traceback_offset,omitempty"`
+	QueuePos        int    `json:"queue_pos,omitempty"`
+	WaitReason      string `json:"wait_reason,omitempty"`
 }
 
 func (s *Server) views(jobs []*store.Job) []jobView {
 	pos := map[int64]int{}
+	var waitReasons map[int64]string
+	if s.Mgr != nil {
+		waitReasons = s.Mgr.WaitReasons()
+	}
 	if slices.ContainsFunc(jobs, func(j *store.Job) bool { return j.Status == store.StatusQueued }) {
 		queued, _ := s.Store.JobsByStatus(store.StatusQueued)
 		for i, q := range queued {
@@ -364,7 +438,7 @@ func (s *Server) views(jobs []*store.Job) []jobView {
 	}
 	out := make([]jobView, len(jobs))
 	for i, j := range jobs {
-		v := jobView{Job: j, QueuePos: pos[j.ID]}
+		v := jobView{Job: j, QueuePos: pos[j.ID], TracebackOffset: j.TracebackOffset, WaitReason: waitReasons[j.ID]}
 		// 结束的任务也显示最后一行，通常是最终的指标
 		if j.StartedAt != nil {
 			v.LastLine = logs.LastLine(s.Runner.LogPath(j.ID))
@@ -380,7 +454,7 @@ func (s *Server) views(jobs []*store.Job) []jobView {
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := store.JobFilter{Query: strings.TrimSpace(q.Get("q"))}
+	f := store.JobFilter{Query: strings.TrimSpace(q.Get("q")), Starred: q.Get("starred") == "true" || q.Get("starred") == "1"}
 	if st := q.Get("status"); st != "" {
 		f.Statuses = strings.Split(st, ",")
 	}
@@ -430,6 +504,36 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.views([]*store.Job{j})[0])
 }
 
+func (s *Server) jobEnv(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	if j.Recipe == nil || len(j.Recipe.EnvHash) != 64 {
+		writeErr(w, 404, "这个任务没有环境包记录")
+		return
+	}
+	if _, err := hex.DecodeString(j.Recipe.EnvHash); err != nil {
+		writeErr(w, 500, "任务的环境包哈希无效")
+		return
+	}
+	f, err := os.Open(filepath.Join(s.Paths.Envs, j.Recipe.EnvHash+".txt"))
+	if errors.Is(err, os.ErrNotExist) {
+		writeErr(w, 404, "环境包文件不存在")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer f.Close()
+	noWriteTimeout(w)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="env-%d.txt"`, j.ID))
+	w.Header().Set("Cache-Control", "private, no-store")
+	_, _ = io.Copy(w, f)
+}
+
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	j, ok := s.jobFromPath(w, r)
 	if !ok {
@@ -453,6 +557,9 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) jobLog(w http.ResponseWriter, r *http.Request) {
 	j, ok := s.jobFromPath(w, r)
 	if !ok {
+		return
+	}
+	if prunedFiles(w, j) {
 		return
 	}
 	q := r.URL.Query()
@@ -490,6 +597,9 @@ func (s *Server) jobLog(w http.ResponseWriter, r *http.Request) {
 func (s *Server) jobLogStream(w http.ResponseWriter, r *http.Request) {
 	j, ok := s.jobFromPath(w, r)
 	if !ok {
+		return
+	}
+	if prunedFiles(w, j) {
 		return
 	}
 	rc := http.NewResponseController(w)
@@ -556,6 +666,9 @@ func (s *Server) jobLogDownload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if prunedFiles(w, j) {
+		return
+	}
 	f, err := os.Open(s.Runner.LogPath(j.ID))
 	if err != nil {
 		writeErr(w, 404, "还没有日志")
@@ -572,6 +685,9 @@ func (s *Server) jobLogDownload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) snapshotMeta(w http.ResponseWriter, r *http.Request) {
 	j, ok := s.jobFromPath(w, r)
 	if !ok {
+		return
+	}
+	if prunedFiles(w, j) {
 		return
 	}
 	m, err := snapshot.LoadMeta(s.Paths.Snapshots, j.ID)
@@ -592,6 +708,9 @@ func (s *Server) snapshotFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if prunedFiles(w, j) {
+		return
+	}
 	fc, err := snapshot.ReadFile(s.Paths.Snapshots, j.ID, r.URL.Query().Get("path"))
 	if errors.Is(err, os.ErrNotExist) {
 		writeErr(w, 404, "快照里没有这个文件")
@@ -609,6 +728,9 @@ func (s *Server) snapshotDiff(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if prunedFiles(w, j) {
+		return
+	}
 	diff, err := snapshot.Diff(s.Paths.Snapshots, j.ID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -620,6 +742,9 @@ func (s *Server) snapshotDiff(w http.ResponseWriter, r *http.Request) {
 func (s *Server) snapshotDownload(w http.ResponseWriter, r *http.Request) {
 	j, ok := s.jobFromPath(w, r)
 	if !ok {
+		return
+	}
+	if prunedFiles(w, j) {
 		return
 	}
 	f, err := os.Open(snapshot.ArchivePath(s.Paths.Snapshots, j.ID))
@@ -645,6 +770,14 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		if fp, err := tlsutil.Fingerprint(tlsutil.FilesIn(s.Paths.TLS).CACert); err == nil {
 			resp["ca_available"], resp["ca_fingerprint"] = true, fp
 		}
+	}
+	if s.Notify != nil {
+		status, err := s.Notify.Status()
+		if err != nil {
+			writeErr(w, 500, "读取推送状态失败")
+			return
+		}
+		resp["notify"] = status
 	}
 	writeJSON(w, 200, resp)
 }

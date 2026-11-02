@@ -26,6 +26,8 @@ import (
 	"danlu/internal/auth"
 	"danlu/internal/config"
 	"danlu/internal/gpu"
+	"danlu/internal/notify"
+	"danlu/internal/retention"
 	"danlu/internal/runner"
 	"danlu/internal/scheduler"
 	"danlu/internal/snapshot"
@@ -54,6 +56,8 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   install-service   安装为 systemd 用户服务（开机自启、退出 SSH 后继续运行）
   restart           重启服务（正在跑的训练不受影响）
   logs [-n 行数]    查看服务日志（journalctl）
+  prune             按保留策略清理任务文件；--dry-run 预览，--older-than 72h 指定时长
+  notify            手机推送：setup 配置订阅 | test 发一条测试
   replace <路径>    升级用：用当前这个程序替换 <路径> 上的 danlu，然后重启服务
   version           显示版本
 
@@ -88,6 +92,10 @@ func main() {
 		err = cmdRestart()
 	case "logs":
 		err = cmdLogs(args)
+	case "prune":
+		err = cmdPrune(args)
+	case "notify":
+		err = cmdNotify(args)
 	case "replace":
 		err = cmdReplace(args)
 	case "install-service":
@@ -262,27 +270,51 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	hostname, _ := os.Hostname()
+	notifier := notify.New(st, c.Notify, hostname, c.BaseURL())
+	if err := notifier.Initialize(); err != nil {
+		log.Printf("初始化手机推送失败，将在后台重试: %v", err)
+	}
+	notifyDone := make(chan struct{})
+	go func() { notifier.Run(ctx); close(notifyDone) }()
+	defer func() { stop(); <-notifyDone }()
+	outputRoot, err := config.ResolvePath(c.Runtime.OutputRoot)
+	if err != nil {
+		return err
+	}
 
 	mon := gpu.NewMonitor(gpu.NewSource())
 	go mon.Run(ctx)
 	host := system.NewMonitor(system.NewSource())
 	go host.Run(ctx)
+	disks := system.NewDiskMonitor(p.Home, outputRoot, func() ([]string, error) { return st.RecentWorkdirs(10) }, uint64(c.Runtime.DiskWarnGB)<<30)
+	go disks.Run(ctx)
 
-	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, CondaBase: c.Runtime.CondaBase}
+	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, EnvRoot: p.Envs, CondaBase: c.Runtime.CondaBase}
 	mgr := scheduler.New(st, mon, run, scheduler.Options{
 		SnapshotDir: p.Snapshots,
+		OutputRoot:  outputRoot,
 		Snapshot: snapshot.Options{
 			MaxFile:  int64(c.Runtime.SnapshotMaxFileMB) << 20,
 			MaxTotal: int64(c.Runtime.SnapshotMaxTotalMB) << 20,
 		},
 		SnapshotTimeout: 10 * time.Second,
 		KillGrace:       c.Runtime.KillGrace.Duration,
+		FailFast:        c.Runtime.FailFast.Duration,
+		Disks:           disks,
+		DiskMinBytes:    uint64(c.Runtime.DiskMinGB) << 30,
 	})
 	mgr.Recover()
 	// Run 退出前会等正在启动的任务都落库。数据库要在它之后关：defer 按相反的顺序执行
 	mgrDone := make(chan struct{})
 	go func() { mgr.Run(ctx); close(mgrDone) }()
 	defer func() { stop(); <-mgrDone }()
+	pruner := &retention.Pruner{Store: st, Paths: p, OutputRoot: outputRoot, Options: retention.Options{
+		KeepDays: c.Retention.KeepDays, MaxBytes: c.Retention.MaxTotalGB << 30,
+	}}
+	pruneDone := make(chan struct{})
+	go func() { pruner.Run(ctx); close(pruneDone) }()
+	defer func() { stop(); <-pruneDone }()
 
 	au := auth.New(st, auth.Options{
 		Entrance: c.Server.Entrance, Secret: secret, Secure: c.TLS.Mode != config.TLSOff,
@@ -290,7 +322,7 @@ func cmdServe(args []string) error {
 		MaxFailures: c.Auth.MaxFailures, Lockout: c.Auth.Lockout.Duration,
 	})
 	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, System: host, Auth: au, Runner: run,
-		Static: webui.FS(), Version: version}
+		Static: webui.FS(), Version: version, Disks: disks, Notify: notifier}
 
 	// 请求的 context 都从 base 派生：停止时先取消它，日志 SSE 这类长连接马上退出
 	base, cancelBase := context.WithCancel(context.Background())
@@ -388,6 +420,8 @@ func cmdInfo(args []string) error {
 		}
 	}
 	fmt.Println("conda    ", orDash(c.Runtime.CondaBase))
+	outputRoot, _ := config.ResolvePath(c.Runtime.OutputRoot)
+	fmt.Println("输出目录 ", outputRoot)
 	fmt.Println("数据目录 ", p.Home)
 	return nil
 }

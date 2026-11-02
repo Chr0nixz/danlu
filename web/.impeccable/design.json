@@ -54,7 +54,7 @@
       { "name": "row-flash", "value": "flash 1.2s ease-out; 0–15% 为 color-mix(in oklab, var(--flash) 14%, transparent)，然后淡出", "purpose": "任务状态变化时整行闪一次，--flash 取新状态色：成功 ok、失败 fail、取消 fg-3、其余 run。" },
       { "name": "running-spin", "value": "spin 1.6s linear infinite", "purpose": "运行中状态图标匀速旋转。" },
       { "name": "meter-scale", "value": "transform: scaleX() 500ms ease-out", "purpose": "利用率和进度细条的数值变化；用 transform 不用 width，避免每次轮询触发重新布局。" },
-      { "name": "reduced-motion", "value": "animation/transition-duration: 0.01ms", "purpose": "prefers-reduced-motion 下关闭所有动效。" }
+      { "name": "reduced-motion", "value": "animation/transition-duration: 0.01ms", "purpose": "prefers-reduced-motion 下关闭动效和平滑滚动；任务行状态变化时的底色淡出（flash）保留 1.2s。" }
     ],
     "breakpoints": [
       { "name": "sm", "value": "640px", "purpose": "底部导航换顶栏导航；GPU 从行变面板（两列）。" },

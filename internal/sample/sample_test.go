@@ -28,6 +28,48 @@ func TestLatestCachesValueAndError(t *testing.T) {
 	}
 }
 
+func TestErrorSinceTracksContinuousFailuresAndClears(t *testing.T) {
+	queryErr := errors.New("坏了")
+	s := &Sampler[int]{Every: time.Hour, Stale: time.Hour, Query: func(context.Context) (int, error) {
+		return 1, queryErr
+	}}
+	s.Refresh(context.Background())
+	first := s.ErrorSince()
+	if first.IsZero() {
+		t.Fatal("采集失败后应该记录起点")
+	}
+	s.Refresh(context.Background())
+	if got := s.ErrorSince(); !got.Equal(first) {
+		t.Fatalf("连续失败应该保留起点: got %v, want %v", got, first)
+	}
+	queryErr = nil
+	s.Refresh(context.Background())
+	if got := s.ErrorSince(); !got.IsZero() {
+		t.Fatalf("采集恢复后应该清除起点: %v", got)
+	}
+}
+
+func TestErrorSinceForStaleSample(t *testing.T) {
+	s := &Sampler[int]{Stale: time.Minute}
+	s.since = time.Now().Add(-2 * time.Minute)
+	want := s.since.Add(s.Stale)
+	if got := s.ErrorSince(); !got.Equal(want) {
+		t.Fatalf("卡住的首次采集错误起点 = %v, want %v", got, want)
+	}
+}
+
+func TestStaleThenQueryErrorKeepsOriginalStart(t *testing.T) {
+	s := &Sampler[int]{Stale: time.Minute, Query: func(context.Context) (int, error) {
+		return 0, errors.New("采集超时")
+	}}
+	s.at = time.Now().Add(-2 * time.Minute)
+	want := s.ErrorSince()
+	s.Refresh(context.Background())
+	if got := s.ErrorSince(); !got.Equal(want) {
+		t.Fatalf("过期后收到采集错误不应重置起点: got %v, want %v", got, want)
+	}
+}
+
 func TestStaleWhenQueryHangs(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)

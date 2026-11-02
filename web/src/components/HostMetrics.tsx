@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { Cpu, MemoryStick } from 'lucide-react'
+import { Cpu, HardDrive, MemoryStick } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { now, type HostSample } from '@danlu/core'
+import { now, type HostMetricsResponse, type HostSample } from '@danlu/core'
 import { api } from '../lib/api'
 import { Card, cx, Meter, Skeleton } from './ui'
 
@@ -56,7 +56,37 @@ export function HostMetrics() {
           />
         </div>
       )}
+      {data && (data.disks !== undefined || data.disks_error) && <DiskMetrics data={data} />}
     </Card>
+  )
+}
+
+function DiskMetrics({ data }: { data: HostMetricsResponse }) {
+  return (
+    <section className="border-t border-line text-xs">
+      <div className="flex h-8 items-center gap-1.5 bg-subtle px-3 sm:px-4">
+        <HardDrive className="size-3.5 text-fg-3" aria-hidden />
+        <h3 className="font-medium">磁盘余量</h3>
+        <span className="ml-auto text-fg-3">同一分区合并 · 每分钟采样</span>
+      </div>
+      {data.disks_error && <p role="alert" className="px-3 py-2 text-warn sm:px-4">磁盘数据暂不可用：{data.disks_error}</p>}
+      <div className="divide-y divide-line">
+        {data.disks?.map((disk, index) => (
+          <div key={disk.id || `${disk.path}:${index}`} className="flex flex-wrap items-start gap-x-3 gap-y-1 px-3 py-2 sm:px-4">
+            <div className="min-w-0 flex-1 space-y-0.5 max-sm:basis-full">
+              {disk.paths.map((path) => <div key={path} className="font-mono [overflow-wrap:anywhere]">{path}</div>)}
+              {disk.data && <span className="text-fg-3">数据目录所在分区</span>}
+            </div>
+            <div className={cx('ml-auto shrink-0 text-right font-mono tabular-nums max-sm:flex max-sm:w-full max-sm:items-baseline max-sm:justify-between max-sm:gap-2 max-sm:text-left', disk.warn || disk.error ? 'text-warn' : 'text-fg-2')}>
+              {disk.error ? <span className="font-sans">采集失败</span> : <span><span>{gib(disk.available_bytes)} GiB 可用</span><span className="ml-2 text-fg-3">/ {gib(disk.total_bytes)} GiB</span></span>}
+              {disk.warn && !disk.error && <div className="font-sans">余量偏低</div>}
+            </div>
+            {disk.error && <p role="alert" className="w-full break-words text-warn">{disk.error}</p>}
+          </div>
+        ))}
+      </div>
+      {!data.disks?.length && !data.disks_error && <p className="px-3 py-2 text-fg-3 sm:px-4">正在采集磁盘数据…</p>}
+    </section>
   )
 }
 
@@ -112,14 +142,23 @@ function HistoryChart({ values, label }: { values: (number | null)[]; label: str
   const latestX = latest ? (latest.index / Math.max(1, values.length - 1)) * width : 0
   const latestY = latest ? top + (1 - Math.max(0, Math.min(100, latest.value)) / 100) * height : 0
 
+  // 曲线横向拉伸铺满宽度（preserveAspectRatio="none"），圆点放在 SVG 外面按百分比定位，不然会被拉成椭圆
   return (
-    <svg viewBox="0 0 320 56" preserveAspectRatio="none" role="img" aria-label={label} className="h-[56px] w-full overflow-visible">
-      {[top, top + height / 2, top + height].map((y) => (
-        <line key={y} x1="0" x2={width} y1={y} y2={y} stroke="var(--line)" strokeWidth="1" />
-      ))}
-      {path && <path d={path} fill="none" stroke="var(--fg-2)" strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />}
-      {latest && <circle cx={latestX} cy={latestY} r="3" fill="var(--fg)" />}
-    </svg>
+    <div className="relative h-[56px]">
+      <svg viewBox="0 0 320 56" preserveAspectRatio="none" role="img" aria-label={label} className="h-full w-full overflow-visible">
+        {[top, top + height / 2, top + height].map((y) => (
+          <line key={y} x1="0" x2={width} y1={y} y2={y} stroke="var(--line)" strokeWidth="1" />
+        ))}
+        {path && <path d={path} fill="none" stroke="var(--fg-2)" strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />}
+      </svg>
+      {latest && (
+        <span
+          className="absolute size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-fg"
+          style={{ left: `${(latestX / width) * 100}%`, top: `${(latestY / 56) * 100}%` }}
+          aria-hidden
+        />
+      )}
+    </div>
   )
 }
 

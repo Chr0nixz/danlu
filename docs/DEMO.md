@@ -2,7 +2,7 @@
 
 > 目标：在一台 GPU 服务器上运行一个 `danlu` 程序。电脑和安卓手机通过 **公网 IP + 端口 + 安全入口** 打开网页，就能**提交、排队、查看、取消、重跑**训练任务，并且**能查到每次任务实际跑的是哪一版代码**。
 > 长期规划见 [DESIGN.md](DESIGN.md)。Demo 直接用正式版的技术栈，做完后在它上面继续迭代，不会推倒重写。
-> 状态：第 9 节的 1–7 步都已完成，在 WSL 里用假 GPU 跑通了端到端测试（`scripts/e2e.sh`）。还差第 8 步：部署到真实的 GPU 服务器上，逐条验证第 0 节的完成标准。
+> 状态：第 9 节的 1–7 步都已完成，在 WSL 里用假 GPU 跑通了端到端测试（`scripts/e2e.sh`）。2026-11-02 用户反馈正在日常使用，暂未遇到问题；第 8 步的完整真机验收记录仍待补齐，改为随使用逐项补验，不阻塞后续开发（见 ROADMAP.md）。
 > 多服务器由桌面客户端负责，见 [CLIENT.md](CLIENT.md)。客户端要求服务器端做的改动（设备令牌、`info --json`、游标翻页等）已经合进本文的接口和命令。
 > 接下来先迭代后端和面板，客户端暂停新功能。工作项、先后顺序和完成标准见 [ROADMAP.md](ROADMAP.md)。
 
@@ -20,7 +20,7 @@
 
 **要做**：安全入口和登录、HTTPS、GPU 面板、在网页上提交任务、先来先跑的整卡调度、任务执行（含 conda 环境、danlu 重启后接管任务、取消）、实时日志、代码快照、重跑、手机适配。
 
-**不做**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。其中多服务器后来交给了桌面客户端（[CLIENT.md](CLIENT.md)），面板本身仍然不做；通知改由服务器通过 ntfy 推送，和优先级、自动重试、告警一起排进了下一阶段（[ROADMAP.md](ROADMAP.md)）。
+**不做（Demo 范围）**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。其中多服务器后来交给了桌面客户端（[CLIENT.md](CLIENT.md)），面板本身仍然不做；通知在 Demo 阶段未实现，后来纳入 S2 并已完成 ntfy 手机推送（见 [ROADMAP.md](ROADMAP.md) 和 [PHASES.md](PHASES.md)）。其他后续工作按路线图推进。
 
 **有余力再做**：两次任务之间的代码和参数 diff；"用当时的代码重跑"；申请 Let's Encrypt 的 IP 证书；TOTP 两步验证。其中 diff、"用当时的代码重跑"和 TOTP 已经排进下一阶段的定版线，IP 证书不再做，证书方案见 [ROADMAP.md](ROADMAP.md) 第 7.1 节。
 
@@ -141,6 +141,9 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
 - "张数 N" 模式取编号最小的 N 张可用卡；"指定卡号" 模式要等这几张卡全部空闲才启动。
 - 调度循环在两种情况下触发：每 2 秒定时一次；以及提交、任务结束、取消时立即触发一次。
 - 正在排队的任务可以取消，取消后直接从队列里移除。
+- 首页排队分组可以手动暂停队列；首页和任务页会显示暂停原因，点“继续队列”恢复。暂停时仍可提交任务，已经占位或运行中的任务继续准备、运行和收尾，尚在排队的任务不再启动。暂停状态存入数据库，重启后保留。
+- 任务从本次启动占位到失败收尾不到 `runtime.fail_fast`（默认 2 分钟），且仍有任务排队时，自动暂停队列，`kind` 为 `fail_fast`，并记录触发任务和失败原因。加载环境、写入输出清单或启动进程失败也计入；用户取消、尚未启动就被校验为无效的任务不触发。设为 `"0s"` 可关闭，只能手动恢复。若任务在磁盘暂停期间快速失败，会改为需要人工确认的快速失败暂停。
+- 数据目录所在分区的可用空间低于 `runtime.disk_min_gb`（默认 2 GiB）时暂停，`kind` 为 `disk`；达到阈值的两倍后自动恢复。磁盘暂停尚未落库时也立即在内存生效并重试。采集失败或超过 3 分钟未更新时不启动新任务；保护开启时不能手动绕过不足的容量，恢复接口返回 409 和原因。已占位、运行的任务继续，手动与快速失败暂停不因磁盘恢复而解除。
 
 ### 4.4 执行
 
@@ -173,6 +176,7 @@ finish $?
   | `PET_MASTER_PORT` | 一个空闲端口 | torchrun 自动读取它作为 `--master_port`，避免多个任务撞端口 |
   | `PYTHONUNBUFFERED=1` | | **否则输出重定向到文件时，Python 的 print 会被缓冲，日志要很久才出现** |
   | `DANLU_JOB_ID`、`DANLU_JOB_NAME` | | 方便在代码里引用 |
+  | `DANLU_OUTPUT_DIR` | `<output_root>/<项目>/<任务 id>-<任务名>/`（默认 `~/danlu-outputs`） | 保存模型、checkpoint 等训练产物；danlu 会在其中维护 `danlu.json`，不会清理该目录 |
   | `WANDB_TAGS` | 追加 `danlu-<id>` | 在 W&B 里按标签找回任务 |
 
 - 勾选“Bash 环境”时，danlu 用交互式 Bash 加载服务器用户的 `~/.bashrc`，把其中导出的变量加入任务环境。任务表单里的自定义变量优先于 `.bashrc`，danlu 管理的变量仍由 danlu 注入。文件缺失、加载失败或超过 10 秒时，任务会启动失败。`.bashrc` 里用 `&` 起的后台进程，读完环境后会被结束掉，不会留在服务器上。
@@ -184,6 +188,7 @@ finish $?
   - 进程已经不在了 → 读取 `exitcode` 文件来确定结果；
   - 进程不在，也没有 `exitcode` 文件 → 标记为失败。开机标识变了，原因写"服务器重启，任务中断"，否则写"进程被外部终止"；
   - pid 为 0（占位以后 danlu 就退出了）→ 有 pid 文件、进程还在就认领；跑过、已经结束的按上面两条收尾；从没启动过的放回队列。
+- **环境记录恢复**：服务重启会将中断的环境包采集标为未完成，包括已结束任务，避免永久显示“采集中”并阻止清理。
 - **停止服务**：收到 SIGTERM 后，先断开日志 SSE 这类长连接，等正在处理的请求完成（最多 5 秒），再等正在启动的任务落库，最后才关数据库。正在跑的训练不受影响。
 - ⚠ **systemd 的坑**：systemd 停止服务时，默认会杀掉这个服务 cgroup 里的所有进程，**训练进程也在其中**。所以 unit 文件里必须写 `KillMode=process`。`install-service` 生成 unit 文件时会自动加上这一行，还会执行 `loginctl enable-linger`，保证退出 SSH 后服务继续运行。
 - **结束状态的判定**：退出码为 0 → succeeded；不为 0 → failed；用户取消的 → cancelled（以用户取消为准，不看退出码）。
@@ -219,7 +224,7 @@ finish $?
 | 页面 | 电脑 | 手机 |
 |---|---|---|
 | **登录** | 用户名、密码 | 同左 |
-| **首页** | 一行状态摘要（运行中、排队、空闲卡数）；GPU 面板每行 4 张；CPU 和内存当前使用率及最近 1 分钟趋势；下面是一个分组列表：运行中、排队、最近完成，每行一个任务 | GPU 每张卡一行；CPU 和内存当前值及趋势并排显示；分组列表直接展开，不用标签页切换 |
+| **首页** | 一行状态摘要（运行中、排队、空闲卡数）；GPU 面板每行 4 张；CPU 和内存当前使用率及最近 1 分钟趋势；下面是一个分组列表：运行中、排队、最近完成，每行一个任务 | GPU 每张卡一行；分组列表直接展开，不用标签页切换；CPU 和内存当前值及趋势并排显示，放在任务列表后面 |
 | **新建 / 重跑** | 标签在左、输入框在右的表单；Ctrl+Enter 提交 | 上下排列的表单 |
 | **任务详情** | 标题和"W&B / 重跑 / 取消"按钮；一排关键信息（状态、GPU、环境、时长、代码版本、时间）；下面三个标签页：日志、详情、代码 | 同左，关键信息排成两列 |
 | **全部任务** | 和首页同样的任务行，支持按状态筛选、搜索（快捷键 /）、分页 | 同左，每个任务两行 |
@@ -238,17 +243,22 @@ GET  /<entrance>                       通过安全入口（设置 gate cookie�
 POST /api/login        POST /api/logout
 GET  /api/me                           用户名、版本、api_version（接口版本号，不兼容的改动时加一）
 
-GET  /api/gpus                         GPU 状态和占用者
-GET  /api/system                       CPU 和内存当前值及最近 1 分钟采样
+GET  /api/gpus                         GPU 状态和占用者；出错时含 error、error_since（unix 秒），恢复后清除
+GET  /api/queue                        队列状态（paused、kind、reason、since、job_id）
+POST /api/queue/pause                  手动暂停队列（JSON {}，不影响已经占位或运行的任务）
+POST /api/queue/resume                 恢复队列（JSON {}）
+GET  /api/system                       CPU、内存采样，以及磁盘余量和采集状态
 GET  /api/conda-envs                   conda 环境列表
 GET  /api/fs/dirs?path=                目录自动补全
 GET  /api/workdirs/recent              最近用过的工作目录
 
-GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 error_line 报错行）
+GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 fail_kind、error_line 和 traceback_offset）
 GET  /api/jobs?order=ended&before=&before_id=  只要已结束的任务，按结束时间倒序；before / before_id 是上一页最后一条的结束时间和 id（游标翻页，多台服务器的历史按时间合并时用）
 POST /api/jobs                         提交任务
 GET  /api/jobs/{id}                    任务详情
+GET  /api/jobs/{id}/env                任务记录的环境包列表原文
 POST /api/jobs/{id}/cancel             取消任务
+POST /api/jobs/{id}/star               标星或取消标星（JSON {"starred":true|false}）
 GET  /api/jobs/{id}/log?offset=&limit= 分段读取日志
 GET  /api/jobs/{id}/log/stream         实时日志（SSE）
 GET  /api/jobs/{id}/snapshot           快照文件清单和 git 信息
@@ -257,13 +267,25 @@ GET  /api/jobs/{id}/snapshot/diff      git diff
 GET  /api/jobs/{id}/snapshot/download  下载 tar.gz
 
 GET  /api/settings/ca.crt              下载 CA 证书
+GET  /api/settings                    服务配置摘要和 notify（enabled、last_sent_at、last_error；不含 topic 和令牌）
 POST /api/settings/password            修改密码
+POST /api/notify/test                 发一条测试推送；未开启或正在测试返回 409，发送失败返回 502
 GET  /api/audit?page=                  审计日志
 GET  /api/tokens                       设备令牌列表（不含令牌本身）
 POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 ```
 
 桌面客户端不走 cookie，而是带 `Authorization: Bearer <设备令牌>`：令牌有效就跳过安全入口和登录检查，无效则和没过入口一样返回空 404。令牌只能在服务器上用 `danlu token create` 创建（能 SSH 登录才说明是本人），面板上只能查看和吊销。
+
+`GET /api/system` 的 `disks` 数组包含 `id`（设备号）、`path`、`paths`（同一分区上被监测的路径）、`total_bytes`、`available_bytes`（普通用户实际可用）、`data`、`warn` 和可选的 `error`。`disks_updated_at` 是采样时间；整个磁盘采集失败或过期时增加 `disks_error`，不影响 CPU/内存数据。
+
+任务对象增加 `starred` 和 `pruned_at`（未清理为 null）。列表支持 `starred=true`。清理中的任务不能改标星，返回 409；已清理任务的日志、SSE、日志下载及快照接口返回 410 和原因，环境包接口仍可用。
+
+排队任务视图增加 `wait_reason`，说明队首在等空闲卡、指定卡、外部进程或可信的 GPU/磁盘数据；其他排队任务说明在等前面的任务。面板列表和详情页会显示，启动后清除。
+
+手机推送通过 `danlu notify setup` 配置，生成随机 topic、打印订阅地址和二维码；重复运行保留订阅，`--new-topic` 主动轮换，`--disable` 关闭。自建服务用 `--server`，已有 topic 用 `--topic`，令牌通过 `--token-stdin` 读取。改完重启服务；`danlu notify test` 使用磁盘上的配置发测试，面板测试使用当前服务进程的配置。
+
+通知消费持久化事件，30 秒窗口内的任务失败合并，自动队列暂停即时发送。告警只在出现和恢复时记录，覆盖磁盘低余量、持续 60 秒的 GPU 错误及恢复、训练 GPU 的外部进程和被外部进程阻塞的队首。消息使用结构化原因，不带日志内容、文件路径或安全入口。首次启用/更换 topic 不补发历史；游标、待发批次和发送认领保存在 `settings`，发送失败重试三次后记录并继续。强制中断导致回执未知的发送不在重启时重发，最后错误明确说明结果未知；HTTP 回执丢失时无法实现严格的外部恰好一次投递。
 
 ## 7. 配置与数据
 
@@ -286,9 +308,21 @@ lockout       = "15m"
 
 [runtime]
 conda_base         = "/home/me/miniconda3"
+output_root        = "~/danlu-outputs"
 kill_grace         = "30s"
+fail_fast          = "2m"     # 启动后不足这个时长就失败且仍有任务排队时暂停；0s 关闭
+disk_warn_gb       = 20       # GiB，0 关闭低余量提示
+disk_min_gb        = 2        # GiB，0 关闭调度保护；磁盘暂停在两倍余量时恢复
 snapshot_max_file_mb  = 1
 snapshot_max_total_mb = 50
+
+[retention]
+keep_days          = 90      # 0 关闭按时间清理
+max_total_gb       = 50      # GiB，0 关闭按大小清理；两项均为 0 时关闭自动清理
+
+[notify]
+ntfy              = ""      # 留空关闭；danlu notify setup 生成随机 topic
+# token           = ""      # 自建服务需要鉴权时填写，不通过 API 暴露
 ```
 
 ```
@@ -298,8 +332,10 @@ snapshot_max_total_mb = 50
   backup/danlu-<时间>-v<旧版本>.db   # 升级表结构前的备份，保留最近 5 份
   tls/ca.crt ca.key server.crt server.key
   logs/<id>.log
+  envs/<sha256>.txt                  # 环境包清单，按内容哈希去重
   snapshots/<id>.tar.gz <id>.meta.json <id>.diff   # 代码、清单和 git 信息、未提交的改动
   run/<id>/run.sh cmd.sh pid exitcode               # pid 是包装脚本第一行写的，启动途中 danlu 退出时靠它认领
+~/danlu-outputs/<项目>/<id>-<任务名>/danlu.json # 默认输出目录；记录任务、代码、GPU 和最终状态
 ```
 
 服务进程从不写 `config.toml`，只有命令行（`init`、`port`、`entrance`、`cert`）写它，改完重启生效。运行中会变的状态放在数据库的 `settings` 表里。旧版本放在 `[auth] password_hash` 的哈希，新版本第一次启动时导入一次，`danlu passwd` 会把它从配置里删掉。
@@ -307,7 +343,8 @@ snapshot_max_total_mb = 50
 ```
 jobs(id, name, workdir, conda_env, cmd, env_json, inherit_bashrc,
      gpus_req, gpus_pinned, gpus_assigned, status,
-     master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
+     master_port, pid, pid_starttime, exit_code, fail_reason, fail_kind, notes, ext_seen, oom_base,
+     traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, cancel_requested, tracker_url,
      git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of,
      created_at, started_at, ended_at)
 sessions(token_hash, created_at, expires_at, ip, user_agent)
@@ -317,10 +354,21 @@ recent_workdirs(path, last_used_at)
 device_tokens(id, name, token_hash, created_at, last_used_at, last_ip)   -- 第 2 次迁移，同时加了 jobs(ended_at) 索引
 -- 第 3 次迁移：给 jobs 增加 inherit_bashrc，已有任务默认关闭
 -- 第 4 次迁移：给 jobs 增加 boot_id（占位时的开机标识）
-settings(key, value, updated_at)   -- 第 5 次迁移：运行时状态，目前只有 auth.password_hash
+settings(key, value, updated_at)   -- 第 5 次迁移：运行时状态，含 auth.password_hash、queue.state
+events(id, ts, kind, key, job_id, data, dedupe_key) -- 第 6 次迁移：状态变化事件，与任务状态在同一事务写入
+-- 第 7 次迁移：给 jobs 增加失败分类、外部占卡、OOM 基线和 traceback 偏移
+-- 第 8 次迁移：给 jobs 增加 recipe_json，记录环境包哈希、机器信息或采集错误
+-- 第 9 次迁移：给 jobs 增加 output_dir
+-- 第 10 次迁移：给 jobs 增加 starred、pruned_at、pruning（清理认领标记，不通过 API 暴露）
 ```
 
-最后一行日志和失败时的报错行不存数据库，列任务时从日志文件末尾读出来。快照文件按任务编号放在 `snapshots/` 下，表里只记 `snapshot_ok`。迁移只能往后追加，按 `PRAGMA user_version` 执行。
+`jobs.notes` 与 `fail_reason` 分开：前者存残留进程清理等备注，后者只存失败原因。迁移会把旧记录中混在 `fail_reason` 里的清理说明移到 `notes`。`fail_kind` 保存失败分类；`ext_seen` 表示任务运行时是否观察到所用 GPU 上有其他进程；`oom_base` 保存启动前的 cgroup `oom_kill` 计数；`traceback_offset` 是日志末尾 4 MiB 内首个 traceback 的字节偏移；`recipe_json` 记录环境包哈希、机器信息或采集错误；`output_dir` 记录任务输出目录。`events` 用递增 id 作游标；job 事件由调度器和任务状态在同一事务写入，去重键保证重试不会重复。队列状态与 `queue_paused`、`queue_resumed` 事件同事务写入，重复暂停/恢复不重复记事件。快速失败的任务状态、结束事件、暂停状态和暂停事件一起提交；写库失败时内存中的暂停立即生效并重试，未保存成功前不能继续队列。`alert_raised`、`alert_cleared` 按 key 的最后一条事件恢复告警状态，只在边沿写入；`ntfy.cursor`、`ntfy.state`、`ntfy.last_sent_at`、`ntfy.last_error` 保存通知消费及发送状态，不新增迁移。
+
+最后一行日志和失败时的报错行不存数据库，列任务时从日志文件末尾读出来。traceback 偏移在任务结束时从日志末尾 4 MiB 中找出并记录，避免每次列任务都扫描日志。快照文件按任务编号放在 `snapshots/` 下，表里只记 `snapshot_ok`。迁移只能往后追加，按 `PRAGMA user_version` 执行。
+
+清理在启动时和之后每 6 小时运行，清理未标星的已结束任务的 `logs/<id>.log`、三种快照文件和 `run/<id>/`，只删除没有任何任务引用的环境包文件。包采集中和任务运行时不做环境包 GC；已清理任务的环境包引用仍然保留。按总量清理时从最旧的任务开始，运行中、标星和仍在采集包的任务不作为候选，因此总量上限不保证可以达到。训练输出不计入总量，也不删除；输出路径与待删路径重叠时整项跳过并报错。文件操作受数据目录句柄约束，管理子目录是符号链接时拒绝清理，任务内的符号链接只删除链接本身。Linux 文件锁阻止服务和 CLI 同时清理，数据库认领标记避免标星竞态，并支持恢复中断的清理。
+
+`danlu prune --dry-run [--json]` 预览配置规则；`--older-than 72h` 只按指定结束时长清理任务，不额外应用总量规则，`0s` 表示所有已结束任务。预览不删任务文件或写清理标记；实际清理后任务记录保留，补上 `pruned_at`，面板显示清理时间。
 
 ## 8. 技术实现与项目结构
 
