@@ -58,6 +58,7 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   logs [-n 行数]    查看服务日志（journalctl）
   prune             按保留策略清理任务文件；--dry-run 预览，--older-than 72h 指定时长
   notify            手机推送：setup 配置订阅 | test 发一条测试
+  update            用当前新程序更新正在运行的 danlu，自动定位并重启服务
   replace <路径>    升级用：用当前这个程序替换 <路径> 上的 danlu，然后重启服务
   version           显示版本
 
@@ -96,6 +97,8 @@ func main() {
 		err = cmdPrune(args)
 	case "notify":
 		err = cmdNotify(args)
+	case "update":
+		err = cmdUpdate(args)
 	case "replace":
 		err = cmdReplace(args)
 	case "install-service":
@@ -662,10 +665,17 @@ func cmdCert(args []string) error {
 // ---------- 服务管理（桌面客户端经 SSH 调用） ----------
 
 func cmdRestart() error {
+	if err := restartService(); err != nil {
+		return err
+	}
+	fmt.Println("已重启 danlu（正在跑的训练任务不受影响）")
+	return nil
+}
+
+func restartService() error {
 	if out, err := exec.Command("systemctl", "--user", "restart", "danlu").CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl --user restart danlu 失败: %v\n%s", err, out)
 	}
-	fmt.Println("已重启 danlu（正在跑的训练任务不受影响）")
 	return nil
 }
 
@@ -678,6 +688,22 @@ func cmdLogs(args []string) error {
 	return cmd.Run()
 }
 
+// cmdUpdate 由上传的新程序执行，从运行中的用户服务找到旧程序的位置。
+func cmdUpdate(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	noRestart := fs.Bool("no-restart", false, "只替换，不重启服务")
+	asJSON := fs.Bool("json", false, "以 JSON 输出")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		return errors.New("用法: ./danlu.new update [--no-restart] [--json]")
+	}
+	target, err := installedExecutable()
+	if err != nil {
+		return err
+	}
+	return replaceExecutable(target, *noRestart, *asJSON)
+}
+
 // cmdReplace 由新版本的程序执行：把自己原子地换到 <路径> 上，再重启服务。
 // 客户端先把新程序传成 <路径>.new，再执行 "<路径>.new replace <路径>"。直接覆盖正在运行的程序会报 Text file busy，改名不会。
 func cmdReplace(args []string) error {
@@ -688,8 +714,18 @@ func cmdReplace(args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("用法: danlu replace [--no-restart] <要替换的 danlu 路径>")
 	}
-	target, err := filepath.Abs(fs.Arg(0))
+	return replaceExecutable(fs.Arg(0), *noRestart, *asJSON)
+}
+
+func replaceExecutable(path string, noRestart, asJSON bool) error {
+	target, err := filepath.Abs(path)
 	if err != nil {
+		return err
+	}
+	// PATH 中的 danlu 可以是软链接，升级必须替换服务实际使用的文件。
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		target = resolved
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	self, err := os.Executable()
@@ -711,14 +747,15 @@ func cmdReplace(args []string) error {
 	if err != nil {
 		return fmt.Errorf("替换 %s 失败: %w", target, err)
 	}
+	setupCommandPath(target)
 	restarted := false
-	if !*noRestart {
-		if err := cmdRestart(); err != nil {
+	if !noRestart {
+		if err := restartService(); err != nil {
 			return err
 		}
 		restarted = true
 	}
-	if *asJSON {
+	if asJSON {
 		return printJSON(map[string]any{"version": version, "path": target, "restarted": restarted})
 	}
 	fmt.Printf("已把 %s 换成 %s\n", target, version)
@@ -779,6 +816,7 @@ func cmdInstallService() error {
 	if !config.Exists(p) {
 		return errors.New("请先运行 danlu init")
 	}
+	setupCommandPath(exe)
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".config", "systemd", "user")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

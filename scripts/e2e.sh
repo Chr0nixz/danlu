@@ -348,8 +348,35 @@ check "连续输错 5 次后被锁定（429）" [ "$(curl -s -o /dev/null -w '%{
 
 echo "== 客户端运维用的子命令 =="
 cp "$BIN" "$T/danlu-copy" && cp "$BIN" "$T/danlu-copy.new"
-check "replace 用新程序原子替换旧程序" bash -c "'$T/danlu-copy.new' replace --no-restart --json '$T/danlu-copy' | grep -q '\"restarted\": false' && [ ! -e '$T/danlu-copy.new' ]"
+check "replace 用新程序原子替换旧程序" env HOME="$T/path-home" bash -c "'$T/danlu-copy.new' replace --no-restart --json '$T/danlu-copy' | grep -q '\"restarted\": false' && [ ! -e '$T/danlu-copy.new' ]"
 check "replace 把旧程序留成 .prev" [ -x "$T/danlu-copy.prev" ]
+check "replace 自动注册 PATH 命令" test "$T/path-home/.local/bin/danlu" -ef "$T/danlu-copy"
+# 假 systemctl：只验证默认重启路径的 JSON 和软链接目标，不重启开发机上的服务。
+mkdir -p "$T/update-bin"
+printf '#!/bin/sh\nexit 0\n' > "$T/update-bin/systemctl"
+chmod +x "$T/update-bin/systemctl"
+cp "$BIN" "$T/danlu-copy.new"
+check "replace 通过 PATH 软链接升级且 --json 输出有效" env HOME="$T/path-home" PATH="$T/update-bin:$PATH" bash -c \
+  "'$T/danlu-copy.new' replace --json '$T/path-home/.local/bin/danlu' | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"restarted\"] and d[\"path\"] == sys.argv[1]' '$T/danlu-copy' && test -L '$T/path-home/.local/bin/danlu' && test '$T/path-home/.local/bin/danlu' -ef '$T/danlu-copy'"
+
+echo "== 上传后直接 update =="
+# 模拟服务管理器返回真实服务器进程的位置，并记录重启请求；不操作开发机的用户服务。
+cat >"$T/update-bin/systemctl" <<EOF
+#!/bin/sh
+case "\$*" in
+  '--user show danlu --property=MainPID --value') echo '$SERVER_PID' ;;
+  '--user restart danlu') echo restarted > '$T/update-restarted' ;;
+  *) exit 1 ;;
+esac
+EOF
+mkdir -p "$T/upload"
+cp "$BIN" "$T/upload/danlu.new"
+check "update 拒绝用旧程序替换自己" env HOME="$T/update-home" PATH="$T/update-bin:$PATH" bash -c \
+  "! '$BIN' update >'$T/update-self.log' 2>&1 && test ! -e '$BIN.prev'"
+check "新程序在其他目录也能直接 update" env HOME="$T/update-home" PATH="$T/update-bin:$PATH" "$T/upload/danlu.new" update
+check "update 保留旧程序备份" [ -x "$BIN.prev" ]
+check "update 请求重启 danlu 用户服务" [ -f "$T/update-restarted" ]
+check "update 把 PATH 命令指向实际安装位置" test "$T/update-home/.local/bin/danlu" -ef "$BIN"
 
 echo "== 保留策略与清理预览 =="
 # 前面故意改过密码、吊销了会话并锁定登录；后续检查使用新建的隔离测试设备令牌。

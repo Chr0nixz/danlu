@@ -77,6 +77,7 @@ ssh 你的服务器 'chmod +x ~/bin/danlu'      # 从 Windows 传过去的文件
 `install-service` 会做以下几件事：
 
 - 写入 `~/.config/systemd/user/danlu.service`。其中 `ExecStart` 是二进制的绝对路径，`PATH` 是你执行这条命令时 shell 里的 PATH。所以请在能找到 `nvidia-smi` 和 conda 的那个 shell 里执行；以后 PATH 有变化，重新执行一次即可。
+- 自动创建 `~/.local/bin/danlu` 软链接，指向当前安装的程序，并配置 Bash / Zsh 的 PATH。新终端可以直接运行 `danlu info`、`danlu logs`；当前终端执行一次 `export PATH="$HOME/.local/bin:$PATH"` 即可。已有的其他同名程序不会被覆盖。
 - 设置 `KillMode=process`：重启或停止 danlu 时，不会连带杀掉正在跑的训练进程。
 - 执行 `systemctl --user enable --now danlu`：立即启动服务，并且开机自启。
 - 执行 `loginctl enable-linger`：退出 SSH 后服务继续运行。如果这一步因为权限失败，请手动执行 `sudo loginctl enable-linger $USER`。
@@ -95,14 +96,30 @@ HTTPS 有三种模式，在 `~/.danlu/config.toml` 的 `[tls] mode` 里设置：
 
 ### 升级
 
+在开发机上构建并上传，文件名用 `danlu.new`：
+
 ```bash
-scp dist/danlu-linux-amd64 你的服务器:~/bin/danlu.new
-ssh 你的服务器 'chmod +x ~/bin/danlu.new && ~/bin/danlu.new replace ~/bin/danlu'
+scp dist/danlu-linux-amd64 你的服务器:~/danlu.new
+```
+
+然后在服务器上进入上传目录，执行：
+
+```bash
+chmod +x danlu.new   # 上传后没有执行权限时需要
+./danlu.new update
+```
+
+`update` 从正在运行的 danlu 用户服务中自动找到原程序，用新程序原子替换它并重启服务，不用填写原安装路径，也不依赖 PATH 或当前终端的 `DANLU_HOME`。升级还会自动配置 `danlu` 命令的 PATH，配置和数据目录沿用服务原来的设置。
+
+服务没有运行、需要手动指定原程序位置时，使用兼容保留的 `replace`：
+
+```bash
+./danlu.new replace ~/bin/danlu
 ```
 
 `replace` 让新程序把自己改名成 `~/bin/danlu`，然后重启服务，效果和 `mv` 之后执行 `systemctl --user restart danlu` 一样。不能直接覆盖 `~/bin/danlu`：程序正在运行时，覆盖会报 `Text file busy`，所以要先传成一个新文件名。
 
-重启时训练任务不会中断，新进程启动后会重新接管它们；配置和数据都不受影响。桌面客户端「服务器」页的升级走的也是这条命令。
+重启时训练任务不会中断，新进程启动后会重新接管它们；配置和数据都不受影响。桌面客户端「服务器」页的升级仍使用 `replace`。
 
 升级时留了两份后路：`replace` 把旧程序留成 `~/bin/danlu.prev`；新版本第一次启动、要升级数据库表结构时，先把旧库备份到 `~/.danlu/backup/danlu-<时间>-v<旧版本>.db`，只保留最近 5 份。新版本有问题时这样回滚：
 
@@ -142,6 +159,7 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 | `danlu notify setup` | 配置手机推送，打印随机订阅地址和二维码；重复运行保留原订阅，`--new-topic` 轮换 |
 | `danlu notify test` | 按当前配置发一条测试推送；设置页也有测试按钮 |
 | `danlu notify setup --disable` | 关闭推送，重启服务后生效 |
+| `./danlu.new update` | 升级：自动定位运行中的旧程序，用当前新程序替换并重启服务 |
 | `danlu.new replace ~/bin/danlu` | 升级：用新程序原子替换旧程序并重启服务（桌面客户端升级时用的就是它） |
 | `journalctl --user -u danlu -f` | 查看服务日志 |
 
@@ -186,7 +204,7 @@ go test ./cmd/... ./internal/...          # 单元测试（Windows 上也能跑�
 在 WSL 或 Linux 里用假 GPU 测试：
 
 ```bash
-bash scripts/e2e.sh      # 端到端测试：入口/登录/调度/队列暂停与快速失败保护/Bash 环境/取消/重启接管/日志/快照/设备令牌/游标翻页/改密码/限速/replace 升级/正常停止/nvidia-smi 出错
+bash scripts/e2e.sh      # 端到端测试：入口/登录/调度/队列暂停与快速失败保护/Bash 环境/取消/重启接管/日志/快照/设备令牌/游标翻页/改密码/限速/update 与 replace 升级/正常停止/nvidia-smi 出错
 bash scripts/dev-wsl.sh  # 启动演示环境（4 张假 GPU，第 3 张模拟被外部占用），打开打印出的地址
 ```
 
