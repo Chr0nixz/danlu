@@ -1,11 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Copy, X } from 'lucide-react'
+import { Copy, Star, X } from 'lucide-react'
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, now, progressRemaining, timeAgo, type Job } from '@danlu/core'
+import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, jobStatusText, now, progressRemaining, timeAgo, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 import { StarButton } from './StarButton'
-import { Button, buttonClass, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
+import { announce, Button, buttonClass, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
 
 /** 取消任务前的确认框：写清已经跑了多久、结束后不能恢复。出错时留在框里显示原因 */
 export function CancelDialog({ job: j, onClose }: { job: Job; onClose: () => void }) {
@@ -43,19 +43,22 @@ export function CancelDialog({ job: j, onClose }: { job: Job; onClose: () => voi
   )
 }
 
-// 记住每个任务上次显示的状态；状态变了，这一行按新状态的颜色闪一下
+// 记住每个任务上次显示的状态；状态变了，这一行按新状态的颜色闪一下，同时读给读屏听
 const flashTone: Partial<Record<string, string>> = { succeeded: 'ok', failed: 'fail', cancelled: 'fg-3' }
 const seen = new Map<number, string>()
 
-function useFlash(id: number, status: string) {
+function useFlash(j: Job) {
   const [flash, setFlash] = useState(false)
+  const { id, status } = j
   useEffect(() => {
     const prev = seen.get(id)
     seen.set(id, status)
     if (prev === undefined || prev === status) return
+    announce(`任务 #${id} ${j.name}：${jobStatusText(j)}`)
     setFlash(true)
     const t = setTimeout(() => setFlash(false), 1200)
     return () => clearTimeout(t)
+    // 只在状态变化时触发，名字改了不算
   }, [id, status])
   return flash
 }
@@ -88,11 +91,13 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
 
 /**
  * 一行任务。整行可点（名字是链接，用 ::after 铺满整行），commit、复制和取消操作浮在上面单独可点。
- * 电脑上是固定列；手机上折成两行：第一行名字和时间，第二行卡号、说明文字和 commit，字段一个不少。
+ * 电脑上是固定列；手机上折成两行：第一行名字（放不下时折两行）和时间，第二行卡号、说明文字和 commit，字段一个不少。
+ * 手机上右侧只留一个 44px 的操作（在跑或排队的放取消，结束的放复制），标星只显示一个小星标，宽度留给任务名：
+ * 消融实验靠名字后缀区分，截掉的正好是后缀。
  */
 export function JobRow({ job: j, showCopy = false, selection }: { job: Job; showCopy?: boolean; selection?: ReactNode }) {
   const [confirming, setConfirming] = useState(false)
-  const flash = useFlash(j.id, j.status)
+  const flash = useFlash(j)
   const d = jobDuration(j)
   const gpus = j.gpus_assigned.length ? j.gpus_assigned : j.gpus_pinned
   const info = detail(j)
@@ -110,19 +115,17 @@ export function JobRow({ job: j, showCopy = false, selection }: { job: Job; show
       {selection}
       <StatusIcon status={j.status} cancelling={j.cancel_requested} className="self-start mt-0.5 md:mt-0 md:self-center" />
       <div className="flex min-w-0 flex-1 flex-col gap-1 md:flex-row md:items-center md:gap-4">
-        {/* 首页从名称列调配复制入口的宽度，保留卡号和最新输出列的空间 */}
-        <div className={cx('flex min-w-0 items-baseline gap-2 md:shrink-0', showCopy ? 'md:w-[208px] lg:w-[248px]' : 'md:w-[240px] lg:w-[280px]')}>
-          <div className="relative h-5 w-11 shrink-0 md:hidden">
-            <div className="absolute inset-x-0 top-1/2 z-10 -translate-y-1/2"><StarButton job={j} /></div>
-          </div>
+        {/* 首页从名称列调配复制入口的宽度，保留卡号和最新输出列的空间；1280px 以下名称列收窄，让给失败原因和最新输出 */}
+        <div className={cx('flex min-w-0 items-baseline gap-2 md:shrink-0', showCopy ? 'md:w-[208px] xl:w-[248px]' : 'md:w-[240px] xl:w-[280px]')}>
           <Link
             to={`/jobs/${j.id}`}
             title={j.name}
             className="flex min-w-0 items-baseline gap-2 after:absolute after:inset-0 focus-visible:outline-none focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-run/70"
           >
             <span className="shrink-0 text-ui text-fg-3">#{j.id}</span>
-            <span className="truncate text-sm font-medium text-fg">{j.name}</span>
+            <span className="text-sm font-medium text-fg max-md:line-clamp-2 max-md:[overflow-wrap:anywhere] md:truncate">{j.name}</span>
           </Link>
+          {j.starred && <Star role="img" aria-label="已标星" className="size-3 shrink-0 self-center fill-current text-fg-3 md:hidden" />}
           <span className="ml-auto shrink-0 pl-2 text-xs text-fg-3 md:hidden" title={ended ? fmtTime(j.ended_at) : timeLabel}>
             {ended && j.ended_at ? `${time} · ${timeAgo(j.ended_at)}` : time}
           </span>
@@ -179,7 +182,7 @@ export function JobRow({ job: j, showCopy = false, selection }: { job: Job; show
         {showCopy && (
           <Link
             to={`/new?copy=${j.id}`}
-            className={cx(buttonClass('ghost', 'icon-sm'), 'text-fg-3 max-md:-my-0.5 max-md:size-11')}
+            className={cx(buttonClass('ghost', 'icon-sm'), 'text-fg-3 max-md:-my-0.5 max-md:size-11', canCancel && 'max-md:hidden')}
             title="复制任务"
             aria-label={`复制任务 #${j.id}`}
           >
@@ -213,7 +216,7 @@ export function JobListHeader({ selecting = false }: { selecting?: boolean }) {
       {selecting && <span className="w-8 shrink-0" />}
       <span className="w-4 shrink-0" />
       <div className="flex min-w-0 flex-1 items-center gap-4">
-        <span className="w-[240px] shrink-0 lg:w-[280px]">任务</span>
+        <span className="w-[240px] shrink-0 xl:w-[280px]">任务</span>
         <span className="min-w-0 flex-1">卡 · 最新输出</span>
         <span className="w-[5.5rem] shrink-0 text-right">耗时</span>
         <span className="w-[4.5rem] shrink-0 text-right">结束于</span>

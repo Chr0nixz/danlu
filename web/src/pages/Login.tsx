@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { Brand } from '../components/Layout'
 import { Button, Card, ErrorBox, Field, Input } from '../components/ui'
@@ -16,9 +16,25 @@ export function Login() {
   const [needTotp, setNeedTotp] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [loading, setLoading] = useState(false)
+  // 字段错误写在字段下方，不用浏览器自带的必填气泡
+  const [errs, setErrs] = useState<Partial<Record<'username' | 'password' | 'code', string>>>({})
+  const uid = useId()
+  const ids = { username: `${uid}-username`, password: `${uid}-password`, code: `${uid}-code` }
+  const field = (k: keyof typeof ids) => ({ id: ids[k], 'aria-invalid': !!errs[k] || undefined, 'aria-describedby': errs[k] ? `${ids[k]}-err` : undefined })
+  const clear = (k: keyof typeof ids) => errs[k] && setErrs((e) => ({ ...e, [k]: undefined }))
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    const next: typeof errs = {}
+    if (!username.trim()) next.username = '请填写用户名'
+    if (!password) next.password = '请填写密码'
+    if (needTotp && !/^\d{6}$/.test(code)) next.code = '请输入手机验证器 App 里的 6 位数字'
+    setErrs(next)
+    const first = (['username', 'password', 'code'] as const).find((k) => next[k])
+    if (first) {
+      document.getElementById(ids[first])?.focus()
+      return
+    }
     setLoading(true)
     setError(null)
     try {
@@ -46,24 +62,23 @@ export function Login() {
           </div>
         </div>
         <Card className="p-5">
-          <form onSubmit={submit} className="space-y-4">
-            <Field label="用户名">
-              <Input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoCapitalize="off" required />
+          <form onSubmit={submit} noValidate className="space-y-4">
+            <Field label="用户名" error={errs.username} errorId={`${ids.username}-err`}>
+              <Input {...field('username')} value={username} onChange={(e) => (setUsername(e.target.value), clear('username'))} autoComplete="username" autoCapitalize="off" />
             </Field>
-            <Field label="密码">
-              <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" autoFocus required />
+            <Field label="密码" error={errs.password} errorId={`${ids.password}-err`}>
+              <Input {...field('password')} type="password" value={password} onChange={(e) => (setPassword(e.target.value), clear('password'))} autoComplete="current-password" autoFocus />
             </Field>
             {needTotp && (
-              <Field label="两步验证码">
+              <Field label="两步验证码" error={errs.code} errorId={`${ids.code}-err`}>
                 <Input
+                  {...field('code')}
                   value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  onChange={(e) => (setCode(e.target.value.replace(/\D/g, '').slice(0, 6)), clear('code'))}
                   autoComplete="one-time-code"
                   inputMode="numeric"
-                  pattern="[0-9]{6}"
                   maxLength={6}
                   autoFocus
-                  required
                 />
               </Field>
             )}

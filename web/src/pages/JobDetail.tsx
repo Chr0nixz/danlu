@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, GitCompareArrows, RotateCw, Terminal as TerminalIcon, X } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, GitCompareArrows, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useRef, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { CancelDialog } from '../components/JobRow'
 import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
-import { StarButton, StarError } from '../components/StarButton'
-import { Alert, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, hitArea, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
+import { StarButton, StarError, StarMenuItem } from '../components/StarButton'
+import { Alert, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, hitArea, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
 import { ApiError, compactProgress, duration, fmtTime, isActive, jobDuration, now, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 
@@ -87,6 +87,30 @@ export function JobDetail() {
   }
   const j = q.data!
   const trackerName = j.tracker_url.includes('swanlab') ? 'SwanLab' : 'W&B'
+  const terminal = settings.data?.terminal_enabled === true
+  // 每种状态只有一个主操作：在跑或排队的是取消，结束了的是重跑（失败的写明"改参数"）
+  const canCancel = isActive(j) && !j.cancel_requested
+  const rerunLabel = j.status === 'failed' ? '改参数重跑' : '重跑'
+  const rerunTitle = '用同样的设置再跑一次，可以先改参数'
+  const tracker = (cls: string) =>
+    j.tracker_url && (
+      <a href={j.tracker_url} target="_blank" rel="noreferrer" className={cls}>
+        {trackerName}
+        <ArrowUpRight aria-hidden />
+      </a>
+    )
+  const primary = (cls: string) =>
+    canCancel ? (
+      <Button size="sm" variant="danger" className={cls} onClick={() => setConfirming(true)}>
+        <X aria-hidden />
+        取消任务
+      </Button>
+    ) : (
+      <Link to={`/new?from=${j.id}`} className={cx(buttonClass(isActive(j) ? 'secondary' : 'primary', 'sm'), cls)} title={rerunTitle}>
+        <RotateCw aria-hidden />
+        {rerunLabel}
+      </Link>
+    )
 
   return (
     <div className="space-y-4">
@@ -98,36 +122,56 @@ export function JobDetail() {
             <span className="min-w-0 break-all">
               {j.name}
               <span className="ml-2 font-normal text-fg-3">#{j.id}</span>
+              {j.starred && <Star role="img" aria-label="已标星" className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
             </span>
           </h1>
-          <div className="flex flex-wrap gap-2 [&>*]:flex-1 sm:justify-end sm:[&>*]:flex-none">
+
+          {/* 电脑：操作都露在外面，主操作放最右 */}
+          <div className="hidden flex-wrap justify-end gap-2 sm:flex">
             <StarButton job={j} label />
-            {settings.data?.terminal_enabled && (
+            {terminal && (
               <Link to={`/terminal?job_id=${j.id}`} className={buttonClass('secondary', 'sm')} title="在这个任务的目录和 conda 环境中打开终端">
-                <TerminalIcon />
+                <TerminalIcon aria-hidden />
                 终端
               </Link>
             )}
-            {j.tracker_url && (
-              <a href={j.tracker_url} target="_blank" rel="noreferrer" className={buttonClass('secondary', 'sm')}>
-                {trackerName}
-                <ArrowUpRight />
-              </a>
-            )}
-            <Link to={`/new?from=${j.id}`} className={buttonClass('secondary', 'sm')} title="用同样的设置再跑一次，可以先改参数">
-              <RotateCw />
-              重跑
-            </Link>
+            {tracker(buttonClass('secondary', 'sm'))}
             <Link to={`/compare?a=${j.id}`} className={buttonClass('secondary', 'sm')}>
               <GitCompareArrows aria-hidden />
               和…对比
             </Link>
-            {isActive(j) && !j.cancel_requested && (
-              <Button size="sm" variant="danger" onClick={() => setConfirming(true)}>
-                <X />
-                取消
-              </Button>
+            {canCancel && (
+              <Link to={`/new?from=${j.id}`} className={buttonClass('secondary', 'sm')} title={rerunTitle}>
+                <RotateCw aria-hidden />
+                {rerunLabel}
+              </Link>
             )}
+            {primary('')}
+          </div>
+
+          {/* 手机：一行放主操作和实验记录，其余收进"更多"，把首屏留给日志 */}
+          <div className="flex items-center gap-2 sm:hidden">
+            {primary('h-11 px-3.5 text-sm')}
+            {tracker(cx(buttonClass('secondary', 'sm'), 'h-11 px-3.5 text-sm'))}
+            <Menu label="更多操作" className="ml-auto" buttonClassName="size-11">
+              <StarMenuItem job={j} />
+              {canCancel && (
+                <Link role="menuitem" to={`/new?from=${j.id}`} className={menuItemClass}>
+                  <RotateCw aria-hidden />
+                  {rerunLabel}
+                </Link>
+              )}
+              {terminal && (
+                <Link role="menuitem" to={`/terminal?job_id=${j.id}`} className={menuItemClass}>
+                  <TerminalIcon aria-hidden />
+                  终端
+                </Link>
+              )}
+              <Link role="menuitem" to={`/compare?a=${j.id}`} className={menuItemClass}>
+                <GitCompareArrows aria-hidden />
+                和…对比
+              </Link>
+            </Menu>
           </div>
         </div>
       </div>
@@ -188,13 +232,27 @@ function BackLink() {
   )
 }
 
+/** 按失败分类给的下一步：只是建议，不替用户断定原因；退出码这类没法归类的不给 */
+const failHint: Partial<Record<string, string>> = {
+  cuda_oom: '显存不够：减小 batch size，或多申请一张卡再重跑。',
+  host_oom: '主机内存不够：减少 DataLoader 的 num_workers，或等别的任务结束再重跑。',
+  nccl: '多卡通信出错：可以先原样重跑；反复出现时加环境变量 NCCL_DEBUG=INFO 查看原因。',
+  exception: '代码报错：按报错行改好代码，再重跑。',
+  reboot: '服务器重启打断了任务。代码没问题的话，用原任务的快照原样重跑。',
+  killed: '进程被丹炉以外的程序结束。确认原因后，可以用原任务的快照原样重跑。',
+  signal: '进程收到信号后退出。不是你发的信号时，看日志末尾找原因。',
+  start: '任务没能启动：检查工作目录、conda 环境和 ~/.bashrc，再重跑。',
+}
+
 /**
  * 失败原因。最醒目的位置放最有用的信息：日志里的报错行（找不到时用最后一行输出），
- * 而不是状态栏里已经有的退出码；退出码以外的原因（被外部终止、启动失败）单独写一行。
+ * 而不是状态栏里已经有的退出码；退出码以外的原因（被外部终止、启动失败）单独写一行，
+ * 然后是按分类给的下一步，重跑按钮就在页面顶部。
  */
 function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => void }) {
   const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
   const extra = j.fail_reason && !/^退出码 -?\d+$/.test(j.fail_reason) ? j.fail_reason : ''
+  const hint = failHint[j.fail_kind ?? '']
   return (
     <Alert tone="fail">
       {line ? (
@@ -206,6 +264,7 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
       ) : (
         <div>{j.fail_reason || '任务失败，没有留下输出'}</div>
       )}
+      {hint && <div className="mt-0.5 text-fg">{hint}</div>}
       {j.started_at && !j.pruned_at && (
         <button
           type="button"
@@ -220,29 +279,29 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
   )
 }
 
-function Meta({ label, children, className, live }: { label: ReactNode; children: ReactNode; className?: string; live?: boolean }) {
+function Meta({ label, children, className, live, wrap }: { label: ReactNode; children: ReactNode; className?: string; live?: boolean; wrap?: boolean }) {
   return (
     <div className={cx('min-w-0 space-y-1', className)}>
-      <div className="truncate text-xs text-fg-3">{label}</div>
-      <div className="flex min-h-5 min-w-0 items-center gap-1.5 text-ui text-fg" aria-live={live ? 'polite' : undefined}>
+      <div className="line-clamp-2 text-xs text-fg-3">{label}</div>
+      <div className={cx('flex min-h-5 min-w-0 items-center gap-x-1.5 gap-y-0.5 text-ui text-fg', wrap && 'flex-wrap')} aria-live={live ? 'polite' : undefined}>
         {children}
       </div>
     </div>
   )
 }
 
-/** 详情页顶部的一排关键信息：状态、卡、环境、时长、代码版本 */
+/** 详情页顶部的一排关键信息：状态、卡、环境、时长、代码版本。手机上三列两行，日志框才能留在首屏 */
 function MetaStrip({ j }: { j: Job }) {
   const d = jobDuration(j)
   const gpus = j.gpus_assigned.length ? j.gpus_assigned : j.gpus_pinned
   return (
-    <Card className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 sm:grid-cols-3 lg:grid-cols-[repeat(6,auto)] lg:justify-between">
-      <Meta label="状态" live>
+    <Card className="grid grid-cols-3 gap-x-3 gap-y-2.5 px-3 py-2.5 sm:gap-x-4 sm:gap-y-3 sm:px-4 sm:py-3 lg:grid-cols-[repeat(6,auto)] lg:justify-between">
+      <Meta label="状态" live wrap>
         <StatusLabel job={j} />
         {j.exit_code !== null && j.status !== 'succeeded' && <span className="text-fg-3">退出码 {j.exit_code}</span>}
       </Meta>
-      <Meta label="GPU">
-        {gpus.length ? <GpuChips ids={gpus} /> : <span className="text-fg-2">{j.gpus_req ? `${j.gpus_req} 张，未分配` : '不用 GPU'}</span>}
+      <Meta label="GPU" wrap>
+        {gpus.length ? <GpuChips ids={gpus} className="flex-wrap" /> : <span className="text-fg-2">{j.gpus_req ? `${j.gpus_req} 张，未分配` : '不用 GPU'}</span>}
       </Meta>
       <Meta label="conda 环境">
         <span className="truncate">{j.conda_env || <span className="text-fg-3">不使用</span>}</span>

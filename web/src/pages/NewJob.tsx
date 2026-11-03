@@ -9,6 +9,9 @@ import { api } from '../lib/api'
 
 type JobFormMode = 'new' | 'copy' | 'rerun'
 
+/** 和代码无关的失败分类：重跑时默认用原任务的快照 */
+const sameCodeKinds = ['reboot', 'killed', 'signal', 'nccl']
+
 function rerunName(name: string) {
   const m = name.match(/^(.*)-r(\d+)$/)
   return m ? `${m[1]}-r${Number(m[2]) + 1}` : `${name}-r2`
@@ -58,8 +61,9 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
   const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, env: `${uid}-env` }
 
   const rerun = formMode === 'rerun'
-  const [useSnapshot, setUseSnapshot] = useState(false)
   const canRestore = !!source?.snapshot_ok && !source.pruned_at && (source.pid > 0 || source.ended_at !== null)
+  // 被重启、外部终止这类和代码无关的失败，默认用原任务的快照原样重跑；其余默认用工作目录现在的代码（多半刚改过）
+  const [useSnapshot, setUseSnapshot] = useState(() => rerun && canRestore && sameCodeKinds.includes(source?.fail_kind ?? ''))
   const snapshotSelected = rerun && useSnapshot
   const [name, setName] = useState(source && rerun ? rerunName(source.name) : source?.name ?? '')
   const [workdir, setWorkdir] = useState(source?.workdir ?? '')
@@ -173,18 +177,14 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
         {rerun && source && (
           <FormRow
             label="代码版本"
-            htmlFor={`${uid}-code`}
             hint={snapshotSelected && !canRestore ? '快照已不可用。请选择现在的工作目录再提交。' : snapshotSelected
               ? '在独立目录恢复代码。未收进快照的文件可能来自原目录，命令中写死的绝对路径也仍指向原处。conda 使用当前环境。'
               : source.pruned_at ? '源任务的快照已清理。' : !canRestore ? '源任务的快照还不可用。' : '可改用原任务的快照，再调整这次运行的参数。'}
           >
-            <Select id={`${uid}-code`} aria-describedby={`${uid}-code-hint`} value={snapshotSelected ? 'snapshot' : 'current'} onChange={(e) => setUseSnapshot(e.target.value === 'snapshot')}>
-              <option value="current">现在的工作目录</option>
-              <option value="snapshot" disabled={!canRestore}>任务 #{source.id} 的快照</option>
-            </Select>
+            <CodeSourcePicker name={`${uid}-code`} source={source} workdir={workdir} canRestore={canRestore} snapshot={snapshotSelected} onChange={setUseSnapshot} />
           </FormRow>
         )}
-        <FormRow label={snapshotSelected ? '原工作目录' : '工作目录'} hint={snapshotSelected ? '从这里补齐数据和权重。命令在恢复后的目录中执行。' : '服务器上的绝对路径。启动时会自动保存一份代码快照。'} htmlFor={ids.workdir}>
+        <FormRow label={snapshotSelected ? '原工作目录' : '工作目录'} hint={snapshotSelected ? '从这里补齐数据和权重。命令在恢复后的目录中执行。' : '服务器上的绝对路径，输入或按 ↓ 列出子目录。启动时会自动保存一份代码快照。'} htmlFor={ids.workdir}>
           {snapshotSelected ? (
             <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="font-mono" />
           ) : <WorkdirInput
@@ -354,6 +354,48 @@ function GpuPicker({ id, describedBy, gpus, value, onChange }: { id: string; des
   )
 }
 
+/**
+ * 重跑用哪份代码：两张单选卡片，各自写出 commit 和有没有未提交改动，选之前就知道两边差在哪。
+ * 用原生单选框，方向键切换和禁用都交给浏览器
+ */
+function CodeSourcePicker({ name, source, workdir, canRestore, snapshot, onChange }: { name: string; source: Job; workdir: string; canRestore: boolean; snapshot: boolean; onChange: (snapshot: boolean) => void }) {
+  const head = useQuery({ queryKey: ['githead', workdir], queryFn: () => api.gitHead(workdir), enabled: !!workdir })
+  const version = (branch: string | undefined, commit: string | undefined, dirty: boolean | undefined) => (
+    <>
+      {branch && `${branch} @ `}
+      <span className="font-mono">{commit?.slice(0, 7)}</span>
+      {dirty && <span className="text-warn"> · 有未提交改动</span>}
+    </>
+  )
+  const current = !workdir ? '先填工作目录' : head.isLoading ? '正在读取…' : head.data?.is_git && head.data.commit ? version(head.data.branch, head.data.commit, head.data.dirty) : '不是 git 仓库'
+  const snap = source.pruned_at ? '已清理' : !canRestore ? '还不可用' : source.git_commit ? version(source.git_branch, source.git_commit, source.git_dirty) : '非 git，已存快照'
+  const options = [
+    { value: false, title: '现在的工作目录', detail: current, disabled: false },
+    { value: true, title: `任务 #${source.id} 的快照`, detail: snap, disabled: !canRestore },
+  ]
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {options.map((o) => (
+        <label
+          key={String(o.value)}
+          className={cx(
+            'relative min-w-0 cursor-pointer rounded-md border px-3 py-2 transition-colors duration-150',
+            'has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-run/70 has-disabled:cursor-not-allowed has-disabled:opacity-45',
+            snapshot === o.value ? 'border-fg bg-subtle ring-1 ring-fg' : 'border-line-strong hover:bg-subtle',
+          )}
+        >
+          <input type="radio" name={name} className="sr-only" checked={snapshot === o.value} disabled={o.disabled} onChange={() => onChange(o.value)} />
+          <span className="flex items-center justify-between gap-2">
+            <span className="truncate text-ui font-semibold">{o.title}</span>
+            {snapshot === o.value && <Check className="size-3.5 shrink-0" strokeWidth={3} aria-hidden />}
+          </span>
+          <span className="mt-0.5 line-clamp-2 text-xs text-fg-3 [overflow-wrap:anywhere]">{o.detail}</span>
+        </label>
+      ))}
+    </div>
+  )
+}
+
 /** 重跑时比较工作目录当前代码和原任务的快照，说清楚会用哪份代码 */
 function CodeChangeNotice({ source, workdir }: { source: Job; workdir: string }) {
   const head = useQuery({ queryKey: ['githead', workdir], queryFn: () => api.gitHead(workdir), enabled: !!workdir })
@@ -410,7 +452,8 @@ function WorkdirInput({
   recent: string[]
 }) {
   const [focus, setFocus] = useState(false)
-  const [closed, setClosed] = useState(false) // 按 Esc 收起，继续输入时再展开
+  // 聚焦时先不展开：校验失败时焦点会移到这里，展开的列表会盖住错误说明。输入或按 ↓ 时展开，按 Esc 收起
+  const [closed, setClosed] = useState(true)
   const [active, setActive] = useState(-1)
   const [query, setQuery] = useState(value)
   const listId = useId()
@@ -451,9 +494,18 @@ function WorkdirInput({
             setClosed(false)
           }}
           onFocus={() => setFocus(true)}
-          onBlur={() => setTimeout(() => setFocus(false), 150)}
+          onBlur={() => setTimeout(() => {
+            setFocus(false)
+            setClosed(true)
+          }, 150)}
           onKeyDown={(e) => {
-            if (!open) return
+            if (!open) {
+              if (e.key === 'ArrowDown' && options.length) {
+                e.preventDefault()
+                setClosed(false)
+              }
+              return
+            }
             const n = options.length
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
               e.preventDefault()
@@ -507,7 +559,7 @@ function WorkdirInput({
               type="button"
               key={d}
               onClick={() => onChange(d)}
-              className="h-6 max-w-full truncate rounded border border-line bg-subtle px-1.5 font-mono text-[11.5px] text-fg-2 hover:border-line-strong hover:text-fg"
+              className="h-6 max-w-full truncate rounded border border-line bg-subtle px-1.5 font-mono text-[11.5px] text-fg-2 hover:border-line-strong hover:text-fg max-sm:h-9 max-sm:px-2"
               title={d}
             >
               {d.split('/').filter(Boolean).slice(-2).join('/')}

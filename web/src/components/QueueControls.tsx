@@ -46,17 +46,18 @@ export function QueuePauseButton() {
   })
 
   if (!queue.data || queue.data.paused) return null
+  // 写出文字：手机上看不到悬停提示，只有图标分不清是暂停队列还是暂停任务
   return (
     <Button
       variant="ghost"
-      size="icon-sm"
+      size="sm"
       title="暂停队列，运行中的任务继续"
-      aria-label="暂停队列"
-      className="max-sm:size-11"
+      className="-mr-2 text-xs text-fg-3 max-sm:-my-1 max-sm:h-11"
       loading={pause.isPending}
       onClick={() => pause.mutate()}
     >
-      <Pause className="size-4" aria-hidden />
+      <Pause aria-hidden />
+      暂停队列
     </Button>
   )
 }

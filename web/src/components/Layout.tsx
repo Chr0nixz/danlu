@@ -4,7 +4,7 @@ import { useEffect } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api } from '../lib/api'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
-import { buttonClass, cx, Kbd } from './ui'
+import { Announcer, buttonClass, cx, Kbd } from './ui'
 
 const nav = [
   { to: '/', label: '总览', icon: LayoutDashboard, end: true },
@@ -125,6 +125,7 @@ export function Layout() {
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1200px] px-4 py-4 outline-none sm:px-6 sm:py-6">
         <Outlet />
       </main>
+      <Announcer />
 
       {/* 手机底部导航：新建放在正中间，终端和设置在顶栏右侧 */}
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] sm:hidden">

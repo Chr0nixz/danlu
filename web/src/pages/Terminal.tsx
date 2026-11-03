@@ -116,7 +116,7 @@ export function Terminal() {
               >
                 <TerminalIcon className="size-4 shrink-0" aria-hidden />
                 <span className="truncate">{label}</span>
-                <span className="font-mono text-[10px] text-fg-4">{new Date(session.opened_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span className="font-mono text-[11px] text-fg-3">{new Date(session.opened_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
               </button>
             )
           })}

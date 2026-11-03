@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { diffArrays, structuredPatch } from 'diff'
-import { ArrowLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useMemo, useState, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Button, Card, Empty, ErrorBox, SkeletonRows, StatusLabel, buttonClass, cx } from '../components/ui'
@@ -27,7 +27,7 @@ export function Compare() {
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
-        <Link to="/jobs" className="inline-flex items-center gap-1 text-ui text-fg-3 hover:text-fg"><ArrowLeft className="size-4" aria-hidden />任务</Link>
+        <Link to="/jobs" className="inline-flex items-center gap-0.5 text-ui text-fg-3 hover:text-fg"><ChevronLeft className="size-4" aria-hidden />任务</Link>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-lg font-semibold">任务对比</h1>
           {validPair && <Link to={`/compare?a=${a}`} className={buttonClass('secondary', 'sm')}>更换对比任务</Link>}

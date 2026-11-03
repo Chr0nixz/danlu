@@ -1,0 +1,128 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "design-system-color",
+        "value": "#7a7a7a",
+        "createdAt": "2026-11-03T18:08:21.547Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#ff7b72",
+        "createdAt": "2026-11-03T18:08:21.756Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#56d364",
+        "createdAt": "2026-11-03T18:08:21.959Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#e3b341",
+        "createdAt": "2026-11-03T18:08:22.165Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#79c0ff",
+        "createdAt": "2026-11-03T18:08:22.360Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#d2a8ff",
+        "createdAt": "2026-11-03T18:08:22.566Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#56d4dd",
+        "createdAt": "2026-11-03T18:08:22.764Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#9e9e9e",
+        "createdAt": "2026-11-03T18:08:22.963Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#ffa198",
+        "createdAt": "2026-11-03T18:08:23.168Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#7ee787",
+        "createdAt": "2026-11-03T18:08:23.374Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#f2cc60",
+        "createdAt": "2026-11-03T18:08:23.614Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#a5d6ff",
+        "createdAt": "2026-11-03T18:08:23.818Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#e2c5ff",
+        "createdAt": "2026-11-03T18:08:24.018Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#b3f0ff",
+        "createdAt": "2026-11-03T18:08:24.220Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#6e1b1b",
+        "createdAt": "2026-11-03T18:08:24.422Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#12432a",
+        "createdAt": "2026-11-03T18:08:24.623Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#5c4410",
+        "createdAt": "2026-11-03T18:08:24.825Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#143d6b",
+        "createdAt": "2026-11-03T18:08:25.026Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#4e2369",
+        "createdAt": "2026-11-03T18:08:25.229Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "#0f4a52",
+        "createdAt": "2026-11-03T18:08:25.433Z",
+        "reason": "终端 ANSI 配色，取值记在 web/.impeccable/design.json 的 ansiPalette，只用于深色终端"
+      }
+    ]
+  }
+}

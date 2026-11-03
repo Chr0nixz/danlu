@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight } from 'lucide-react'
-import { useSyncExternalStore, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { GpuGrid, gpuBusy, shortName, useGpus } from '../components/GpuGrid'
 import { HostMetrics } from '../components/HostMetrics'
@@ -40,7 +40,7 @@ function Summary({ running, queued }: { running: number; queued: number }) {
   const stale = gpus.data && age > 15
 
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-ui sm:gap-x-5">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-ui sm:gap-x-5">
       <span className="inline-flex items-center gap-1.5">
         <StatusIcon status="running" decorative />
         <b className="font-semibold">{running}</b>
@@ -56,7 +56,11 @@ function Summary({ running, queued }: { running: number; queued: number }) {
         <Link to="/jobs?status=failed&recent=24h" className="inline-flex items-center gap-1.5 hover:underline max-sm:-my-2.5 max-sm:py-2.5" title="最近 24 小时内失败的任务">
           <StatusIcon status="failed" decorative />
           <b className="font-semibold text-fail">{failed}</b>
-          <span className="text-fail">失败</span>
+          {/* 手机上写短的 24h，和"失败"之间不留整个间距，摘要才放得下一行 */}
+          <span className="text-fail">
+            失败
+            <span className="ml-1 text-[11px] text-fg-3 sm:hidden">24h</span>
+          </span>
           <span className="text-xs text-fg-3 max-sm:hidden">24 小时内</span>
         </Link>
       )}
@@ -84,23 +88,10 @@ function Summary({ running, queued }: { running: number; queued: number }) {
 }
 
 /**
- * 手机上主机资源排到任务列表后面：首屏要回答的是任务跑完没有、跑到哪了、卡空不空，CPU 和内存不在其中，
- * 放在 GPU 下面会把任务列表挤出首屏。用媒体查询换位置而不是 CSS order，读屏的顺序也跟着换
+ * 主机资源排在任务列表后面，手机和电脑都一样：首屏要回答的是任务跑完没有、跑到哪了、卡空不空，
+ * CPU 和内存不在其中，放在 GPU 下面会把失败的任务挤出首屏。
  */
-const WIDE = '(min-width: 640px)'
-function useWide() {
-  return useSyncExternalStore(
-    (onChange) => {
-      const m = matchMedia(WIDE)
-      m.addEventListener('change', onChange)
-      return () => m.removeEventListener('change', onChange)
-    },
-    () => matchMedia(WIDE).matches,
-  )
-}
-
 export function Home() {
-  const wide = useWide()
   const active = useActiveJobs()
   const recent = useQuery({ queryKey: ['jobs', 'recent'], queryFn: () => api.jobs({ status: 'succeeded,failed,cancelled', size: 8 }), refetchInterval: 5000 })
 
@@ -111,11 +102,11 @@ export function Home() {
 
   return (
     <div className="space-y-4 sm:space-y-5">
+      <h1 className="sr-only">总览</h1>
       <QueueBanner />
       <StarError />
       <Summary running={running.length} queued={queued.length} />
       <GpuGrid />
-      {wide && <HostMetrics />}
 
       <ErrorBox error={active.error ?? recent.error} />
       <Card className="overflow-hidden [&>section+section]:border-t [&>section+section]:border-line">
@@ -145,7 +136,7 @@ export function Home() {
           {recent.isLoading ? <SkeletonRows rows={2} /> : <JobList jobs={done} showCopy empty={<GroupEmpty>还没有出炉的任务</GroupEmpty>} />}
         </Group>
       </Card>
-      {!wide && <HostMetrics />}
+      <HostMetrics />
     </div>
   )
 }

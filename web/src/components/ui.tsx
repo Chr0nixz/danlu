@@ -1,5 +1,5 @@
-import { CircleAlert, CircleCheck, CircleDashed, CircleSlash, CircleX, Info, LoaderCircle, TriangleAlert } from 'lucide-react'
-import { useEffect, useId, useRef, type AriaRole, type ButtonHTMLAttributes, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react'
+import { CircleAlert, CircleCheck, CircleDashed, CircleSlash, CircleX, Ellipsis, Info, LoaderCircle, TriangleAlert } from 'lucide-react'
+import { useEffect, useId, useRef, useState, type AriaRole, type ButtonHTMLAttributes, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
 import { jobStatusText, statusLabel, type Job, type JobStatus } from '@danlu/core'
@@ -71,12 +71,19 @@ export function Select({ className, children, ...rest }: ComponentProps<'select'
   )
 }
 
-export function Field({ label, hint, children, className }: { label: ReactNode; hint?: ReactNode; children: ReactNode; className?: string }) {
+/** 标签包着控件的简单字段。传 error 时在控件下方显示错误，控件用 aria-describedby 引用 errorId */
+export function Field({ label, hint, error, errorId, children, className }: { label: ReactNode; hint?: ReactNode; error?: ReactNode; errorId?: string; children: ReactNode; className?: string }) {
   return (
     <label className={cx('block space-y-1.5', className)}>
       <span className="block text-ui font-medium text-fg">{label}</span>
       {children}
       {hint && <span className="block text-xs leading-relaxed text-fg-3">{hint}</span>}
+      {error && (
+        <span id={errorId} className="flex items-start gap-1.5 text-xs leading-relaxed text-fail">
+          <CircleAlert className="mt-px size-3.5 shrink-0" aria-hidden />
+          {error}
+        </span>
+      )}
     </label>
   )
 }
@@ -290,9 +297,108 @@ export function Dialog({ title, children, footer, onClose }: { title: ReactNode;
         </h2>
         <div className="mt-1.5 space-y-2 text-ui leading-relaxed text-fg-2">{children}</div>
       </div>
-      <div className="flex gap-2 rounded-b-lg border-t border-line bg-subtle px-4 py-3 sm:justify-end sm:px-5 [&>*]:flex-1 sm:[&>*]:flex-none">{footer}</div>
+      <div className="flex gap-2 rounded-b-lg border-t border-line bg-subtle px-4 py-3 sm:justify-end sm:px-5 [&>*]:flex-1 max-sm:[&>*]:h-11 sm:[&>*]:flex-none">{footer}</div>
     </dialog>,
     document.body,
+  )
+}
+
+/**
+ * 更多操作：一个按钮展开一列操作，放一行放不下、又不常用的那些。Enter、空格或 ↓ 打开并聚焦第一项，
+ * ↑ ↓ Home End 在项之间移动，Esc 或点外面关闭（Esc 把焦点还给按钮），Tab 离开时关闭，点了某一项也关闭。
+ * 子元素是 role="menuitem" 的链接或按钮，样式用 menuItemClass。
+ */
+export function Menu({ label, children, className, buttonClassName }: { label: string; children: ReactNode; className?: string; buttonClassName?: string }) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  const button = useRef<HTMLButtonElement>(null)
+  const id = useId()
+  const items = () => [...(root.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+  useEffect(() => {
+    if (!open) return
+    items()[0]?.focus()
+    const outside = (e: PointerEvent) => !root.current?.contains(e.target as Node) && setOpen(false)
+    document.addEventListener('pointerdown', outside)
+    return () => document.removeEventListener('pointerdown', outside)
+  }, [open])
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!open) return
+    const list = items()
+    const i = list.indexOf(document.activeElement as HTMLElement)
+    const to = ({ ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: list.length - 1 } as Record<string, number>)[e.key]
+    if (to !== undefined) {
+      e.preventDefault()
+      list[(to + list.length) % list.length]?.focus()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      setOpen(false)
+      button.current?.focus()
+    } else if (e.key === 'Tab') setOpen(false)
+  }
+  return (
+    <div ref={root} className={cx('relative', className)} onKeyDown={onKeyDown}>
+      <button
+        ref={button}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        aria-label={label}
+        title={label}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown' && !open) {
+            e.preventDefault()
+            setOpen(true)
+          }
+        }}
+        className={cx(buttonClass('secondary', 'icon'), open && 'bg-hover', buttonClassName)}
+      >
+        <Ellipsis aria-hidden />
+      </button>
+      {open && (
+        <div
+          id={id}
+          role="menu"
+          aria-label={label}
+          onClick={() => setOpen(false)}
+          className="absolute right-0 top-full z-20 mt-1 min-w-44 rounded-md border border-line bg-surface py-1 shadow-[0_8px_24px_rgb(0_0_0/0.12)]"
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export const menuItemClass =
+  'flex h-11 w-full items-center gap-2.5 px-3 text-left text-sm text-fg-2 whitespace-nowrap hover:bg-hover hover:text-fg focus-visible:bg-hover focus-visible:text-fg focus-visible:-outline-offset-2 disabled:opacity-45 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-fg-3'
+
+/**
+ * 读屏播报。状态变化这类只靠颜色和整行闪一下表达的事，同时读一句话出来。整个应用只挂一个 <Announcer />，
+ * 同一轮里的几条合成一句，几秒后清空，下次同样的话还能再读。
+ */
+let announceTo: ((text: string) => void) | null = null
+export const announce = (text: string) => announceTo?.(text)
+
+export function Announcer() {
+  const [text, setText] = useState('')
+  useEffect(() => {
+    let timer = 0
+    announceTo = (t) => {
+      setText((prev) => (prev ? `${prev}；${t}` : t))
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => setText(''), 5000)
+    }
+    return () => {
+      announceTo = null
+      window.clearTimeout(timer)
+    }
+  }, [])
+  return (
+    <div role="status" aria-live="polite" className="sr-only">
+      {text}
+    </div>
   )
 }
 

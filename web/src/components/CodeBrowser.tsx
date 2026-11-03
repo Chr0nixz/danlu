@@ -13,7 +13,7 @@ import 'highlight.js/styles/github-dark.css'
 import { useMemo, useState } from 'react'
 import { ApiError, bytes, type SnapshotMeta } from '@danlu/core'
 import { api } from '../lib/api'
-import { buttonClass, Card, cx, ErrorBox, Segmented, Spinner } from './ui'
+import { buttonClass, Card, cx, ErrorBox, Segmented, Select, Spinner } from './ui'
 
 hljs.registerLanguage('python', python)
 hljs.registerLanguage('bash', bash)
@@ -151,7 +151,17 @@ function Files({ jobId, meta }: { jobId: number; meta: SnapshotMeta }) {
   if (!meta.files.length) return <div className="text-ui text-fg-3">快照里没有文件</div>
   return (
     <div className="grid overflow-hidden rounded-lg border border-line md:grid-cols-[260px_1fr]">
-      <div className="max-h-56 overflow-auto border-b border-line bg-surface py-1.5 text-ui md:max-h-[68vh] md:border-b-0 md:border-r">
+      {/* 手机：文件树换成系统的下拉选择，代码紧接在下面，打开代码标签页就能看到代码 */}
+      <div className="border-b border-line bg-surface p-2 md:hidden">
+        <Select aria-label="选择文件" value={sel} onChange={(e) => setSel(e.target.value)} className="h-11 font-mono text-[12.5px]">
+          {meta.files.map((f) => (
+            <option key={f.path} value={f.path}>
+              {f.path}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <div className="overflow-auto border-r border-line bg-surface py-1.5 text-ui max-md:hidden md:max-h-[68vh]">
         {sortedChildren(tree).map((n) => (
           <TreeNode key={n.path} node={n} depth={0} sel={sel} onSelect={setSel} defaultOpen={expandAll} />
         ))}
@@ -167,7 +177,9 @@ function TreeNode({ node, depth, sel, onSelect, defaultOpen }: { node: Node; dep
   if (node.isFile) {
     return (
       <button
+        type="button"
         onClick={() => onSelect(node.path)}
+        aria-current={sel === node.path || undefined}
         style={pad}
         className={cx(
           'flex w-full items-center gap-1.5 py-1 pr-2 text-left',
@@ -181,7 +193,7 @@ function TreeNode({ node, depth, sel, onSelect, defaultOpen }: { node: Node; dep
   }
   return (
     <div>
-      <button onClick={() => setOpen((o) => !o)} style={pad} className="flex w-full items-center gap-1 py-1 pr-2 text-left text-fg-2 hover:bg-subtle hover:text-fg">
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} style={pad} className="flex w-full items-center gap-1 py-1 pr-2 text-left text-fg-2 hover:bg-subtle hover:text-fg">
         {open ? <ChevronDown className="size-3.5 shrink-0 text-fg-3" /> : <ChevronRight className="size-3.5 shrink-0 text-fg-3" />}
         <Folder className="size-3.5 shrink-0 text-fg-3" />
         <span className="truncate">{node.name}</span>
@@ -205,7 +217,7 @@ function FileView({ jobId, path }: { jobId: number; path: string }) {
   }, [q.data])
   return (
     <div className="term min-w-0">
-      <div className="sticky top-0 border-b border-white/10 px-3 py-2 font-mono text-xs text-[#8f8f8f]">{path || '选择一个文件'}</div>
+      <div className="sticky top-0 border-b border-white/10 px-3 py-2 font-mono text-xs text-[#8f8f8f] max-md:hidden">{path || '选择一个文件'}</div>
       <div className="max-h-[68vh] overflow-auto p-3">
         {q.isLoading ? (
           <Spinner />
@@ -215,7 +227,8 @@ function FileView({ jobId, path }: { jobId: number; path: string }) {
           <span className="text-[#8f8f8f]">二进制文件，不显示内容（{bytes(q.data.size)}）</span>
         ) : (
           <pre className="flex">
-            <span className="shrink-0 select-none pr-4 text-right text-[#5a5a5a]" aria-hidden>
+            {/* 行号要和 traceback 对得上，是信息不是装饰：#7a7a7a 在终端底上 4.6:1 */}
+            <span className="shrink-0 select-none pr-4 text-right text-[#7a7a7a]" aria-hidden>
               {lines}
             </span>
             <code className="hljs min-w-0 flex-1" dangerouslySetInnerHTML={{ __html: html }} />

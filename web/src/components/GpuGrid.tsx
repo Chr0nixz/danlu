@@ -45,7 +45,8 @@ export function GpuGrid() {
   const mixed = models.size > 1
 
   return (
-    <div className="space-y-2">
+    <section aria-labelledby="gpu-heading" className="space-y-2">
+      <h2 id="gpu-heading" className="sr-only">GPU</h2>
       {data?.error && (
         <Alert tone="warn">
           GPU 信息读取失败，暂停分配新任务：{data.error}
@@ -67,7 +68,7 @@ export function GpuGrid() {
           <GpuPanel key={g.index} g={g} showModel={mixed} />
         ))}
       </div>
-    </div>
+    </section>
   )
 }
 
@@ -76,14 +77,18 @@ function Occupant({ g }: { g: GPU }) {
     <div className="min-w-0 space-y-0.5 text-ui">
       {g.job && (
         // 手机上把点击区撑高到 36px，不改变排版
-        <Link to={`/jobs/${g.job.id}`} className="flex min-w-0 items-center gap-1.5 text-fg hover:underline max-sm:-my-2 max-sm:py-2">
+        <Link to={`/jobs/${g.job.id}`} title={g.job.name} className="flex min-w-0 items-center gap-1.5 text-fg hover:underline max-sm:-my-2 max-sm:py-2">
           <StatusIcon status="running" className="size-3.5" />
           <span className="shrink-0 text-fg-3">#{g.job.id}</span>
           <span className="truncate font-medium">{g.job.name}</span>
         </Link>
       )}
       {g.external.map((p) => (
-        <div key={p.pid} className="flex min-w-0 items-center gap-1.5 text-warn" title="不是 danlu 启动的进程，这张卡不会被分配">
+        <div
+          key={p.pid}
+          className="flex min-w-0 items-center gap-1.5 text-warn"
+          title={`外部进程 ${p.pid}${p.user ? ` · ${p.user}` : ''}：不是 danlu 启动的进程，这张卡不会被分配`}
+        >
           <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
           <span className="truncate">
             外部进程 {p.pid}

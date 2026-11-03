@@ -91,7 +91,14 @@ export function Settings() {
           <KV k="HTTPS" v={{ 'local-ca': '本地 CA 证书', file: '自备证书', off: '未启用（仅限测试）' }[st.tls_mode] ?? st.tls_mode} />
           <KV k="用户名" v={st.username} />
           <KV k="版本" v={st.version} />
-          <KV k="两步验证" v={st.totp_enabled ? '已开启' : '未开启'} />
+          <KV
+            k="两步验证"
+            v={st.totp_enabled ? '已开启' : (
+              <>
+                未开启<span className="text-fg-3"> · 在服务器上运行 <code className="font-mono text-[12.5px]">danlu totp enable</code> 开启</span>
+              </>
+            )}
+          />
           <KV k="conda" v={st.conda_base ? <span className="font-mono text-[12.5px]">{st.conda_base}</span> : '未配置'} />
           <KV k="数据目录" v={<span className="font-mono text-[12.5px]">{st.data_dir}</span>} />
         </dl>
@@ -195,7 +202,7 @@ export function Settings() {
         )}
       </Section>
 
-      <Button variant="danger" className="w-full sm:w-auto" loading={logout.isPending} onClick={() => logout.mutate()}>
+      <Button className="w-full sm:w-auto" loading={logout.isPending} onClick={() => logout.mutate()}>
         <LogOut />
         退出登录
       </Button>
