@@ -663,6 +663,87 @@ check "关闭推送时测试接口说明尚未开启" [ "$(code -X POST -H 'Cont
 kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
 kill "$NTFY_PID"; wait "$NTFY_PID" 2>/dev/null; NTFY_PID=
 
+echo "== 机器体检 =="
+export DANLU_HOME=$T/home-s5
+S5_PORT=$((PORT + 5))
+"$BIN" init --yes --tls off --port $S5_PORT --password testpass123 --public-ip 127.0.0.1 --no-qr >/dev/null
+S5_ENTRANCE=$("$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')
+BASE=http://127.0.0.1:$S5_PORT JAR=$T/cookies-s5
+if env HOME="$T/userhome" "$BIN" doctor >"$T/doctor.txt" 2>&1; then
+  bad "doctor 文字输出有 fail 项时应以非 0 退出"
+else
+  check "doctor 文字输出有 fail 项时以非 0 退出，并指出端口未监听" grep -q '^\[FAIL\] 服务端口' "$T/doctor.txt"
+fi
+start_server
+curl -s -c "$JAR" -o /dev/null "$BASE/$S5_ENTRANCE"
+api -o /dev/null -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login"
+# 客户端按非 0 退出码丢弃 ssh 输出，所以 --json 有 fail 项（这里没有 systemd 单元）也要以 0 退出
+check "doctor --json 有 fail 项时仍以 0 退出" env HOME="$T/userhome" bash -c "'$BIN' doctor --json >'$T/doctor.json'"
+python3 - "$T/doctor.json" <<'PY' && ok "doctor --json 覆盖全部检查项，假 GPU 和端口正常，缺服务单元报 fail" || bad "doctor --json 内容不正确"
+import json,sys
+checks = json.load(open(sys.argv[1]))['checks']
+by = {c['id']: c for c in checks}
+assert len(by) == len(checks)
+assert all(c['level'] in ('ok', 'warn', 'fail') and c['title'] and c['detail'] for c in checks)
+for k in ('gpu', 'conda', 'service_unit', 'service_active', 'service_kill_mode', 'service_restart', 'linger',
+          'time_sync', 'data_disk', 'output_disk', 'server_cert', 'port', 'version'):
+    assert k in by, k
+assert by['gpu']['level'] == 'ok' and '4 张 GPU' in by['gpu']['detail']
+assert by['port']['level'] == 'ok' and by['service_unit']['level'] == 'fail'
+assert by['server_cert']['level'] == 'warn'  # HTTPS 未启用
+PY
+api "$BASE/api/doctor" >"$T/doctor-api.json"
+check "/api/doctor 与命令行返回同一组检查" python3 -c 'import json,sys; ids=lambda p: [c["id"] for c in json.load(open(p))["checks"]]; assert ids(sys.argv[1]) == ids(sys.argv[2])' "$T/doctor.json" "$T/doctor-api.json"
+rm -f "$T/jar-nosession"; curl -s -c "$T/jar-nosession" -o /dev/null "$BASE/$S5_ENTRANCE"
+check "没登录时 /api/doctor 返回 401" [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$T/jar-nosession" "$BASE/api/doctor")" = 401 ]
+
+echo "== 两步验证 =="
+totp_code() { # 密钥 [时间窗偏移]：按 RFC 6238 算出验证码
+  python3 -c 'import base64,hashlib,hmac,struct,sys,time
+s=sys.argv[1]; k=base64.b32decode(s+"="*(-len(s)%8)); n=int(time.time())//30+int(sys.argv[2])
+h=hmac.new(k,struct.pack(">Q",n),hashlib.sha1).digest(); o=h[-1]&15
+print("%06d"%((struct.unpack(">I",h[o:o+4])[0]&0x7fffffff)%1000000))' "$1" "${2:-0}"
+}
+totp_login() { # 验证码（可空）：用新的 cookie 文件过入口、登录，输出状态码，响应体写到 totp-login.json
+  rm -f "$T/jar-totp"
+  curl -s -c "$T/jar-totp" -o /dev/null "$BASE/$S5_ENTRANCE"
+  curl -s -b "$T/jar-totp" -o "$T/totp-login.json" -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d "{\"username\":\"admin\",\"password\":\"testpass123\",\"code\":\"$1\"}" "$BASE/api/login"
+}
+check "totp enable 输错验证码时不开启" bash -c "! echo 000000 | '$BIN' totp enable >/dev/null 2>&1"
+check "输错后设置页仍显示未开启" [ "$(api "$BASE/api/settings" | json "d['totp_enabled']")" = False ]
+# 读出终端打印的密钥，算出当前验证码输入确认；输出"密钥 确认用的验证码"
+read -r TOTP_SECRET TOTP_CONFIRM < <(python3 - "$BIN" <<'PY'
+import base64,hashlib,hmac,struct,subprocess,sys,time
+p = subprocess.Popen([sys.argv[1], 'totp', 'enable'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+secret = next(line.split()[-1] for line in p.stdout if line.startswith('密钥'))
+key = base64.b32decode(secret + '=' * (-len(secret) % 8))
+h = hmac.new(key, struct.pack('>Q', int(time.time()) // 30), hashlib.sha1).digest(); o = h[-1] & 15
+code = '%06d' % ((struct.unpack('>I', h[o:o+4])[0] & 0x7fffffff) % 1000000)
+out, _ = p.communicate(code + '\n')
+print(secret, code if p.returncode == 0 and '已开启两步验证' in out else 'failed')
+PY
+)
+check "totp enable 确认验证码后开启" [ "${#TOTP_SECRET}" = 32 -a -n "$TOTP_CONFIRM" -a "$TOTP_CONFIRM" != failed ]
+check "设置页显示两步验证已开启" [ "$(api "$BASE/api/settings" | json "d['totp_enabled']")" = True ]
+check "已开启时再次 enable 报错" bash -c "! echo 000000 | '$BIN' totp enable >/dev/null 2>&1"
+check "只填密码返回 401 和 need_totp" [ "$(totp_login '')" = 401 -a "$(json "d['need_totp']" <"$T/totp-login.json")" = True ]
+for _ in 1 2 3 4 5; do totp_login '' >/dev/null; done
+check "密码正确、未填验证码不计入登录限速" [ "$(totp_login '')" = 401 ]
+check "启用时确认过的验证码不能再用来登录" [ "$(totp_login "$TOTP_CONFIRM")" = 401 ]
+TOTP_NEXT=$(totp_code "$TOTP_SECRET" 1)
+check "下一个时间窗的验证码可以登录" [ "$(totp_login "$TOTP_NEXT")" = 200 ]
+check "同一时间窗的验证码不能用第二次" [ "$(totp_login "$TOTP_NEXT")" = 401 ]
+check "totp disable 关闭两步验证" bash -c "'$BIN' totp disable | grep -q '已关闭两步验证'"
+check "关闭后只填密码即可登录" [ "$(totp_login '')" = 200 ]
+
+echo "== 静态资源压缩 =="
+ASSET=$(curl -s -b "$JAR" "$BASE/" | grep -o '/assets/index-[^"]*\.js' | head -1)
+check "首页引用带哈希的入口脚本" [ -n "$ASSET" ]
+check "接受 gzip 时返回构建时预压缩的资源" bash -c "curl -s -D - -o '$T/asset.gz' -b '$JAR' -H 'Accept-Encoding: gzip' '$BASE$ASSET' | grep -qi '^content-encoding: gzip' && gzip -t '$T/asset.gz'"
+check "不接受 gzip 时返回原文" bash -c "! curl -s -D - -o /dev/null -b '$JAR' '$BASE$ASSET' | grep -qi '^content-encoding'"
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+
 echo "== HTTPS（本地 CA）=="
 export DANLU_HOME=$T/home-tls
 TLS_PORT=$((PORT + 1))
@@ -677,6 +758,12 @@ if command -v openssl >/dev/null; then
 fi
 check "curl 带上 CA 访问安全入口得到 302" [ "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$CA" "$TLS_URL")" = 302 ]
 check "不带 CA 时证书校验失败" bash -c "! curl -s -o /dev/null '$TLS_URL'"
+"$BIN" doctor --json >"$T/doctor-tls.json"
+python3 - "$T/doctor-tls.json" <<'PY' && ok "doctor 确认本地 CA 和服务器证书有效、证书包含 public_ip" || bad "doctor 的证书检查不正确"
+import json,sys
+by = {c['id']: c for c in json.load(open(sys.argv[1]))['checks']}
+assert all(by[k]['level'] == 'ok' for k in ('server_cert', 'ca_cert', 'cert_ip', 'port')), by
+PY
 
 echo
 echo "通过 $PASS 项，失败 $FAIL 项（临时目录 $T）"

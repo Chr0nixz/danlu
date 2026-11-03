@@ -24,6 +24,13 @@ type Disk struct {
 	Error          string   `json:"error,omitempty"`
 }
 
+func DiskSpace(path string) (total, available uint64, err error) {
+	_, total, available, err = boundedDoctorDiskStats(path)
+	return
+}
+
+var boundedDoctorDiskStats = boundedStat(diskStats, statTimeout)
+
 type DiskMonitor = sample.Sampler[[]Disk]
 
 func NewDiskMonitor(dataDir, outputRoot string, recent func() ([]string, error), warnBytes uint64) *DiskMonitor {

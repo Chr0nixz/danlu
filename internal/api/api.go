@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -21,6 +23,7 @@ import (
 
 	"danlu/internal/auth"
 	"danlu/internal/config"
+	"danlu/internal/doctor"
 	"danlu/internal/execx"
 	"danlu/internal/gpu"
 	"danlu/internal/logs"
@@ -63,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
 	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/doctor", s.doctor)
 
 	mux.HandleFunc("GET /api/gpus", s.gpus)
 	mux.HandleFunc("GET /api/queue", s.queue)
@@ -174,22 +178,32 @@ func noWriteTimeout(w http.ResponseWriter) {
 // ---------- 登录 ----------
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Username, Password string }
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
 	if !readJSON(w, r, &body) {
 		return
 	}
-	wait, err := s.Auth.Login(w, r, body.Username, body.Password)
+	wait, err := s.Auth.Login(w, r, body.Username, body.Password, body.Code)
 	switch {
 	case errors.Is(err, auth.ErrLocked):
 		mins := int(wait.Minutes()) + 1
 		writeErr(w, 429, fmt.Sprintf("尝试次数过多，请 %d 分钟后再试", mins))
 	case errors.Is(err, auth.ErrBadCredentials):
 		writeErr(w, 401, err.Error())
+	case errors.Is(err, auth.ErrNeedTOTP), errors.Is(err, auth.ErrBadTOTP):
+		writeJSON(w, 401, map[string]any{"error": err.Error(), "need_totp": true})
 	case err != nil:
 		writeErr(w, 500, err.Error())
 	default:
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}
+}
+
+func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, doctor.Run(r.Context(), s.Cfg, s.Paths, s.Version, APIVersion))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -792,11 +806,17 @@ func (s *Server) snapshotDownload(w http.ResponseWriter, r *http.Request) {
 // ---------- 设置 ----------
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	totpEnabled, err := auth.TOTPEnabled(s.Store)
+	if err != nil {
+		writeErr(w, 500, "读取两步验证状态失败")
+		return
+	}
 	resp := map[string]any{
 		"username": s.Auth.Username(), "version": s.Version, "tls_mode": s.Cfg.TLS.Mode,
 		"public_ip": s.Cfg.Server.PublicIP, "port": s.Cfg.Server.Port, "data_dir": s.Paths.Home,
 		"conda_base": s.Cfg.Runtime.CondaBase, "ca_available": false,
 		"terminal_enabled": s.Cfg.Terminal.Enabled,
+		"totp_enabled":     totpEnabled,
 	}
 	if s.Cfg.TLS.Mode == config.TLSLocalCA {
 		if fp, err := tlsutil.Fingerprint(tlsutil.FilesIn(s.Paths.TLS).CACert); err == nil {
@@ -914,6 +934,17 @@ func (s *Server) spa() http.Handler {
 			if fi, err := fs.Stat(s.Static, p); err == nil && !fi.IsDir() {
 				if strings.HasPrefix(p, "assets/") {
 					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					w.Header().Add("Vary", "Accept-Encoding")
+					if r.Header.Get("Range") == "" && acceptsGzip(r.Header.Get("Accept-Encoding")) {
+						if compressed, err := fs.ReadFile(s.Static, p+".gz"); err == nil {
+							w.Header().Set("Content-Encoding", "gzip")
+							if contentType := mime.TypeByExtension(filepath.Ext(p)); contentType != "" {
+								w.Header().Set("Content-Type", contentType)
+							}
+							http.ServeContent(w, r, p, fi.ModTime(), bytes.NewReader(compressed))
+							return
+						}
+					}
 				}
 				files.ServeHTTP(w, r)
 				return
@@ -923,4 +954,32 @@ func (s *Server) spa() http.Handler {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFileFS(w, r, s.Static, "index.html")
 	})
+}
+
+func acceptsGzip(header string) bool {
+	wildcard, explicit, accepted := false, false, false
+	for _, item := range strings.Split(header, ",") {
+		parts := strings.Split(strings.TrimSpace(item), ";")
+		name := strings.ToLower(strings.TrimSpace(parts[0]))
+		if name != "gzip" && name != "*" {
+			continue
+		}
+		q := 1.0
+		for _, param := range parts[1:] {
+			key, value, ok := strings.Cut(strings.TrimSpace(param), "=")
+			if ok && strings.EqualFold(key, "q") {
+				if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+					q = parsed
+				} else {
+					q = 0
+				}
+			}
+		}
+		if name == "gzip" {
+			explicit, accepted = true, q > 0
+		} else {
+			wildcard = q > 0
+		}
+	}
+	return accepted || !explicit && wildcard
 }

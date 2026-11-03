@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"danlu/internal/store"
+	"danlu/internal/totp"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -41,6 +42,12 @@ const (
 var (
 	ErrBadCredentials = errors.New("用户名或密码错误")
 	ErrLocked         = errors.New("尝试次数过多")
+	ErrNeedTOTP       = errors.New("请输入两步验证码")
+	ErrBadTOTP        = errors.New("验证码错误或已使用")
+)
+
+const (
+	totpSecretKey = "auth.totp_secret"
 )
 
 type Options struct {
@@ -109,6 +116,32 @@ func (a *Auth) CheckPassword(pw string) bool {
 }
 
 func (a *Auth) Username() string { return a.opt.Username }
+
+func TOTPEnabled(st *store.Store) (bool, error) {
+	secret, err := st.GetSetting(totpSecretKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return secret != "", err
+}
+
+func ConfigureTOTP(st *store.Store, secret string, acceptedStep int64) error {
+	if _, _, err := totp.Code(secret, time.Unix(acceptedStep*30, 0)); err != nil {
+		return err
+	}
+	created, err := st.SetSettingIfAbsentAndClaimTOTP(totpSecretKey, secret, acceptedStep)
+	if err != nil {
+		return err
+	}
+	if !created {
+		return errors.New("两步验证已经开启；如需更换，请先执行 danlu totp disable")
+	}
+	return nil
+}
+
+func DisableTOTP(st *store.Store) error {
+	return st.DeleteSettings(totpSecretKey)
+}
 
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +272,7 @@ func (a *Auth) CurrentSessionHash(r *http.Request) string {
 }
 
 // Login 校验用户名密码，成功后写会话 cookie。锁定时返回 ErrLocked 和剩余时间。
-func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass string) (time.Duration, error) {
+func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass, code string) (time.Duration, error) {
 	ip := ClientIP(r)
 	if until := a.store.LockedUntil(ip); !until.IsZero() {
 		return time.Until(until), ErrLocked
@@ -247,16 +280,28 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass string) 
 	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(a.opt.Username)) == 1
 	passOK := a.CheckPassword(pass) // 用户名错也照样跑一遍 bcrypt，避免按耗时猜用户名
 	if !userOK || !passOK {
-		locked, err := a.store.RecordFailure(ip, a.opt.MaxFailures, a.opt.Lockout)
+		return a.loginFailure(ip, user, "")
+	}
+	secret, err := a.store.GetSetting(totpSecretKey)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	if secret != "" {
+		if code == "" {
+			// 密码已经对了，这只是让登录页显示验证码框：不计失败，也不清零，免得正常登录被锁或绕过限速
+			return 0, ErrNeedTOTP
+		}
+		step, ok := totp.Verify(secret, code, time.Now())
+		if !ok {
+			return a.loginFailure(ip, user, "totp_invalid", ErrBadTOTP)
+		}
+		claimed, err := a.store.ClaimTOTPWindow(step)
 		if err != nil {
 			return 0, err
 		}
-		a.store.Audit(ip, "login_fail", "user="+user)
-		if locked {
-			a.store.Audit(ip, "login_locked", fmt.Sprintf("锁定 %s", a.opt.Lockout))
-			return a.opt.Lockout, ErrLocked
+		if !claimed {
+			return a.loginFailure(ip, user, "totp_replay", ErrBadTOTP)
 		}
-		return 0, ErrBadCredentials
 	}
 	_ = a.store.ResetFailures(ip)
 	_ = a.store.PurgeExpiredSessions()
@@ -275,6 +320,25 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass string) 
 	})
 	a.store.Audit(ip, "login_ok", "user="+user)
 	return 0, nil
+}
+
+func (a *Auth) loginFailure(ip, user, detail string, cause ...error) (time.Duration, error) {
+	locked, err := a.store.RecordFailure(ip, a.opt.MaxFailures, a.opt.Lockout)
+	if err != nil {
+		return 0, err
+	}
+	if detail != "" {
+		detail = " " + detail
+	}
+	a.store.Audit(ip, "login_fail", "user="+user+detail)
+	if locked {
+		a.store.Audit(ip, "login_locked", fmt.Sprintf("锁定 %s", a.opt.Lockout))
+		return a.opt.Lockout, ErrLocked
+	}
+	if len(cause) > 0 {
+		return 0, cause[0]
+	}
+	return 0, ErrBadCredentials
 }
 
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {

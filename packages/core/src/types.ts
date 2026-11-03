@@ -189,8 +189,21 @@ export interface Settings {
   conda_base: string
   ca_available: boolean
   terminal_enabled?: boolean
+  totp_enabled?: boolean
   ca_fingerprint?: string
   notify?: NotifyStatus
+}
+
+export interface DoctorCheck {
+  id: string
+  level: 'ok' | 'warn' | 'fail'
+  title: string
+  detail: string
+  fix?: string
+}
+
+export interface DoctorReport {
+  checks: DoctorCheck[]
 }
 
 export interface TerminalSession {

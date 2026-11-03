@@ -249,8 +249,11 @@ CPU 和内存由服务端每 2 秒采样一次，首页每 3 秒读取，并保�
 
 ```
 GET  /<entrance>                       通过安全入口（设置 gate cookie）
-POST /api/login        POST /api/logout
+POST /api/login                       用户名、密码；启用 TOTP 时还需 code
+                                      缺少或错误验证码返回 401 和 need_totp=true
+POST /api/logout
 GET  /api/me                           用户名、版本、api_version（接口版本号，不兼容的改动时加一）
+GET  /api/doctor                       机器体检，返回 checks 数组（ok / warn / fail）
 
 GET  /api/gpus                         GPU 状态和占用者；出错时含 error、error_since（unix 秒），恢复后清除
 GET  /api/queue                        队列状态（paused、kind、reason、since、job_id）
@@ -279,7 +282,7 @@ GET  /api/jobs/{id}/snapshot/download  下载 tar.gz
 
 GET  /api/settings/ca.crt              下载 CA 证书
 GET  /api/settings/qr.svg              完整安全入口地址的二维码（需登录，禁止缓存）
-GET  /api/settings                    服务配置摘要（含 terminal_enabled）和 notify（enabled、last_sent_at、last_error；不含 topic 和令牌）
+GET  /api/settings                    服务配置摘要（含 terminal_enabled、totp_enabled）和 notify（enabled、last_sent_at、last_error；不含 topic 和令牌）
 POST /api/settings/password            修改密码
 GET  /api/terminal                     列出终端会话
 POST /api/terminal                     打开终端（JSON {"job_id"?: number}；可在任务目录和 conda 环境中启动）
@@ -298,6 +301,8 @@ POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 任务对象增加 `starred` 和 `pruned_at`（未清理为 null）。列表支持 `starred=true`。清理中的任务不能改标星，返回 409；已清理任务的日志、SSE、日志下载及快照接口返回 410 和原因，环境包接口仍可用。
 
 `POST /api/jobs` 可用 `code_from` 指定源快照任务，提交的工作目录必须与源任务一致。任务列表支持 `workdir` 精确筛选，容许末尾斜杠。对比的 `env` 和 `packages` 中 `a` / `b` 为 null 表示该侧不存在。快照或包不可用时返回 `code.error` 或 `packages_error`，其他区块仍可用。
+
+`GET /api/doctor` 和 `danlu doctor --json` 调用同一套检查，覆盖 GPU/驱动、conda、systemd、linger、磁盘、证书、端口、时间同步和版本。`danlu doctor` 有 fail 项时退出码为 1；`--json` 跑完即返回 0，结论都在 JSON 里。TOTP 通过 `danlu totp enable|disable` 管理；登录验证码错误和重放都会计入 IP 登录限速，密码正确、还没填验证码的那一步不计入；设备令牌不受影响。
 
 排队任务视图增加 `wait_reason`，说明队首在等空闲卡、指定卡、外部进程或可信的 GPU/磁盘数据；其他排队任务说明在等前面的任务。面板列表和详情页会显示，启动后清除。
 
@@ -379,13 +384,14 @@ recent_workdirs(path, last_used_at)
 device_tokens(id, name, token_hash, created_at, last_used_at, last_ip)   -- 第 2 次迁移，同时加了 jobs(ended_at) 索引
 -- 第 3 次迁移：给 jobs 增加 inherit_bashrc，已有任务默认关闭
 -- 第 4 次迁移：给 jobs 增加 boot_id（占位时的开机标识）
-settings(key, value, updated_at)   -- 第 5 次迁移：运行时状态，含 auth.password_hash、queue.state
+settings(key, value, updated_at)   -- 第 5 次迁移：运行时状态，含 auth.password_hash、auth.totp_secret、queue.state
 events(id, ts, kind, key, job_id, data, dedupe_key) -- 第 6 次迁移：状态变化事件，与任务状态在同一事务写入
 -- 第 7 次迁移：给 jobs 增加失败分类、外部占卡、OOM 基线和 traceback 偏移
 -- 第 8 次迁移：给 jobs 增加 recipe_json，记录环境包哈希、机器信息或采集错误
 -- 第 9 次迁移：给 jobs 增加 output_dir
 -- 第 10 次迁移：给 jobs 增加 starred、pruned_at、pruning（清理认领标记，不通过 API 暴露）
 -- 第 11 次迁移：给 jobs 增加 code_from 和待恢复快照的索引
+totp_used_steps(step)              -- 第 12 次迁移：防止相同 TOTP 时间窗的验证码重放
 ```
 
 `jobs.notes` 与 `fail_reason` 分开：前者存残留进程清理等备注，后者只存失败原因。迁移会把旧记录中混在 `fail_reason` 里的清理说明移到 `notes`。`fail_kind` 保存失败分类；`ext_seen` 表示任务运行时是否观察到所用 GPU 上有其他进程；`oom_base` 保存启动前的 cgroup `oom_kill` 计数；`traceback_offset` 是日志末尾 4 MiB 内首个 traceback 的字节偏移；`recipe_json` 记录环境包哈希、机器信息或采集错误；`output_dir` 记录任务输出目录。`events` 用递增 id 作游标；job 事件由调度器和任务状态在同一事务写入，去重键保证重试不会重复。队列状态与 `queue_paused`、`queue_resumed` 事件同事务写入，重复暂停/恢复不重复记事件。快速失败的任务状态、结束事件、暂停状态和暂停事件一起提交；写库失败时内存中的暂停立即生效并重试，未保存成功前不能继续队列。`alert_raised`、`alert_cleared` 按 key 的最后一条事件恢复告警状态，只在边沿写入；`ntfy.cursor`、`ntfy.state`、`ntfy.last_sent_at`、`ntfy.last_error` 保存通知消费及发送状态，不新增迁移。
@@ -409,7 +415,7 @@ events(id, ts, kind, key, job_id, data, dedupe_key) -- 第 6 次迁移：状态�
 
 ```
 D:\Projects\danlu\
-  cmd/danlu/main.go        # 所有子命令：init / serve / info / token / passwd / entrance / port / cert /
+  cmd/danlu/main.go        # 所有子命令：init / serve / info / token / passwd / totp / doctor / entrance / port / cert /
                            #   restart / logs / replace / install-service；systemd unit 也在这里生成（带 KillMode=process）
   internal/config/         # 读写配置，init 交互流程
   internal/auth/           # 安全入口、登录、会话、设备令牌、限速、审计
@@ -419,6 +425,8 @@ D:\Projects\danlu\
   internal/procfs/         # 读 /proc：进程启动时间、环境变量里的任务标记
   internal/store/          # SQLite 和数据库迁移
   internal/trace/          # 从输出目录、任务清单或命令路径反查任务
+  internal/doctor/         # CLI 与设置页共用的服务器体检
+  internal/totp/           # RFC 6238 登录验证码
   internal/scheduler/      # 先来先跑的调度
   internal/runner/         # 包装脚本、进程组、接管、取消
   internal/snapshot/       # 代码快照、git 信息

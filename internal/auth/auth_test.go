@@ -2,9 +2,10 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"net/http/httptest"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"danlu/internal/store"
+	"danlu/internal/totp"
 )
 
 func setup(t *testing.T) (*httptest.Server, *http.Client) {
@@ -29,9 +31,9 @@ func setup(t *testing.T) (*httptest.Server, *http.Client) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Username, Password string }
+		var body struct{ Username, Password, Code string }
 		json.NewDecoder(r.Body).Decode(&body)
-		if _, err := a.Login(w, r, body.Username, body.Password); err != nil {
+		if _, err := a.Login(w, r, body.Username, body.Password, body.Code); err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte(err.Error()))
 		}
@@ -205,5 +207,92 @@ func TestPasswordInDatabase(t *testing.T) {
 	}
 	if a.CheckPassword("from-config") || !a.CheckPassword("new-password") {
 		t.Fatal("改密码应该立即生效，不用重启")
+	}
+}
+
+func TestTOTPLoginAndReplayProtection(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := SetPassword(st, "secret-pw"); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := totp.GenerateSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	confirm, confirmStep, err := totp.Code(secret, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 启用时确认用过的时间窗一并登记，之后不能再拿它登录
+	if err := ConfigureTOTP(st, secret, confirmStep); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := TOTPEnabled(st); err != nil || !on {
+		t.Fatalf("启用后应显示已开启: %v %v", on, err)
+	}
+	if err := ConfigureTOTP(st, secret, confirmStep+1); err == nil {
+		t.Fatal("已开启时再次启用应报错，不能悄悄换掉密钥")
+	}
+	a := New(st, Options{Entrance: "entry123", Secret: []byte("0123456789abcdef"), Username: "admin",
+		SessionTTL: time.Hour, MaxFailures: 3, Lockout: time.Minute})
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Username, Password, Code string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, err := a.Login(w, r, body.Username, body.Password, body.Code)
+		switch {
+		case errors.Is(err, ErrLocked):
+			w.WriteHeader(http.StatusTooManyRequests)
+		case err != nil:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	})
+	srv := httptest.NewServer(a.Middleware(mux))
+	defer srv.Close()
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar}
+	status(t, c, "GET", srv.URL+"/entry123", "")
+	login := func(code string) int {
+		t.Helper()
+		return status(t, c, "POST", srv.URL+"/api/login", `{"username":"admin","password":"secret-pw","code":"`+code+`"}`)
+	}
+	// 密码正确、还没填验证码只是让登录页显示输入框，次数再多也不能把人锁住
+	for i := range 4 {
+		if got := login(""); got != 401 {
+			t.Fatalf("第 %d 次缺验证码应返回 401 而不是锁定，实际 %d", i+1, got)
+		}
+	}
+	if got := login(confirm); got != 401 {
+		t.Fatalf("启用时确认用过的验证码不能再登录，实际 %d", got)
+	}
+	next, _, err := totp.Code(secret, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := login(next); got != 200 {
+		t.Fatalf("下一个时间窗的验证码应允许登录，实际 %d", got)
+	}
+	if got := login(next); got != 401 {
+		t.Fatalf("同一时间窗验证码不能重用，实际 %d", got)
+	}
+	// 错误验证码要计入限速：重放已记 1 次，再错 2 次达到上限
+	wrong, _, _ := totp.Code(secret, now.Add(-time.Hour))
+	if got := login(wrong); got != 401 {
+		t.Fatalf("错误验证码应返回 401，实际 %d", got)
+	}
+	if got := login(wrong); got != 429 {
+		t.Fatalf("验证码错误次数达到上限应锁定，实际 %d", got)
+	}
+
+	if err := DisableTOTP(st); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := TOTPEnabled(st); err != nil || on {
+		t.Fatalf("关闭后应显示未开启: %v %v", on, err)
 	}
 }

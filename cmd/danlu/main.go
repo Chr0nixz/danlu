@@ -36,6 +36,7 @@ import (
 	"danlu/internal/system"
 	"danlu/internal/terminal"
 	"danlu/internal/tlsutil"
+	"danlu/internal/totp"
 	"danlu/internal/webui"
 
 	"golang.org/x/term"
@@ -52,6 +53,7 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   info              显示访问地址等信息；--json 输出给桌面客户端读取；--no-qr 不打印二维码
   token             设备令牌（桌面客户端用）：create --name 名字 | list | revoke <id>
   passwd            修改登录密码
+  totp              两步验证：enable | disable
   entrance          查看安全入口；--reset 重新生成
   port <端口>       修改端口
   cert --regen      重新生成本地 CA 和证书（公网 IP 变化后使用）
@@ -61,6 +63,7 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   prune             按保留策略清理任务文件；--dry-run 预览，--older-than 72h 指定时长
   notify            手机推送：setup 配置订阅 | test 发一条测试
   trace <路径>      从 checkpoint 路径反查任务
+  doctor            检查服务器状态；--json 输出结构化结果
   update            用当前新程序更新正在运行的 danlu，自动定位并重启服务
   replace <路径>    升级用：用当前这个程序替换 <路径> 上的 danlu，然后重启服务
   version           显示版本
@@ -86,6 +89,8 @@ func main() {
 		err = cmdToken(args)
 	case "passwd":
 		err = cmdPasswd(args)
+	case "totp":
+		err = cmdTOTP(args)
 	case "entrance":
 		err = cmdEntrance(args)
 	case "port":
@@ -102,6 +107,8 @@ func main() {
 		err = cmdNotify(args)
 	case "trace":
 		err = cmdTrace(args)
+	case "doctor":
+		err = cmdDoctor(args)
 	case "update":
 		err = cmdUpdate(args)
 	case "replace":
@@ -602,6 +609,65 @@ func cmdPasswd(args []string) error {
 		}
 	}
 	fmt.Println("密码已修改，立即生效，所有已登录的会话已注销")
+	return nil
+}
+
+func cmdTOTP(args []string) error {
+	if len(args) != 1 || (args[0] != "enable" && args[0] != "disable") {
+		return errors.New("用法: danlu totp enable | danlu totp disable")
+	}
+	p := paths()
+	c, err := config.Load(p)
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(p.DB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	enabled, err := auth.TOTPEnabled(st)
+	if err != nil {
+		return err
+	}
+	if args[0] == "disable" {
+		if !enabled {
+			fmt.Println("两步验证尚未开启")
+			return nil
+		}
+		if err := auth.DisableTOTP(st); err != nil {
+			return err
+		}
+		st.Audit("local", "totp_disable", "")
+		fmt.Println("✔ 已关闭两步验证")
+		return nil
+	}
+	if enabled {
+		return errors.New("两步验证已经开启；如需更换，请先执行 danlu totp disable")
+	}
+	secret, err := totp.GenerateSecret()
+	if err != nil {
+		return err
+	}
+	uri := totp.ProvisioningURI(secret, c.Auth.Username)
+	qr, err := qrutil.Terminal(uri)
+	if err != nil {
+		return fmt.Errorf("生成设置二维码失败: %w", err)
+	}
+	fmt.Println("用验证器 App 扫描二维码，或手动输入密钥：")
+	fmt.Print(qr)
+	fmt.Println("密钥：", secret)
+	fmt.Print("输入验证器显示的 6 位验证码以确认启用: ")
+	line, _ := stdin.ReadString('\n')
+	step, ok := totp.Verify(secret, strings.TrimSpace(line), time.Now())
+	if !ok {
+		return errors.New("验证码无效；两步验证未开启，请重新执行 danlu totp enable")
+	}
+	if err := auth.ConfigureTOTP(st, secret, step); err != nil {
+		return err
+	}
+	st.Audit("local", "totp_enable", "")
+	fmt.Println("✔ 已开启两步验证。登录时需要密码和验证器验证码。")
 	return nil
 }
 

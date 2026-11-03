@@ -161,6 +161,8 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 | `danlu notify test` | 按当前配置发一条测试推送；设置页也有测试按钮 |
 | `danlu notify setup --disable` | 关闭推送，重启服务后生效 |
 | `danlu trace /path/to/checkpoint` | 从服务器上的产物路径反查任务，并打印面板链接 |
+| `danlu doctor` / `danlu doctor --json` | 检查 GPU、conda、systemd、磁盘、证书、端口和时间同步；有 fail 项时退出码为 1。`--json` 输出供工具读取，跑完即返回 0，结论看每项的 `level` |
+| `danlu totp enable` / `danlu totp disable` | 在服务器终端启用或关闭登录两步验证；启用时扫描二维码并确认一次验证码 |
 | `./danlu.new update` | 升级：自动定位运行中的旧程序，用当前新程序替换并重启服务 |
 | `danlu.new replace ~/bin/danlu` | 升级：用新程序原子替换旧程序并重启服务（桌面客户端升级时用的就是它） |
 | `journalctl --user -u danlu -f` | 查看服务日志 |
@@ -176,6 +178,10 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 - `run/`：每个任务的包装脚本、pid 和退出码；
 - `envs/`：按 SHA-256 去重保存的环境包清单；
 - `tls/`：本地 CA 和服务器证书。服务器证书快到期时，服务在运行中自己续签；`danlu cert --regen` 换的证书一分钟内生效，改了公网 IP 的话还是要重启，访问地址才会更新。
+
+启用两步验证后，`danlu.db` 还会保存验证器密钥和已使用过的验证码时间窗。密钥只通过服务器本地 CLI 管理，不会从 API 返回。
+
+构建脚本默认从 `git describe --tags --always --dirty` 读取版本：精确 tag 构建显示 tag，其他构建显示 `dev-<描述>`。也可通过 `VERSION` 环境变量指定版本。
 
 任务产物默认写入 `~/danlu-outputs/<项目>/<任务 id>-<任务名>/`。`runtime.output_root` 可在 `config.toml` 中改位置；训练命令可通过 `DANLU_OUTPUT_DIR` 写 checkpoint 等文件。danlu 会维护该目录中的 `danlu.json`，不会清理训练产物。
 

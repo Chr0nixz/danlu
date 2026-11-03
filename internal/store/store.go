@@ -130,6 +130,7 @@ var migrations = []string{
 	`ALTER TABLE jobs ADD COLUMN code_from INTEGER;
 	CREATE INDEX jobs_snapshot_users ON jobs(code_from)
 		WHERE code_from IS NOT NULL AND snapshot_ok=0 AND status IN ('queued','running');`,
+	`CREATE TABLE totp_used_steps (step INTEGER PRIMARY KEY);`,
 }
 
 // keepBackups 是升级前备份最多保留的份数。
@@ -223,6 +224,57 @@ func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO settings (key, value, updated_at) VALUES (?,?,?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, key, value, time.Now().Unix())
 	return err
+}
+
+// SetSettingIfAbsentAndClaimTOTP 同一事务中启用两步验证并登记确认时用过的时间窗。
+func (s *Store) SetSettingIfAbsentAndClaimTOTP(key, value string, step int64) (bool, error) {
+	if key == "" {
+		return false, errors.New("运行状态键不能为空")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO NOTHING`,
+		key, value, time.Now().Unix())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n == 0 {
+		return false, err
+	}
+	if _, err := tx.Exec("INSERT INTO totp_used_steps (step) VALUES (?)", step); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) ClaimTOTPWindow(step int64) (bool, error) {
+	res, err := s.db.Exec("INSERT INTO totp_used_steps (step) VALUES (?) ON CONFLICT(step) DO NOTHING", step)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *Store) DeleteSettings(keys ...string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, key := range keys {
+		if _, err := tx.Exec("DELETE FROM settings WHERE key=?", key); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ---------- jobs ----------

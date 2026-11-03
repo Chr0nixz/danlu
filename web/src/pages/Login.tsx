@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { Brand } from '../components/Layout'
 import { Button, Card, ErrorBox, Field, Input } from '../components/ui'
 import { api } from '../lib/api'
+import { ApiError } from '@danlu/core'
 
 export function Login() {
   const nav = useNavigate()
@@ -11,6 +12,8 @@ export function Login() {
   const dest = next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/login') ? next : '/'
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
+  const [code, setCode] = useState('')
+  const [needTotp, setNeedTotp] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [loading, setLoading] = useState(false)
 
@@ -19,9 +22,13 @@ export function Login() {
     setLoading(true)
     setError(null)
     try {
-      await api.login(username, password)
+      await api.login(username, password, needTotp ? code : undefined)
       nav(dest, { replace: true })
     } catch (err) {
+      if (err instanceof ApiError && err.needTotp) {
+        setNeedTotp(true)
+        setCode('')
+      }
       setError(err)
     } finally {
       setLoading(false)
@@ -46,6 +53,20 @@ export function Login() {
             <Field label="密码">
               <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" autoFocus required />
             </Field>
+            {needTotp && (
+              <Field label="两步验证码">
+                <Input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  autoFocus
+                  required
+                />
+              </Field>
+            )}
             <ErrorBox error={error} />
             <Button type="submit" variant="primary" className="w-full" loading={loading}>
               登录

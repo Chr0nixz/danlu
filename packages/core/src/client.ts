@@ -2,6 +2,7 @@ import type {
   HostMetricsResponse,
   AuditEntry,
   DeviceToken,
+  DoctorReport,
   GPU,
   Job,
   JobComparison,
@@ -47,7 +48,7 @@ export const API_VERSION = 1
 
 /** status 为 0 表示没连上服务器（网络错误、超时、证书不对） */
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public needTotp = false) {
     super(message)
   }
 }
@@ -77,7 +78,8 @@ export function createApi(t: Transport, opt: ApiOptions) {
       throw new ApiError(res.status, res.body.slice(0, 200) || `HTTP ${res.status}`)
     }
     if (res.status < 200 || res.status >= 300) {
-      throw new ApiError(res.status, (data as { error?: string })?.error ?? `HTTP ${res.status}`)
+      const error = data as { error?: string; need_totp?: boolean } | null
+      throw new ApiError(res.status, error?.error ?? `HTTP ${res.status}`, error?.need_totp === true)
     }
     return data as T
   }
@@ -100,7 +102,7 @@ export function createApi(t: Transport, opt: ApiOptions) {
   const post = <T,>(url: string, body: unknown = {}) => req<T>('POST', url, body)
 
   return {
-    login: (username: string, password: string) => post('/api/login', { username, password }),
+    login: (username: string, password: string, code?: string) => post('/api/login', { username, password, code }),
     logout: () => post('/api/logout'),
     me: () => get<Me>('/api/me'),
 
@@ -141,6 +143,7 @@ export function createApi(t: Transport, opt: ApiOptions) {
     snapshotDiff: (id: number) => get<{ diff: string }>(`/api/jobs/${id}/snapshot/diff`),
 
     settings: () => get<Settings>('/api/settings'),
+    doctor: () => get<DoctorReport>('/api/doctor'),
     testNotify: () => post<{ ok: boolean }>('/api/notify/test'),
     changePassword: (old: string, next: string) => post('/api/settings/password', { old, new: next }),
     audit: () => get<{ entries: AuditEntry[] }>('/api/audit'),
