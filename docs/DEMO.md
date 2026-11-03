@@ -22,7 +22,7 @@
 
 **不做（Demo 范围）**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。其中多服务器后来交给了桌面客户端（[CLIENT.md](CLIENT.md)），面板本身仍然不做；通知在 Demo 阶段未实现，后来纳入 S2 并已完成 ntfy 手机推送（见 [ROADMAP.md](ROADMAP.md) 和 [PHASES.md](PHASES.md)）。其他后续工作按路线图推进。
 
-**有余力再做**：两次任务之间的代码和参数 diff；"用当时的代码重跑"；申请 Let's Encrypt 的 IP 证书；TOTP 两步验证。其中 diff、"用当时的代码重跑"和 TOTP 已经排进下一阶段的定版线，IP 证书不再做，证书方案见 [ROADMAP.md](ROADMAP.md) 第 7.1 节。
+**后续定版**：机器体检和 TOTP 两步验证，见 [ROADMAP.md](ROADMAP.md)。
 
 ## 2. 使用流程
 
@@ -219,8 +219,12 @@ finish $?
 ### 4.7 重跑
 
 - 点"重跑"会打开提交表单，并预填原任务的名称（自动加上 `-r2` 这样的后缀）、工作目录、conda 环境、命令、GPU 设置和环境变量。改完后提交，新任务会记下 `rerun_of = <原任务 id>`。
-- **重跑使用的是工作目录里当前的代码**。如果当前 git commit 和原任务的快照不一致，或者当前有未提交的改动，表单上会给出提示。
-- "用当时的代码重跑"放在"有余力再做"里。
+- 重跑默认使用工作目录里的当前代码。git commit 变化或存在未提交改动时，表单会提示。
+- 切换到源任务的快照后，在 `run/<id>/code/` 恢复代码。数据、权重等快照之外的文件通过链接从原目录读取，绝对路径仍指向原处。新任务记录 `code_from` 和需留意的补齐文件，并照常记录这次运行的环境。
+
+### 4.8 对比任务
+
+在任务列表点“对比”并勾选两个任务，或从详情页选同目录的近期任务。对比页显示命令、环境变量、代码、包版本和机器信息。展开文件查看文本差异。快照被清理后，任务记录和环境仍可用于对比。
 
 ## 5. 页面（同时适配电脑和手机）
 
@@ -231,7 +235,8 @@ finish $?
 | **新建 / 重跑** | 标签在左、输入框在右的表单；Ctrl+Enter 提交 | 上下排列的表单 |
 | **任务详情** | 标题和"W&B / 重跑 / 取消"按钮；一排关键信息（状态、GPU、环境、时长、代码版本、时间）；下面三个标签页：日志、详情、代码 | 同左，关键信息排成两列 |
 | **终端** | 可在最多 3 个会话间切换；支持调整字号和断线重连 | 同左，增加命令输入框与常用控制键 |
-| **全部任务** | 和首页同样的任务行，支持按状态筛选、搜索（快捷键 /）、分页 | 同左，每个任务两行 |
+| **全部任务** | 和首页同样的任务行，支持按状态筛选、搜索（快捷键 /）、分页；粘贴绝对路径可反查任务 | 同左，每个任务两行 |
+| **任务对比** | 并列显示两次运行，展开文件查看文本差异 | 各区块上下排列，命令分上下两栏 |
 | **设置** | 服务信息、外观（跟随系统 / 浅色 / 深色）、下载 CA 证书、修改密码、审计日志 | 同左 |
 
 GPU 卡片显示的内容：卡号、型号、利用率条、显存（已用/总量）、温度、功耗，以及当前占用者（"任务名"链接 / "外部进程 pid" / "空闲"）。
@@ -258,6 +263,8 @@ GET  /api/workdirs/recent              最近用过的工作目录
 
 GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 fail_kind、error_line 和 traceback_offset）
 GET  /api/jobs?order=ended&before=&before_id=  只要已结束的任务，按结束时间倒序；before / before_id 是上一页最后一条的结束时间和 id（游标翻页，多台服务器的历史按时间合并时用）
+GET  /api/trace?path=                  从绝对路径反查任务，返回匹配来源（output_dir、danlu_json、guess）
+GET  /api/compare?a=&b=                两次任务的命令词、环境变量差异、快照文件差异、包版本及配方
 POST /api/jobs                         提交任务
 GET  /api/jobs/{id}                    任务详情
 GET  /api/jobs/{id}/env                任务记录的环境包列表原文
@@ -289,6 +296,8 @@ POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 `GET /api/system` 的 `disks` 数组包含 `id`（设备号）、`path`、`paths`（同一分区上被监测的路径）、`total_bytes`、`available_bytes`（普通用户实际可用）、`data`、`warn` 和可选的 `error`。`disks_updated_at` 是采样时间；整个磁盘采集失败或过期时增加 `disks_error`，不影响 CPU/内存数据。
 
 任务对象增加 `starred` 和 `pruned_at`（未清理为 null）。列表支持 `starred=true`。清理中的任务不能改标星，返回 409；已清理任务的日志、SSE、日志下载及快照接口返回 410 和原因，环境包接口仍可用。
+
+`POST /api/jobs` 可用 `code_from` 指定源快照任务，提交的工作目录必须与源任务一致。任务列表支持 `workdir` 精确筛选，容许末尾斜杠。对比的 `env` 和 `packages` 中 `a` / `b` 为 null 表示该侧不存在。快照或包不可用时返回 `code.error` 或 `packages_error`，其他区块仍可用。
 
 排队任务视图增加 `wait_reason`，说明队首在等空闲卡、指定卡、外部进程或可信的 GPU/磁盘数据；其他排队任务说明在等前面的任务。面板列表和详情页会显示，启动后清除。
 
@@ -360,7 +369,7 @@ enabled = true               # 网页终端；关闭后终端 API 返回 404，�
 jobs(id, name, workdir, conda_env, cmd, env_json, inherit_bashrc,
      gpus_req, gpus_pinned, gpus_assigned, status,
      master_port, pid, pid_starttime, exit_code, fail_reason, fail_kind, notes, ext_seen, oom_base,
-     traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, cancel_requested, tracker_url,
+     traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, cancel_requested, tracker_url,
      git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of,
      created_at, started_at, ended_at)
 sessions(token_hash, created_at, expires_at, ip, user_agent)
@@ -376,6 +385,7 @@ events(id, ts, kind, key, job_id, data, dedupe_key) -- 第 6 次迁移：状态�
 -- 第 8 次迁移：给 jobs 增加 recipe_json，记录环境包哈希、机器信息或采集错误
 -- 第 9 次迁移：给 jobs 增加 output_dir
 -- 第 10 次迁移：给 jobs 增加 starred、pruned_at、pruning（清理认领标记，不通过 API 暴露）
+-- 第 11 次迁移：给 jobs 增加 code_from 和待恢复快照的索引
 ```
 
 `jobs.notes` 与 `fail_reason` 分开：前者存残留进程清理等备注，后者只存失败原因。迁移会把旧记录中混在 `fail_reason` 里的清理说明移到 `notes`。`fail_kind` 保存失败分类；`ext_seen` 表示任务运行时是否观察到所用 GPU 上有其他进程；`oom_base` 保存启动前的 cgroup `oom_kill` 计数；`traceback_offset` 是日志末尾 4 MiB 内首个 traceback 的字节偏移；`recipe_json` 记录环境包哈希、机器信息或采集错误；`output_dir` 记录任务输出目录。`events` 用递增 id 作游标；job 事件由调度器和任务状态在同一事务写入，去重键保证重试不会重复。队列状态与 `queue_paused`、`queue_resumed` 事件同事务写入，重复暂停/恢复不重复记事件。快速失败的任务状态、结束事件、暂停状态和暂停事件一起提交；写库失败时内存中的暂停立即生效并重试，未保存成功前不能继续队列。`alert_raised`、`alert_cleared` 按 key 的最后一条事件恢复告警状态，只在边沿写入；`ntfy.cursor`、`ntfy.state`、`ntfy.last_sent_at`、`ntfy.last_error` 保存通知消费及发送状态，不新增迁移。
@@ -408,6 +418,7 @@ D:\Projects\danlu\
   internal/system/         # 从 /proc/stat 和 /proc/meminfo 采集 CPU 与内存
   internal/procfs/         # 读 /proc：进程启动时间、环境变量里的任务标记
   internal/store/          # SQLite 和数据库迁移
+  internal/trace/          # 从输出目录、任务清单或命令路径反查任务
   internal/scheduler/      # 先来先跑的调度
   internal/runner/         # 包装脚本、进程组、接管、取消
   internal/snapshot/       # 代码快照、git 信息

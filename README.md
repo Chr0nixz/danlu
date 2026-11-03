@@ -7,6 +7,7 @@
 - danlu 重启时训练不中断；取消时连 torchrun 的 worker 一起结束
 - 实时日志（tqdm 进度条原地刷新），自动识别 W&B / SwanLab 链接
 - 每次任务启动时保存代码快照（git commit + 未提交的改动 + 文件本身）
+- 从 checkpoint 路径找到任务，对比两次运行，也可用旧快照重跑
 - 记录运行环境，并为每次任务生成独立输出目录和 `danlu.json` 清单
 - 公网访问：随机端口 + 安全入口 + 密码 + HTTPS（本地 CA，不需要域名）
 - 界面电脑和手机都能用：首页一屏看清在跑什么、有没有失败、哪张卡空着；跟随系统深浅色；快捷键 `N` 新建任务、`/` 搜索、`Ctrl+Enter` 提交
@@ -159,6 +160,7 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 | `danlu notify setup` | 配置手机推送，打印随机订阅地址和二维码；重复运行保留原订阅，`--new-topic` 轮换 |
 | `danlu notify test` | 按当前配置发一条测试推送；设置页也有测试按钮 |
 | `danlu notify setup --disable` | 关闭推送，重启服务后生效 |
+| `danlu trace /path/to/checkpoint` | 从服务器上的产物路径反查任务，并打印面板链接 |
 | `./danlu.new update` | 升级：自动定位运行中的旧程序，用当前新程序替换并重启服务 |
 | `danlu.new replace ~/bin/danlu` | 升级：用新程序原子替换旧程序并重启服务（桌面客户端升级时用的就是它） |
 | `journalctl --user -u danlu -f` | 查看服务日志 |

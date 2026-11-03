@@ -1,11 +1,42 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 )
+
+func TestSnapshotRerunAndPruneAreMutuallyExclusive(t *testing.T) {
+	s := openTest(t)
+	at := time.Now().Unix()
+	source := &Job{Name: "原任务", Workdir: "/w", Cmd: "true", Status: StatusSucceeded}
+	if err := s.InsertJob(source); err != nil {
+		t.Fatal(err)
+	}
+	source.SnapshotOK, source.EndedAt = true, &at
+	if err := s.SaveJob(source); err != nil {
+		t.Fatal(err)
+	}
+	child := &Job{Name: "快照重跑", Workdir: "/w", Cmd: "true", Status: StatusQueued, CodeFrom: &source.ID}
+	if err := s.InsertJob(child); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ClaimPrune(source.ID); err != nil || ok {
+		t.Fatalf("排队任务的源快照被认领: %v, %v", ok, err)
+	}
+	child.Status, child.SnapshotOK = StatusRunning, true
+	if err := s.SaveJob(child); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ClaimPrune(source.ID); err != nil || !ok {
+		t.Fatalf("重跑已有自己的快照时应能认领源任务: %v, %v", ok, err)
+	}
+	if err := s.InsertJob(&Job{Name: "再次重跑", Workdir: "/w", Cmd: "true", Status: StatusQueued, CodeFrom: &source.ID}); !errors.Is(err, ErrSnapshotUnavailable) {
+		t.Fatalf("认领后仍可登记源快照: %v", err)
+	}
+}
 
 func TestRetentionFieldsIndependentFromSchedulerSave(t *testing.T) {
 	s := openTest(t)
@@ -92,8 +123,7 @@ func TestRetentionMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	j := &Job{Name: "旧任务", Workdir: "/w", Cmd: "x", Status: StatusQueued}
-	if err := s.InsertJob(j); err != nil {
+	if _, err := s.db.Exec("INSERT INTO jobs(id,name,workdir,cmd,status,created_at) VALUES (1,'旧任务','/w','x','queued',0)"); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -103,7 +133,7 @@ func TestRetentionMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	got, err := s.GetJob(j.ID)
+	got, err := s.GetJob(1)
 	if err != nil || got.Starred || got.PrunedAt != nil || got.Pruning {
 		t.Fatalf("旧任务迁移错误: %+v %v", got, err)
 	}

@@ -33,6 +33,7 @@ import (
 	"danlu/internal/system"
 	"danlu/internal/terminal"
 	"danlu/internal/tlsutil"
+	jobtrace "danlu/internal/trace"
 )
 
 // APIVersion 是接口的版本号。接口有不兼容的改动时加一，桌面客户端据此提示哪台服务器需要升级。
@@ -53,7 +54,8 @@ type Server struct {
 	Static   fs.FS
 	Version  string
 
-	conda condaCache
+	conda       condaCache
+	comparisons comparisonCache
 }
 
 func (s *Server) Handler() http.Handler {
@@ -73,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workdirs/recent", s.recentWorkdirs)
 
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
+	mux.HandleFunc("GET /api/trace", s.tracePath)
+	mux.HandleFunc("GET /api/compare", s.compareJobs)
 	mux.HandleFunc("POST /api/jobs", s.submitJob)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /api/jobs/{id}/env", s.jobEnv)
@@ -462,7 +466,7 @@ func (s *Server) views(jobs []*store.Job) []jobView {
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := store.JobFilter{Query: strings.TrimSpace(q.Get("q")), Starred: q.Get("starred") == "true" || q.Get("starred") == "1"}
+	f := store.JobFilter{Query: strings.TrimSpace(q.Get("q")), Workdir: q.Get("workdir"), Starred: q.Get("starred") == "true" || q.Get("starred") == "1"}
 	if st := q.Get("status"); st != "" {
 		f.Statuses = strings.Split(st, ",")
 	}
@@ -484,6 +488,25 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"jobs": s.views(jobs), "total": total, "page": page, "size": size})
+}
+
+func (s *Server) tracePath(w http.ResponseWriter, r *http.Request) {
+	root, err := config.ResolvePath(s.Cfg.Runtime.OutputRoot)
+	if err != nil {
+		writeErr(w, 500, "解析输出目录失败: "+err.Error())
+		return
+	}
+	result, err := jobtrace.Search(s.Store, root, r.URL.Query().Get("path"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, jobtrace.ErrPathRequired) || errors.Is(err, jobtrace.ErrPathTooLong) || errors.Is(err, jobtrace.ErrPathNotAbs) {
+			status = http.StatusBadRequest
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(w, 200, result)
 }
 
 func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {

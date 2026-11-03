@@ -60,6 +60,7 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   logs [-n 行数]    查看服务日志（journalctl）
   prune             按保留策略清理任务文件；--dry-run 预览，--older-than 72h 指定时长
   notify            手机推送：setup 配置订阅 | test 发一条测试
+  trace <路径>      从 checkpoint 路径反查任务
   update            用当前新程序更新正在运行的 danlu，自动定位并重启服务
   replace <路径>    升级用：用当前这个程序替换 <路径> 上的 danlu，然后重启服务
   version           显示版本
@@ -99,6 +100,8 @@ func main() {
 		err = cmdPrune(args)
 	case "notify":
 		err = cmdNotify(args)
+	case "trace":
+		err = cmdTrace(args)
 	case "update":
 		err = cmdUpdate(args)
 	case "replace":
@@ -304,6 +307,7 @@ func cmdServe(args []string) error {
 	defer terminals.Close()
 	mgr := scheduler.New(st, mon, run, scheduler.Options{
 		SnapshotDir: p.Snapshots,
+		RunRoot:     p.Run,
 		OutputRoot:  outputRoot,
 		Snapshot: snapshot.Options{
 			MaxFile:  int64(c.Runtime.SnapshotMaxFileMB) << 20,

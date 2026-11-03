@@ -190,8 +190,12 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 		return r, err
 	}
 	var protected []string
+	pinnedSnapshots := map[int64]bool{}
 	outputs := []string{p.OutputRoot}
 	for _, j := range jobs {
+		if j.CodeFrom != nil && !j.SnapshotOK && !j.Finished() {
+			pinnedSnapshots[*j.CodeFrom] = true
+		}
 		if j.OutputDir != "" {
 			outputs = append(outputs, j.OutputDir)
 		}
@@ -240,7 +244,7 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 		if ctx.Err() != nil {
 			return r, ctx.Err()
 		}
-		if !j.Finished() || j.EndedAt == nil || j.Starred || j.PrunedAt != nil || (j.Recipe != nil && j.Recipe.Pending) {
+		if !j.Finished() || j.EndedAt == nil || j.Starred || j.PrunedAt != nil || pinnedSnapshots[j.ID] || (j.Recipe != nil && j.Recipe.Pending) {
 			continue
 		}
 		reason := ""

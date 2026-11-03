@@ -127,6 +127,9 @@ var migrations = []string{
 	`ALTER TABLE jobs ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE jobs ADD COLUMN pruned_at INTEGER;
 	ALTER TABLE jobs ADD COLUMN pruning INTEGER NOT NULL DEFAULT 0;`,
+	`ALTER TABLE jobs ADD COLUMN code_from INTEGER;
+	CREATE INDEX jobs_snapshot_users ON jobs(code_from)
+		WHERE code_from IS NOT NULL AND snapshot_ok=0 AND status IN ('queued','running');`,
 }
 
 // keepBackups 是升级前备份最多保留的份数。
@@ -260,6 +263,7 @@ type Job struct {
 	SnapshotOK      bool              `json:"snapshot_ok"`
 	SnapshotNote    string            `json:"snapshot_note"`
 	RerunOf         *int64            `json:"rerun_of"`
+	CodeFrom        *int64            `json:"code_from,omitempty"`
 	CreatedAt       int64             `json:"created_at"`
 	StartedAt       *int64            `json:"started_at"`
 	EndedAt         *int64            `json:"ended_at"`
@@ -293,7 +297,7 @@ func (j *Job) Finished() bool {
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
 	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
-	inherit_bashrc, boot_id, notes, fail_kind, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning`
+	inherit_bashrc, boot_id, notes, fail_kind, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -304,12 +308,12 @@ func scanJob(r scanner) (*Job, error) {
 		exit                                         sql.NullInt64
 		rerun, started, ended, traceback             sql.NullInt64
 		pidStart                                     int64
-		pruned                                       sql.NullInt64
+		pruned, codeFrom                             sql.NullInt64
 	)
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
 		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
-		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning)
+		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -329,6 +333,9 @@ func scanJob(r scanner) (*Job, error) {
 	}
 	if rerun.Valid {
 		j.RerunOf = &rerun.Int64
+	}
+	if codeFrom.Valid {
+		j.CodeFrom = &codeFrom.Int64
 	}
 	if started.Valid {
 		j.StartedAt = &started.Int64
@@ -353,17 +360,29 @@ func scanJob(r scanner) (*Job, error) {
 	return &j, nil
 }
 
+var ErrSnapshotUnavailable = errors.New("源任务的代码快照不可用")
+
 func (s *Store) InsertJob(j *Job) error {
 	if j.CreatedAt == 0 {
 		j.CreatedAt = time.Now().Unix()
 	}
 	env, _ := json.Marshal(j.Env)
+	// 在同一条写语句里核对源快照和登记引用，与清理器的认领互斥。
 	res, err := s.db.Exec(`INSERT INTO jobs (name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned,
-		status, rerun_of, created_at, inherit_bashrc) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		status, rerun_of, created_at, inherit_bashrc, code_from)
+		SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR EXISTS (
+			SELECT 1 FROM jobs WHERE id=? AND snapshot_ok=1 AND pruned_at IS NULL AND pruning=0
+				AND (pid>0 OR ended_at IS NOT NULL)
+		)`,
 		j.Name, j.Workdir, j.CondaEnv, j.Cmd, string(env), j.GPUsReq, JoinInts(j.GPUsPinned),
-		j.Status, j.RerunOf, j.CreatedAt, j.InheritBashrc)
+		j.Status, j.RerunOf, j.CreatedAt, j.InheritBashrc, j.CodeFrom, j.CodeFrom, j.CodeFrom)
 	if err != nil {
 		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrSnapshotUnavailable
 	}
 	j.ID, err = res.LastInsertId()
 	return err
@@ -418,12 +437,26 @@ func (s *Store) JobsByStatus(status string) ([]*Job, error) {
 	return s.queryJobs("SELECT "+jobCols+" FROM jobs WHERE status=? ORDER BY id", status)
 }
 
+// JobsByWorkdirs 返回工作目录等于 paths 中任一路径的任务。
+func (s *Store) JobsByWorkdirs(paths []string) ([]*Job, error) {
+	if len(paths) == 0 {
+		return []*Job{}, nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(paths)), ",")
+	args := make([]any, len(paths))
+	for i, path := range paths {
+		args[i] = path
+	}
+	return s.queryJobs("SELECT "+jobCols+" FROM jobs WHERE workdir IN ("+marks+") ORDER BY id DESC", args...)
+}
+
 func (s *Store) JobsWithPendingRecipe() ([]*Job, error) {
 	return s.queryJobs("SELECT " + jobCols + " FROM jobs WHERE COALESCE(json_extract(recipe_json,'$.pending'),0)=1 ORDER BY id")
 }
 
 type JobFilter struct {
 	Statuses   []string
+	Workdir    string
 	Query      string
 	EndedAfter int64 // 只要这个时间（unix 秒）之后结束的任务；0 表示不限
 	Starred    bool
@@ -441,6 +474,10 @@ type JobFilter struct {
 func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
 	var where []string
 	var args []any
+	if f.Workdir != "" {
+		where = append(where, "rtrim(workdir,'/')=rtrim(?,'/')")
+		args = append(args, f.Workdir)
+	}
 	if f.Starred {
 		where = append(where, "starred=1")
 	}

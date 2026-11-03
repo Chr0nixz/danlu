@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"danlu/internal/execx"
 )
@@ -79,9 +80,13 @@ var skipDirs = map[string]bool{
 	".ruff_cache": true, ".idea": true,
 }
 
-func ArchivePath(dir string, id int64) string { return filepath.Join(dir, fmt.Sprintf("%d.tar.gz", id)) }
-func metaPath(dir string, id int64) string    { return filepath.Join(dir, fmt.Sprintf("%d.meta.json", id)) }
-func diffPath(dir string, id int64) string    { return filepath.Join(dir, fmt.Sprintf("%d.diff", id)) }
+func ArchivePath(dir string, id int64) string {
+	return filepath.Join(dir, fmt.Sprintf("%d.tar.gz", id))
+}
+func metaPath(dir string, id int64) string {
+	return filepath.Join(dir, fmt.Sprintf("%d.meta.json", id))
+}
+func diffPath(dir string, id int64) string { return filepath.Join(dir, fmt.Sprintf("%d.diff", id)) }
 
 // Take 生成快照。超时（ctx）或出错时删除半成品并返回错误。
 func Take(ctx context.Context, workdir, dir string, id int64, opt Options) (*Meta, error) {
@@ -343,7 +348,7 @@ func ReadFile(dir string, id int64, p string) (*FileContent, error) {
 		}
 		fc := &FileContent{Path: p, Size: h.Size}
 		head := b[:min(len(b), 8000)]
-		if bytes.IndexByte(head, 0) >= 0 {
+		if bytes.IndexByte(head, 0) >= 0 || (int64(len(b)) == h.Size && !utf8.Valid(b)) {
 			fc.Binary = true
 		} else {
 			fc.Content = string(b)

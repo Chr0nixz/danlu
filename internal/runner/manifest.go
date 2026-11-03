@@ -22,6 +22,7 @@ type manifestDocument struct {
 	Name          string            `json:"name"`
 	Server        string            `json:"server,omitempty"`
 	Workdir       string            `json:"workdir"`
+	CodeFrom      *int64            `json:"code_from,omitempty"`
 	OutputDir     string            `json:"output_dir"`
 	Command       string            `json:"command"`
 	Environment   map[string]string `json:"environment"`
@@ -88,6 +89,7 @@ func ManifestJSON(job *store.Job) ([]byte, error) {
 		Name:          job.Name,
 		Server:        server,
 		Workdir:       job.Workdir,
+		CodeFrom:      job.CodeFrom,
 		OutputDir:     job.OutputDir,
 		Command:       job.Cmd,
 		Environment:   job.Env,

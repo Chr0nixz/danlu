@@ -47,6 +47,30 @@ func newExec() *fakeExec {
 		packages: []byte("python==3.12\n")}
 }
 
+func TestSnapshotRerunDoesNotStartWhenRestoreFails(t *testing.T) {
+	h := newHarness(t, 1)
+	h.m.opt.SnapshotDir, h.m.opt.RunRoot = t.TempDir(), t.TempDir()
+	source := h.job(h.add(0))
+	at := time.Now().Unix()
+	source.Status, source.SnapshotOK, source.EndedAt = store.StatusSucceeded, true, &at
+	if err := h.st.SaveJob(source); err != nil {
+		t.Fatal(err)
+	}
+	// 数据库仍记录有快照，但文件已经不在磁盘上。
+	j, err := h.m.Submit(SubmitReq{Workdir: "/w", Cmd: "python train.py", CodeFrom: &source.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.tick()
+	got := h.job(j.ID)
+	if got.Status != store.StatusFailed || got.FailKind != "start" || !strings.Contains(got.FailReason, "恢复任务") {
+		t.Fatalf("恢复错误未记录为启动失败: %+v", got)
+	}
+	if len(h.ex.startedIDs()) != 0 {
+		t.Fatal("恢复失败的任务启动了进程")
+	}
+}
+
 // 假进程的启动时间是 pid*10
 func startOf(pid int) uint64 { return uint64(pid * 10) }
 

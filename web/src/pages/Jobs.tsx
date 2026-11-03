@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronLeft, ChevronRight, Search, Star, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, GitCompareArrows, Search, Star, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
-import { JobList, JobListHeader } from '../components/JobRow'
+import { JobList, JobListHeader, JobRow } from '../components/JobRow'
 import { QueueBanner } from '../components/QueueControls'
 import { StarError } from '../components/StarButton'
 import { Button, buttonClass, Card, ErrorBox, Input, Kbd, Segmented, SkeletonRows, StatusIcon, Empty } from '../components/ui'
-import { now, type JobStatus } from '@danlu/core'
+import { now, type Job, type JobStatus } from '@danlu/core'
 import { api } from '../lib/api'
 import { RECENT_SEC } from '../lib/queries'
 
@@ -32,6 +32,23 @@ export function Jobs() {
   const q = params.get('q') ?? ''
   const searchRef = useRef<HTMLInputElement>(null)
   const location = useLocation()
+  const [selection, setSelection] = useState<number[] | null>(null)
+  const selectJob = (job: Job) => {
+    if (!selection) return undefined
+    const checked = selection.includes(job.id)
+    return (
+      <label className="relative z-10 -ml-2 grid size-10 shrink-0 place-items-center sm:ml-0 sm:size-8">
+        <input
+          type="checkbox"
+          className="size-4 disabled:opacity-40"
+          aria-label={`选择任务 #${job.id} ${job.name}`}
+          checked={checked}
+          disabled={!checked && selection.length === 2}
+          onChange={() => setSelection((ids) => ids && (checked ? ids.filter((id) => id !== job.id) : [...ids, job.id]))}
+        />
+      </label>
+    )
+  }
 
   // 从其他页面按 / 跳过来时直接聚焦搜索框
   useEffect(() => {
@@ -64,10 +81,18 @@ export function Jobs() {
   const res = useQuery({
     queryKey: ['jobs', 'list', status, q, page, recent, starred],
     queryFn: () => api.jobs({ status, q, page, size: SIZE, starred: starred || undefined, ended_after: recent ? Math.floor(now() - RECENT_SEC) : undefined }),
+    enabled: !q.startsWith('/'),
     refetchInterval: 5000,
     placeholderData: (prev) => prev,
   })
-  const total = res.data?.total ?? 0
+  const pathSearch = q.startsWith('/')
+  const trace = useQuery({
+    queryKey: ['trace', q],
+    queryFn: () => api.trace(q),
+    enabled: pathSearch,
+    retry: false,
+  })
+  const total = pathSearch ? trace.data?.matches.length ?? 0 : res.data?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / SIZE))
   const from = total ? (page - 1) * SIZE + 1 : 0
   const to = Math.min(page * SIZE, total)
@@ -77,10 +102,25 @@ export function Jobs() {
       <QueueBanner />
       <StarError />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <h1 className="flex items-baseline gap-2 text-lg font-semibold">
-          任务
-          {res.data && <span className="text-sm font-normal text-fg-3">{total}</span>}
-        </h1>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <h1 className="flex items-baseline gap-2 text-lg font-semibold">
+            任务
+            {(pathSearch ? trace.data : res.data) && <span className="text-sm font-normal text-fg-3">{total}</span>}
+          </h1>
+          {selection ? (
+            <>
+              <span className="text-xs text-fg-3" aria-live="polite">{selection.length ? selection.map((id) => `#${id}`).join(' 与 ') : '请选择两个任务'}</span>
+              {selection.length === 2 ? (
+                <Link to={`/compare?a=${selection[0]}&b=${selection[1]}`} className={buttonClass('primary', 'sm')}>查看对比</Link>
+              ) : (
+                <Button size="sm" variant="primary" disabled>查看对比</Button>
+              )}
+              <Button size="sm" variant="ghost" onClick={() => setSelection(null)}>退出选择</Button>
+            </>
+          ) : (
+            <Button size="sm" variant="ghost" onClick={() => setSelection([])}><GitCompareArrows aria-hidden />对比</Button>
+          )}
+        </div>
         <div className="relative sm:ml-auto sm:w-80">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-3" aria-hidden />
           <Input
@@ -90,7 +130,7 @@ export function Jobs() {
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => e.key === 'Escape' && (setText(''), e.currentTarget.blur())}
-            placeholder="搜索任务名、命令、目录"
+            placeholder="搜索任务，或粘贴产物路径"
             className="pl-8 pr-9 [&::-webkit-search-cancel-button]:appearance-none"
           />
           {text ? (
@@ -113,7 +153,7 @@ export function Jobs() {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
+      {!pathSearch && <div className="flex flex-wrap items-center gap-2">
         <div className="-mx-4 max-w-[calc(100%+2rem)] overflow-x-auto px-4 sm:mx-0 sm:max-w-full sm:px-0">
           <Segmented
             label="按状态筛选"
@@ -144,15 +184,31 @@ export function Jobs() {
             <X className="size-3.5" aria-hidden />
           </button>
         )}
-      </div>
+      </div>}
 
-      <ErrorBox error={res.error} />
+      <ErrorBox error={pathSearch ? trace.error : res.error} />
       <Card className="overflow-hidden">
-        {res.isLoading ? (
+        {(pathSearch ? trace.isLoading : res.isLoading) ? (
           <SkeletonRows rows={6} />
+        ) : pathSearch ? (
+          trace.error ? null : trace.data?.matches.length ? (
+            <div className="divide-y divide-line">
+              {trace.data.matches.map((match) => (
+                <div key={match.job.id}>
+                  <div className="px-3 pt-2 text-xs text-fg-3 sm:px-4">
+                    来源：{match.source === 'output_dir' ? '输出目录' : match.source === 'danlu_json' ? 'danlu.json' : '可能是'}
+                  </div>
+                  <JobRow job={match.job} selection={selectJob(match.job)} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty>没有找到匹配的任务</Empty>
+          )
         ) : (
           <JobList
-            header={<JobListHeader />}
+            header={<JobListHeader selecting={selection !== null} />}
+            selection={selection ? selectJob : undefined}
             jobs={res.data?.jobs ?? []}
             empty={
               q || status || recent || starred ? (
@@ -163,7 +219,7 @@ export function Jobs() {
             }
           />
         )}
-        {total > 0 && (
+        {!pathSearch && total > 0 && (
           <div className="flex h-11 items-center gap-2 border-t border-line px-3 text-xs text-fg-3 sm:px-4">
             <span>
               第 {from}–{to} 条，共 {total} 条

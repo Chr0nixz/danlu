@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, RotateCw, Terminal as TerminalIcon, X } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, GitCompareArrows, RotateCw, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useRef, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { CancelDialog } from '../components/JobRow'
@@ -117,6 +117,10 @@ export function JobDetail() {
             <Link to={`/new?from=${j.id}`} className={buttonClass('secondary', 'sm')} title="用同样的设置再跑一次，可以先改参数">
               <RotateCw />
               重跑
+            </Link>
+            <Link to={`/compare?a=${j.id}`} className={buttonClass('secondary', 'sm')}>
+              <GitCompareArrows aria-hidden />
+              和…对比
             </Link>
             {isActive(j) && !j.cancel_requested && (
               <Button size="sm" variant="danger" onClick={() => setConfirming(true)}>
@@ -448,6 +452,17 @@ function Overview({ j }: { j: Job }) {
             <Link to={`/jobs/${j.rerun_of}`} className={link}>
               任务 #{j.rerun_of}
             </Link>
+          </Row>
+        )}
+        {j.code_from && (
+          <Row label="代码来源">
+            <Link to={`/jobs/${j.code_from}?tab=code`} className={link}>任务 #{j.code_from} 的快照</Link>
+            {j.snapshot_ok && j.snapshot_note && (
+              <details className="mt-1 text-fg-2">
+                <summary className="cursor-pointer text-ui">查看使用现有文件的情况</summary>
+                <p className="mt-1 text-xs [overflow-wrap:anywhere]">{j.snapshot_note}</p>
+              </details>
+            )}
           </Row>
         )}
         <Row label="提交时间">{fmtTime(j.created_at)}</Row>

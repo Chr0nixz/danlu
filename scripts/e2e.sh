@@ -27,6 +27,7 @@ json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.arg
 api()  { curl -s -b "$JAR" -c "$JAR" "${API_AUTH[@]}" -H 'Content-Type: application/json' "$@"; }
 code() { curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" "${API_AUTH[@]}" "$@"; }
 job()  { api "$BASE/api/jobs/$1" | json "$2"; }
+trace_path() { curl -s -b "$JAR" --get --data-urlencode "path=$1" "$BASE/api/trace"; }
 manifest() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2]))" "$1" "$2"; }
 event_kinds() {
   python3 -c 'import sqlite3,sys; db=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); print(" ".join(r[0] for r in db.execute("SELECT kind FROM events WHERE job_id=? AND kind NOT IN (\"alert_raised\",\"alert_cleared\") ORDER BY id",(int(sys.argv[2]),))))' "$DANLU_HOME/danlu.db" "$1"
@@ -100,7 +101,11 @@ echo 'conda() { [ "$1" = activate ] && export FAKE_CONDA_ENV="$2"; }' > "$T/fake
 cat > "$T/fakeconda/bin/conda" <<'EOF'
 #!/bin/sh
 if [ "$1" = "list" ]; then
-  printf 'python=3.12\nnumpy=2.1\n'
+  if [ "$3" = "compare-b" ]; then
+    printf 'python=3.12\nnumpy=2.2\nscipy=1.15\n'
+  else
+    printf 'python=3.12\nnumpy=2.1\n'
+  fi
   exit 0
 fi
 if [ "$1" = "env" ]; then
@@ -175,6 +180,16 @@ check "任务收到独立输出目录" bash -c "curl -s -b '$JAR' '$BASE/api/job
 check "机器配方记录主机、驱动、CUDA 和 GPU 型号" [ "$(job "$D" "d['recipe']['machine']['driver_version'] + ' ' + d['recipe']['machine']['cuda_version'] + ' ' + d['recipe']['machine']['gpus'][0]['name']")" = "fake fake Fake GPU 24GB" ]
 check "danlu.json 记录结束状态和环境包哈希" wait_manifest "$D" 10
 check "环境包接口返回原文" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$D/env' | grep -q '^numpy=2.1$'"
+TRACE_OUTPUT=$(trace_path "$OUTDIR/checkpoints/latest.pt")
+check "输出目录路径反查到任务 D" [ "$(echo "$TRACE_OUTPUT" | json "[(m['job']['id'], m['source']) for m in d['matches']]")" = "[($D, 'output_dir')]" ]
+mkdir -p "$T/manifest-copy/nested"
+cp "$OUTDIR/danlu.json" "$T/manifest-copy/danlu.json"
+TRACE_MANIFEST=$(trace_path "$T/manifest-copy/nested/latest.pt")
+check "向上查找 danlu.json 反查到任务 D" [ "$(echo "$TRACE_MANIFEST" | json "[(m['job']['id'], m['source']) for m in d['matches']]")" = "[($D, 'danlu_json')]" ]
+TRACE_GUESS=$(trace_path "$W/train.py")
+check "命令路径片段列出可能任务 A" [ "$(echo "$TRACE_GUESS" | json "[(m['job']['id'], m['source']) for m in d['matches']]")" = "[($A, 'guess')]" ]
+TRACE_CLI=$(HOME="$T/userhome" "$BIN" trace "$OUTDIR/checkpoints/latest.pt")
+check "danlu trace 输出任务和面板链接" bash -c "printf '%s' '$TRACE_CLI' | grep -Fq '$BASE/jobs/$D'"
 check "B 的日志里 CUDA_VISIBLE_DEVICES=2" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$B/log?tail=10000' | grep -q '\"data\":\"[^\"]*\\\\n2\\\\n'"
 
 echo "== 校验 =="
@@ -309,6 +324,47 @@ check "快照保存的是改动后的代码" [ "$(api "$BASE/api/jobs/$A/snapsho
 check "diff 包含改动" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$A/snapshot/diff' | grep -q 'v2'"
 check "可以下载快照 tar.gz" [ "$(code "$BASE/api/jobs/$A/snapshot/download")" = 200 ]
 
+echo "== 对比任务与快照重跑 =="
+S4=$T/s4-project
+mkdir -p "$S4/data" "$S4/config"
+git -C "$S4" init -q
+printf 'data/\n' > "$S4/.gitignore"
+printf 'print("snapshot-v1")\n' > "$S4/train.py"
+printf 'print("removed")\n' > "$S4/remove.py"
+printf 'small\n' > "$S4/config/options.txt"
+truncate -s 2M "$S4/config/large.bin"
+printf 'large-file\n' | dd of="$S4/config/large.bin" conv=notrunc status=none
+git -C "$S4" add .
+git -C "$S4" -c user.name=t -c user.email=t@t commit -qm compare
+echo data-v1 > "$S4/data/sample.bin"
+S4A=$(submit "{\"name\":\"compare-A\",\"workdir\":\"$S4\",\"cmd\":\"python3 train.py --lr 3e-4\",\"env\":{\"RUN\":\"A\",\"ONLY_A\":\"\"},\"gpus\":1,\"conda_env\":\"myenv\"}")
+check "基准任务成功" wait_status "$S4A" succeeded 20
+check "基准任务记录环境包" wait_recipe "$S4A" 10
+printf 'print("snapshot-v2")\n' > "$S4/train.py"
+rm "$S4/remove.py"
+printf 'print("added")\n' > "$S4/add.py"
+S4B=$(submit "{\"name\":\"compare-B\",\"workdir\":\"$S4\",\"cmd\":\"python3 train.py --lr 1e-3\",\"env\":{\"RUN\":\"B\",\"ONLY_B\":\"\"},\"gpus\":2,\"conda_env\":\"compare-b\"}")
+check "对比任务成功" wait_status "$S4B" succeeded 20
+check "对比任务记录环境包" wait_recipe "$S4B" 10
+S4DIFF=$(api "$BASE/api/compare?a=$S4A&b=$S4B")
+check "对比命令按词保留变化的参数" [ "$(printf '%s' "$S4DIFF" | json "'3e-4' in d['command_a'] and '1e-3' in d['command_b']")" = True ]
+check "对比环境变量区分空值与缺失" [ "$(printf '%s' "$S4DIFF" | json "[(v['name'], v['a'], v['b']) for v in d['env']]")" = "[('ONLY_A', '', None), ('ONLY_B', None, ''), ('RUN', 'A', 'B')]" ]
+check "对比识别同大小改动、增删和不完整快照" [ "$(printf '%s' "$S4DIFF" | json "d['code']['partial'] and {f['path']: f['kind'] for f in d['code']['files']} == {'add.py':'added', 'remove.py':'removed', 'train.py':'changed'}")" = True ]
+check "对比返回包版本与显卡配置" [ "$(printf '%s' "$S4DIFF" | json "d['packages'] == [{'name':'numpy','a':'2.1','b':'2.2'},{'name':'scipy','a':None,'b':'1.15'}] and d['b']['gpus_req']==2")" = True ]
+check "按工作目录找同项目任务" [ "$(api --get --data-urlencode "workdir=$S4/" "$BASE/api/jobs" | json "[j['id'] for j in d['jobs']]")" = "[$S4B, $S4A]" ]
+check "拒绝把同一个任务和自己对比" [ "$(code "$BASE/api/compare?a=$S4A&b=$S4A")" = 400 ]
+printf 'print("current-v3")\n' > "$S4/train.py"
+echo data-v2 > "$S4/data/sample.bin"
+api -X POST "$BASE/api/queue/pause" -d '{}' >/dev/null
+S4C=$(submit "{\"name\":\"restore-A\",\"workdir\":\"$S4\",\"cmd\":\"python3 train.py; cat data/sample.bin; head -n 1 config/large.bin; test ! -e .git\",\"gpus\":1,\"conda_env\":\"myenv\",\"rerun_of\":$S4A,\"code_from\":$S4A}")
+check "重跑排队时源快照不进入清理清单" [ "$(HOME="$T/userhome" "$BIN" prune --dry-run --older-than 0s --json | json "not any(j['job_id']==$S4A for j in d['jobs'])")" = True ]
+api -X POST "$BASE/api/queue/resume" -d '{}' >/dev/null
+check "快照重跑成功" wait_status "$S4C" succeeded 20
+check "快照重跑运行旧代码并读取当前数据及被跳过的文件" [ "$(api "$BASE/api/jobs/$S4C/log?tail=10000" | json "'snapshot-v1\ndata-v2\nlarge-file\n' in d['data'] and 'current-v3' not in d['data']")" = True ]
+check "快照重跑记录来源和当前版本文件" [ "$(job "$S4C" "d['code_from']==$S4A and 'config/large.bin' in d['snapshot_note'] and d['snapshot_ok']")" = True ]
+check "原快照与重跑任务的代码包复用同一个文件" test "$DANLU_HOME/snapshots/$S4A.tar.gz" -ef "$DANLU_HOME/snapshots/$S4C.tar.gz"
+check "快照重跑结束后标星可保留其文件" [ "$(api -X POST "$BASE/api/jobs/$S4C/star" -d '{"starred":true}' | json "d['starred']")" = True ]
+
 echo "== 设备令牌（桌面客户端）=="
 INFO=$("$BIN" info --json)
 check "info --json 给出地址和接口版本" [ "$(echo "$INFO" | json "d['base_url'] + ' ' + str(d['api_version'])")" = "$BASE 1" ]
@@ -414,6 +470,9 @@ check "清理不改训练输出或任务清单" [ "$(sha256sum "$OUTDIR/danlu.js
 check "checkpoint 仍保留" grep -q 'trained checkpoint' "$OUTDIR/checkpoint.pt"
 check "清理后的日志接口明确返回 410" [ "$(code "$BASE/api/jobs/$D/log?tail=100")" = 410 ]
 check "清理后的快照接口明确返回 410" [ "$(code "$BASE/api/jobs/$D/snapshot")" = 410 ]
+check "源快照清理后，重跑任务仍保有旧代码" [ "$(api "$BASE/api/jobs/$S4C/snapshot/file?path=train.py" | json "d['content'].strip()")" = 'print("snapshot-v1")' ]
+check "对比已清理的任务仍能查看参数，代码区注明原因" [ "$(api "$BASE/api/compare?a=$S4A&b=$S4C" | json "'快照已清理' in d['code']['error'] and '3e-4' in d['command_a']")" = True ]
+check "已清理的快照不能用于提交重跑" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$S4\",\"cmd\":\"true\",\"gpus\":0,\"code_from\":$S4A}" "$BASE/api/jobs")" = 400 ]
 api -X POST "$BASE/api/jobs/$PR/cancel" -d '{}' >/dev/null
 check "清理后仍能取消运行任务" wait_status "$PR" cancelled 10
 

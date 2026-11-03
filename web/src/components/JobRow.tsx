@@ -90,7 +90,7 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
  * 一行任务。整行可点（名字是链接，用 ::after 铺满整行），commit、复制和取消操作浮在上面单独可点。
  * 电脑上是固定列；手机上折成两行：第一行名字和时间，第二行卡号、说明文字和 commit，字段一个不少。
  */
-export function JobRow({ job: j, showCopy = false }: { job: Job; showCopy?: boolean }) {
+export function JobRow({ job: j, showCopy = false, selection }: { job: Job; showCopy?: boolean; selection?: ReactNode }) {
   const [confirming, setConfirming] = useState(false)
   const flash = useFlash(j.id, j.status)
   const d = jobDuration(j)
@@ -107,6 +107,7 @@ export function JobRow({ job: j, showCopy = false }: { job: Job; showCopy?: bool
       className={cx('group relative flex items-center gap-3 px-3 py-2.5 transition-colors duration-150 hover:bg-subtle sm:px-4', flash && 'animate-flash')}
       style={flash ? ({ '--flash': `var(--${flashTone[j.status] ?? 'run'})` } as CSSProperties) : undefined}
     >
+      {selection}
       <StatusIcon status={j.status} cancelling={j.cancel_requested} className="self-start mt-0.5 md:mt-0 md:self-center" />
       <div className="flex min-w-0 flex-1 flex-col gap-1 md:flex-row md:items-center md:gap-4">
         {/* 首页从名称列调配复制入口的宽度，保留卡号和最新输出列的空间 */}
@@ -206,9 +207,10 @@ export function JobRow({ job: j, showCopy = false }: { job: Job; showCopy?: bool
 }
 
 /** 任务页电脑端的列头，列宽和 JobRow 的固定列一致 */
-export function JobListHeader() {
+export function JobListHeader({ selecting = false }: { selecting?: boolean }) {
   return (
     <div className="hidden h-8 items-center gap-3 border-b border-line bg-subtle px-4 text-xs text-fg-3 md:flex" aria-hidden>
+      {selecting && <span className="w-8 shrink-0" />}
       <span className="w-4 shrink-0" />
       <div className="flex min-w-0 flex-1 items-center gap-4">
         <span className="w-[240px] shrink-0 lg:w-[280px]">任务</span>
@@ -222,14 +224,14 @@ export function JobListHeader() {
   )
 }
 
-export function JobList({ jobs, empty, header, showCopy = false }: { jobs: Job[]; empty: ReactNode; header?: ReactNode; showCopy?: boolean }) {
+export function JobList({ jobs, empty, header, showCopy = false, selection }: { jobs: Job[]; empty: ReactNode; header?: ReactNode; showCopy?: boolean; selection?: (job: Job) => ReactNode }) {
   if (!jobs.length) return typeof empty === 'string' ? <Empty>{empty}</Empty> : <>{empty}</>
   return (
     <>
       {header}
       <div className="divide-y divide-line">
         {jobs.map((j) => (
-          <JobRow key={j.id} job={j} showCopy={showCopy} />
+          <JobRow key={j.id} job={j} showCopy={showCopy} selection={selection?.(j)} />
         ))}
       </div>
     </>

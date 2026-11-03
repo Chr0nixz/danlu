@@ -77,6 +77,7 @@ type JobStore interface {
 
 type Options struct {
 	SnapshotDir     string
+	RunRoot         string
 	OutputRoot      string
 	Snapshot        snapshot.Options
 	SnapshotTimeout time.Duration
@@ -159,6 +160,7 @@ type SubmitReq struct {
 	GPUs          int               `json:"gpus"`
 	PinnedGPUs    []int             `json:"pinned_gpus"`
 	RerunOf       *int64            `json:"rerun_of"`
+	CodeFrom      *int64            `json:"code_from"`
 }
 
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -170,7 +172,19 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	if req.Workdir == "" || !strings.HasPrefix(req.Workdir, "/") {
 		return nil, invalid("工作目录必须是服务器上的绝对路径")
 	}
-	if fi, err := os.Stat(req.Workdir); err != nil || !fi.IsDir() {
+	if req.CodeFrom != nil {
+		source, err := m.st.GetJob(*req.CodeFrom)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, invalid("源任务 #%d 不存在", *req.CodeFrom)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if filepath.Clean(req.Workdir) != filepath.Clean(source.Workdir) {
+			return nil, invalid("使用快照重跑时，工作目录必须与源任务一致")
+		}
+		req.Workdir = source.Workdir
+	} else if fi, err := os.Stat(req.Workdir); err != nil || !fi.IsDir() {
 		return nil, invalid("工作目录不存在: %s", req.Workdir)
 	}
 	if req.Cmd == "" {
@@ -222,8 +236,11 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	defer m.mu.Unlock()
 	j := &store.Job{Name: req.Name, Workdir: req.Workdir, CondaEnv: strings.TrimSpace(req.CondaEnv), Cmd: req.Cmd,
 		Env: req.Env, InheritBashrc: req.InheritBashrc, GPUsReq: req.GPUs, GPUsPinned: pinned,
-		Status: store.StatusQueued, RerunOf: req.RerunOf}
+		Status: store.StatusQueued, RerunOf: req.RerunOf, CodeFrom: req.CodeFrom}
 	if err := m.st.InsertJob(j); err != nil {
+		if errors.Is(err, store.ErrSnapshotUnavailable) {
+			return nil, invalid("源任务 #%d 的代码快照不可用（尚未生成、正在清理或已清理）", *req.CodeFrom)
+		}
 		return nil, err
 	}
 	m.st.TouchWorkdir(req.Workdir)
@@ -640,9 +657,29 @@ func (m *Manager) launch(ctx context.Context, j *store.Job) {
 	defer m.launches.Done()
 
 	sctx, cancel := context.WithTimeout(ctx, m.opt.SnapshotTimeout)
-	meta, snapErr := m.snap(sctx, j)
+	workdir := j.Workdir
+	hadSnapshot := j.SnapshotOK
+	var meta *snapshot.Meta
+	var snapErr error
+	var restoreNote string
+	if j.CodeFrom == nil {
+		meta, snapErr = m.snap(sctx, j)
+	} else {
+		source := *j.CodeFrom
+		if hadSnapshot {
+			source = j.ID
+		}
+		meta, restoreNote, snapErr = snapshot.Restore(sctx, m.opt.SnapshotDir, m.opt.RunRoot, j.Workdir, source, j.ID)
+		workdir = snapshot.RunCodeDir(m.opt.RunRoot, j.ID)
+	}
 	cancel()
-	env, envErr := m.ex.LoadEnv(ctx, j.InheritBashrc)
+	var env []string
+	var envErr error
+	if j.CodeFrom != nil && snapErr != nil {
+		envErr = fmt.Errorf("恢复任务 #%d 的快照失败: %w", *j.CodeFrom, snapErr)
+	} else {
+		env, envErr = m.ex.LoadEnv(ctx, j.InheritBashrc)
+	}
 	if snapErr != nil {
 		j.SnapshotNote = "快照失败: " + snapErr.Error()
 	} else {
@@ -650,7 +687,9 @@ func (m *Manager) launch(ctx context.Context, j *store.Job) {
 		if meta.Git != nil {
 			j.GitCommit, j.GitBranch, j.GitDirty = meta.Git.Commit, meta.Git.Branch, meta.Git.Dirty
 		}
-		if meta.SkipCount > 0 {
+		if j.CodeFrom != nil {
+			j.SnapshotNote = restoreNote
+		} else if meta.SkipCount > 0 {
 			j.SnapshotNote = fmt.Sprintf("有 %d 个文件没有保存（超出大小限制或不是普通文件）", meta.SkipCount)
 		}
 	}
@@ -674,7 +713,9 @@ func (m *Manager) launch(ctx context.Context, j *store.Job) {
 		log.Printf("任务 #%d %s 在启动前被取消", j.ID, j.Name)
 		return
 	case ctx.Err() != nil:
-		j.SnapshotOK, j.SnapshotNote, j.GitCommit, j.GitBranch, j.GitDirty = false, "", "", "", false
+		if j.CodeFrom == nil || !hadSnapshot {
+			j.SnapshotOK, j.SnapshotNote, j.GitCommit, j.GitBranch, j.GitDirty = false, "", "", "", false
+		}
 		m.transition(j, store.StatusQueued, "danlu 正在停止，尚未启动进程")
 		log.Printf("danlu 正在停止，任务 #%d %s 放回队列", j.ID, j.Name)
 		return
@@ -698,7 +739,7 @@ func (m *Manager) launch(ctx context.Context, j *store.Job) {
 		log.Printf("任务 #%d 保存主机 OOM 基线失败，暂不启动: %v", j.ID, err)
 		return
 	}
-	spec := runner.Spec{JobID: j.ID, Name: j.Name, Workdir: j.Workdir,
+	spec := runner.Spec{JobID: j.ID, Name: j.Name, Workdir: workdir,
 		CondaEnv: j.CondaEnv, Cmd: j.Cmd, Env: j.Env, GPUs: j.GPUsAssigned, Port: j.MasterPort, OutputDir: j.OutputDir}
 	pid, startTime, err := m.ex.Start(spec, env)
 	if err != nil {

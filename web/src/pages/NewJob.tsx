@@ -58,8 +58,12 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
   const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, env: `${uid}-env` }
 
   const rerun = formMode === 'rerun'
+  const [useSnapshot, setUseSnapshot] = useState(false)
+  const canRestore = !!source?.snapshot_ok && !source.pruned_at && (source.pid > 0 || source.ended_at !== null)
+  const snapshotSelected = rerun && useSnapshot
   const [name, setName] = useState(source && rerun ? rerunName(source.name) : source?.name ?? '')
   const [workdir, setWorkdir] = useState(source?.workdir ?? '')
+  const activeWorkdir = snapshotSelected ? source!.workdir : workdir
   const [condaEnv, setCondaEnv] = useState(source?.conda_env ?? '')
   const [cmd, setCmd] = useState(source?.cmd ?? '')
   const [mode, setMode] = useState<'count' | 'pinned'>(source?.gpus_pinned.length ? 'pinned' : 'count')
@@ -95,8 +99,9 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
+    if (submit.isPending || (snapshotSelected && !canRestore)) return
     const errs: Partial<Record<Field, string>> = {}
-    if (!workdir.trim()) errs.workdir = '请填写工作目录'
+    if (!activeWorkdir.trim()) errs.workdir = '请填写工作目录'
     if (!cmd.trim()) errs.cmd = '请填写要运行的命令'
     if (mode === 'pinned' && !pinned.length) errs.gpu = '请至少选择一张卡'
     let env: Record<string, string> = {}
@@ -114,7 +119,7 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
     }
     submit.mutate({
       name: name.trim(),
-      workdir: workdir.trim().replace(/\/+$/, '') || '/',
+      workdir: activeWorkdir.trim().replace(/\/+$/, '') || '/',
       conda_env: condaEnv,
       cmd,
       env,
@@ -122,6 +127,7 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
       gpus: mode === 'count' ? count : pinned.length,
       pinned_gpus: mode === 'pinned' ? pinned : [],
       rerun_of: rerun ? source?.id ?? null : null,
+      code_from: snapshotSelected ? source!.id : undefined,
     })
   }
 
@@ -161,22 +167,40 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
           </p>
         )}
       </div>
-      {rerun && source && <CodeChangeNotice source={source} workdir={workdir} />}
+      {rerun && source && !snapshotSelected && <CodeChangeNotice source={source} workdir={workdir} />}
 
       <Card className="divide-y divide-line">
-        <FormRow label="工作目录" hint="服务器上的绝对路径。启动时会自动保存一份代码快照。" htmlFor={ids.workdir}>
-          <WorkdirInput
+        {rerun && source && (
+          <FormRow
+            label="代码版本"
+            htmlFor={`${uid}-code`}
+            hint={snapshotSelected && !canRestore ? '快照已不可用。请选择现在的工作目录再提交。' : snapshotSelected
+              ? '在独立目录恢复代码。未收进快照的文件可能来自原目录，命令中写死的绝对路径也仍指向原处。conda 使用当前环境。'
+              : source.pruned_at ? '源任务的快照已清理。' : !canRestore ? '源任务的快照还不可用。' : '可改用原任务的快照，再调整这次运行的参数。'}
+          >
+            <Select id={`${uid}-code`} aria-describedby={`${uid}-code-hint`} value={snapshotSelected ? 'snapshot' : 'current'} onChange={(e) => setUseSnapshot(e.target.value === 'snapshot')}>
+              <option value="current">现在的工作目录</option>
+              <option value="snapshot" disabled={!canRestore}>任务 #{source.id} 的快照</option>
+            </Select>
+          </FormRow>
+        )}
+        <FormRow label={snapshotSelected ? '原工作目录' : '工作目录'} hint={snapshotSelected ? '从这里补齐数据和权重。命令在恢复后的目录中执行。' : '服务器上的绝对路径。启动时会自动保存一份代码快照。'} htmlFor={ids.workdir}>
+          {snapshotSelected ? (
+            <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="font-mono" />
+          ) : <WorkdirInput
             id={ids.workdir}
             describedBy={describe('workdir')}
             invalid={!!errors.workdir}
             value={workdir}
             onChange={edit('workdir', setWorkdir)}
             recent={recent.data?.dirs ?? []}
-          />
+          />}
           <FieldError id={`${ids.workdir}-err`}>{errors.workdir}</FieldError>
         </FormRow>
 
-        <FormRow label="命令" hint="在工作目录下用 bash 执行，可以写多行。torchrun 不用写 --master_port，会自动分配。" htmlFor={ids.cmd}>
+        <FormRow label="命令" hint={snapshotSelected
+          ? '用 bash 在恢复后的目录中执行，可以写多行。torchrun 的端口会自动分配。'
+          : '在工作目录下用 bash 执行，可以写多行。torchrun 不用写 --master_port，会自动分配。'} htmlFor={ids.cmd}>
           <Textarea
             id={ids.cmd}
             aria-describedby={describe('cmd')}
@@ -283,7 +307,7 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
           <ErrorBox error={submit.error} className="sm:mr-auto" />
           <div className="flex gap-2 sm:ml-auto">
             <Button onClick={() => nav(-1)}>返回</Button>
-            <Button type="submit" variant="primary" loading={submit.isPending} className="flex-1 sm:flex-none">
+            <Button type="submit" variant="primary" loading={submit.isPending} disabled={submit.isPending || (snapshotSelected && !canRestore)} className="flex-1 sm:flex-none">
               提交任务
               <Kbd>Ctrl ↵</Kbd>
             </Button>

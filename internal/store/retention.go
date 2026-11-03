@@ -33,7 +33,9 @@ func (s *Store) RetentionJobs() ([]*Job, error) {
 func (s *Store) ClaimPrune(id int64) (bool, error) {
 	res, err := s.db.Exec(`UPDATE jobs SET pruning=1 WHERE id=? AND starred=0 AND pruned_at IS NULL
 		AND status IN ('succeeded','failed','cancelled') AND ended_at IS NOT NULL
-		AND COALESCE(json_extract(recipe_json,'$.pending'),0)=0`, id)
+		AND COALESCE(json_extract(recipe_json,'$.pending'),0)=0
+		AND NOT EXISTS (SELECT 1 FROM jobs AS child WHERE child.code_from=jobs.id
+			AND child.code_from IS NOT NULL AND child.snapshot_ok=0 AND child.status IN ('queued','running'))`, id)
 	if err != nil {
 		return false, err
 	}

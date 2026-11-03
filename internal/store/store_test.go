@@ -202,8 +202,7 @@ func TestBackupBeforeUpgrade(t *testing.T) {
 	full := migrations
 	withMigrations(t, full[:len(full)-1])
 	s := openAt(t, path)
-	j := &Job{Name: "old", Workdir: "/w", Cmd: "x", Status: StatusQueued}
-	if err := s.InsertJob(j); err != nil {
+	if _, err := s.db.Exec("INSERT INTO jobs(id,name,workdir,cmd,status,created_at) VALUES (1,'old','/w','x','queued',0)"); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -222,7 +221,7 @@ func TestBackupBeforeUpgrade(t *testing.T) {
 		t.Fatalf("升级前应该备份一份旧版本的库: %v", backups)
 	}
 	old := openAt(t, backups[0])
-	if got, err := old.GetJob(j.ID); err != nil || got.Name != "old" {
+	if got, err := old.GetJob(1); err != nil || got.Name != "old" || got.CodeFrom != nil {
 		t.Fatalf("备份里读不到旧数据: %v %v", got, err)
 	}
 

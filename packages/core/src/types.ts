@@ -57,6 +57,7 @@ export interface Job {
   snapshot_ok: boolean
   snapshot_note: string
   rerun_of: number | null
+  code_from?: number
   created_at: number
   started_at: number | null
   ended_at: number | null
@@ -67,6 +68,40 @@ export interface Job {
   traceback_offset?: number
   queue_pos?: number
   wait_reason?: string
+}
+
+export type TraceSource = 'output_dir' | 'danlu_json' | 'guess'
+
+export interface TraceMatch {
+  job: Job
+  source: TraceSource
+}
+
+export interface TraceResponse {
+  path: string
+  matches: TraceMatch[]
+}
+
+export interface ValueChange {
+  name: string
+  a: string | null
+  b: string | null
+}
+
+export interface FileChange {
+  path: string
+  kind: 'added' | 'removed' | 'changed'
+}
+
+export interface JobComparison {
+  a: Job
+  b: Job
+  command_a: string[]
+  command_b: string[]
+  env: ValueChange[]
+  code: { files: FileChange[] | null; error?: string; partial?: boolean }
+  packages: ValueChange[] | null
+  packages_error: string
 }
 
 export interface QueueState {
@@ -197,9 +232,11 @@ export interface SubmitReq {
   gpus: number
   pinned_gpus: number[]
   rerun_of: number | null
+  code_from?: number
 }
 
 export interface JobsQuery {
+  workdir?: string
   starred?: boolean
   status?: string
   q?: string

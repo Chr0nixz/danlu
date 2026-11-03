@@ -4,6 +4,7 @@ import type {
   DeviceToken,
   GPU,
   Job,
+  JobComparison,
   JobsQuery,
   JobStatus,
   LogChunk,
@@ -13,6 +14,7 @@ import type {
   SnapshotMeta,
   SubmitReq,
   TerminalSession,
+  TraceResponse,
 } from './types'
 
 /**
@@ -115,6 +117,8 @@ export function createApi(t: Transport, opt: ApiOptions) {
     recentWorkdirs: () => get<{ dirs: string[] }>('/api/workdirs/recent'),
 
     jobs: (p: JobsQuery) => get<{ jobs: Job[]; total: number; page: number; size: number }>(`/api/jobs${qs(p)}`),
+    trace: (path: string) => get<TraceResponse>(`/api/trace${qs({ path })}`),
+    compare: (a: number, b: number) => get<JobComparison>(`/api/compare${qs({ a, b })}`),
     job: (id: number) => get<Job>(`/api/jobs/${id}`),
     envPackages: (id: number) => getText(`/api/jobs/${id}/env`),
     submit: (r: SubmitReq) => post<Job>('/api/jobs', r),

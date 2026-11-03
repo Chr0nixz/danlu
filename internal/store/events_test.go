@@ -228,11 +228,8 @@ func TestNotesMigration(t *testing.T) {
 		{StatusFailed, "退出码 7", "退出码 7", ""},
 	}
 	for i, r := range rows {
-		j := &Job{Name: fmt.Sprintf("j%d", i), Workdir: "/w", Cmd: "x", Status: r.status}
-		if err := s.InsertJob(j); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.db.Exec("UPDATE jobs SET fail_reason=? WHERE id=?", r.reason, j.ID); err != nil {
+		if _, err := s.db.Exec("INSERT INTO jobs(name,workdir,cmd,status,created_at,fail_reason) VALUES (?,'/w','x',?,0,?)",
+			fmt.Sprintf("j%d", i), r.status, r.reason); err != nil {
 			t.Fatal(err)
 		}
 	}

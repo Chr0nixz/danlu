@@ -12,6 +12,7 @@ import (
 
 	"danlu/internal/auth"
 	"danlu/internal/config"
+	"danlu/internal/snapshot"
 	"danlu/internal/store"
 	"danlu/internal/terminal"
 
@@ -66,6 +67,16 @@ func (s *Server) openTerminal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		opt.Workdir, opt.CondaEnv = job.Workdir, job.CondaEnv
+		if job.CodeFrom != nil {
+			if prunedFiles(w, job) {
+				return
+			}
+			opt.Workdir = snapshot.RunCodeDir(s.Paths.Run, job.ID)
+			if info, err := os.Stat(opt.Workdir); err != nil || !info.IsDir() {
+				writeErr(w, http.StatusConflict, "这个任务的快照运行目录还不可用")
+				return
+			}
+		}
 	}
 	if opt.CondaBase != "" {
 		opt.CondaBase, err = config.ResolvePath(opt.CondaBase)

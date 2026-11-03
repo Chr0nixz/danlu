@@ -14,6 +14,7 @@ import { NotFound } from './pages/NotFound'
 import { Settings } from './pages/Settings'
 import { Spinner } from './components/ui'
 
+const Compare = lazy(() => import('./pages/Compare').then((m) => ({ default: m.Compare })))
 const Terminal = lazy(() => import('./pages/Terminal').then((m) => ({ default: m.Terminal })))
 
 const queryClient = new QueryClient({
@@ -36,6 +37,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="/" element={<Home />} />
             <Route path="/jobs" element={<Jobs />} />
             <Route path="/jobs/:id" element={<JobDetail />} />
+            <Route path="/compare" element={<Suspense fallback={<div className="grid min-h-64 place-items-center"><Spinner /></div>}><Compare /></Suspense>} />
             <Route path="/new" element={<NewJob />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/terminal" element={<Suspense fallback={<div className="grid min-h-64 place-items-center"><Spinner /></div>}><Terminal /></Suspense>} />
