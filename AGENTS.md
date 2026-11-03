@@ -16,7 +16,7 @@ Direction:
 - **Status.** Everything in the demo scope (`docs/DEMO.md`) is built and passes in WSL with fake GPUs. As of 2026-11-02 the user is using it day to day without reported issues; a complete real-GPU acceptance record is still pending. S0 checks are filled in during use and do not block later development; keep unverified scenarios explicit and fix reported problems promptly. S1 has completed unified job transitions, first-pass failure classification, environment-package recording, machine metadata and output manifests; path lookup remains open for S4. In the desktop client, the HTTPS path (pinned CA, device token, log streaming), the tray popover and the notification logic were exercised against a WSL server. The SSH flows were not: adding a server, upgrades and service management have never run end to end, because the WSL test box has no sshd. Toast display and the tray icon states were also never confirmed visually.
 
 - **S2 状态（2026-11-02）**：队列手动/快速失败暂停、磁盘保护、保留策略清理和 ntfy 手机推送均已完成代码与自动化；2026-11-03 验收后修复快速失败重复推送、网络存储卡住拖住调度、收尾时扫描整份日志和 137 误判内存不足，184 项 WSL e2e 通过。手机 App 实际接收和真实 GPU 告警随日常使用补验。推送通过持久化事件异步发送，服务从不修改通知配置。
-- **S3 状态（2026-11-03）**：剩余时间首项已完成；core 解析 tqdm 的时分、时分秒和跨天 ETA，未知值不显示；任务行桌面/手机展示。5 项 core 单测纳入 CI，三端 typecheck 和 1440/390px 浏览器检查通过。网页终端、手机二维码/CA 接入待做。
+- **S3 状态（2026-11-03）**：剩余时间、网页终端、手机二维码与 CA 安装指引已实现。手机输入法、后台重连与实际安装 CA 随使用补验。
 
 Other docs:
 

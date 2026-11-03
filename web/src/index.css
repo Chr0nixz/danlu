@@ -179,6 +179,20 @@
   background: rgb(82 168 255 / 0.35);
 }
 
+.terminal-fit {
+  height: max(260px, calc(100dvh - 25rem - env(safe-area-inset-bottom)));
+}
+
+.terminal-fit .xterm {
+  height: 100%;
+}
+
+@media (min-width: 640px) {
+  .terminal-fit {
+    height: max(320px, calc(100dvh - 17rem));
+  }
+}
+
 /*
  * 日志框：从框的顶部铺到视口底部，最新几行始终在首屏里。--log-top 由 LogViewer 量出来。
  * 手机上让出底部导航（3.5rem + 安全区）和页面下边距；电脑上只留页面下边距。

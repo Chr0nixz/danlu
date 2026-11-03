@@ -153,8 +153,16 @@ export interface Settings {
   data_dir: string
   conda_base: string
   ca_available: boolean
+  terminal_enabled?: boolean
   ca_fingerprint?: string
   notify?: NotifyStatus
+}
+
+export interface TerminalSession {
+  id: string
+  workdir: string
+  opened_at: number
+  attached: boolean
 }
 
 export interface NotifyStatus {

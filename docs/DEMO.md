@@ -45,12 +45,15 @@ $ danlu init
   密码      Xr7#…（只显示这一次）
   ⚠ 请在防火墙 / 云安全组放行 TCP 28457
   ──────────────────────────────────────────
+  手机扫码打开面板：
+  [二维码]
 
 # 3. 安装成 systemd 用户服务（开机自启、退出 SSH 后继续运行）
 $ danlu install-service
 
 # 以后需要时使用
-$ danlu info              # 重新显示访问地址（密码不会再显示）
+$ danlu info              # 重新显示访问地址和二维码（密码不会再显示）
+$ danlu info --no-qr      # 只显示文字信息
 $ danlu passwd            # 修改密码
 $ danlu entrance --reset  # 换一个新的安全入口
 $ danlu port 30001        # 修改端口
@@ -227,6 +230,7 @@ finish $?
 | **首页** | 一行状态摘要（运行中、排队、空闲卡数）；GPU 面板每行 4 张；CPU 和内存当前使用率及最近 1 分钟趋势；下面是一个分组列表：运行中、排队、最近完成，每行一个任务 | GPU 每张卡一行；分组列表直接展开，不用标签页切换；CPU 和内存当前值及趋势并排显示，放在任务列表后面 |
 | **新建 / 重跑** | 标签在左、输入框在右的表单；Ctrl+Enter 提交 | 上下排列的表单 |
 | **任务详情** | 标题和"W&B / 重跑 / 取消"按钮；一排关键信息（状态、GPU、环境、时长、代码版本、时间）；下面三个标签页：日志、详情、代码 | 同左，关键信息排成两列 |
+| **终端** | 可在最多 3 个会话间切换；支持调整字号和断线重连 | 同左，增加命令输入框与常用控制键 |
 | **全部任务** | 和首页同样的任务行，支持按状态筛选、搜索（快捷键 /）、分页 | 同左，每个任务两行 |
 | **设置** | 服务信息、外观（跟随系统 / 浅色 / 深色）、下载 CA 证书、修改密码、审计日志 | 同左 |
 
@@ -267,8 +271,13 @@ GET  /api/jobs/{id}/snapshot/diff      git diff
 GET  /api/jobs/{id}/snapshot/download  下载 tar.gz
 
 GET  /api/settings/ca.crt              下载 CA 证书
-GET  /api/settings                    服务配置摘要和 notify（enabled、last_sent_at、last_error；不含 topic 和令牌）
+GET  /api/settings/qr.svg              完整安全入口地址的二维码（需登录，禁止缓存）
+GET  /api/settings                    服务配置摘要（含 terminal_enabled）和 notify（enabled、last_sent_at、last_error；不含 topic 和令牌）
 POST /api/settings/password            修改密码
+GET  /api/terminal                     列出终端会话
+POST /api/terminal                     打开终端（JSON {"job_id"?: number}；可在任务目录和 conda 环境中启动）
+GET  /api/terminal/{id}/ws?offset=     终端 WebSocket（二进制输入输出；文本帧传 resize、offset 控制消息；offset 是已收到的输出末尾，只补发之后的部分；新连接接替旧连接，旧连接以 4001 关闭）
+POST /api/terminal/{id}/close          关闭终端会话
 POST /api/notify/test                 发一条测试推送；未开启或正在测试返回 409，发送失败返回 502
 GET  /api/audit?page=                  审计日志
 GET  /api/tokens                       设备令牌列表（不含令牌本身）
@@ -323,7 +332,14 @@ max_total_gb       = 50      # GiB，0 关闭按大小清理；两项均为 0 �
 [notify]
 ntfy              = ""      # 留空关闭；danlu notify setup 生成随机 topic
 # token           = ""      # 自建服务需要鉴权时填写，不通过 API 暴露
+
+[terminal]
+enabled = true               # 网页终端；关闭后终端 API 返回 404，面板隐藏入口
 ```
+
+网页终端使用 Linux PTY，同一时间最多 3 个会话。WebSocket 只接受同源连接，且需要已登录的面板会话；断线后 shell 保留 15 分钟，每个会话缓存最近 256 KiB 输出，重连时只补发没收到的部分；同一会话只保留最新的连接，服务器每 20 秒 ping 一次，尽快发现手机锁屏或换网络后断掉的连接。任务详情的"打开终端"会使用任务工作目录和 conda 环境。审计日志记录会话打开/关闭和工作目录，不记录输入输出内容。danlu 重启会关闭终端进程，不影响训练任务。
+
+`danlu init` 和 `danlu info` 默认在终端打印带安全入口的访问二维码，`--no-qr` 可关闭。设置页的"在手机上打开"通过 `GET /api/settings/qr.svg` 显示同一地址；接口要求登录并返回 `Cache-Control: private, no-store`。本地 CA 区域根据浏览器平台预选 Android、iOS、macOS、Windows 或其他平台的安装步骤，也可手动切换，并显示 SHA-256 指纹供导入前核对。
 
 ```
 ~/.danlu/

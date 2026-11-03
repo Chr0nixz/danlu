@@ -27,12 +27,14 @@ import (
 	"danlu/internal/config"
 	"danlu/internal/gpu"
 	"danlu/internal/notify"
+	"danlu/internal/qrutil"
 	"danlu/internal/retention"
 	"danlu/internal/runner"
 	"danlu/internal/scheduler"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
 	"danlu/internal/system"
+	"danlu/internal/terminal"
 	"danlu/internal/tlsutil"
 	"danlu/internal/webui"
 
@@ -45,9 +47,9 @@ const usage = `danlu — GPU 服务器训练任务管理面板
 
 用法: danlu <命令> [参数]
 
-  init              初始化：生成端口、安全入口、密码和证书
+  init              初始化：生成端口、安全入口、密码和证书；--no-qr 不打印二维码
   serve             启动服务
-  info              显示访问地址等信息；--json 输出给桌面客户端读取
+  info              显示访问地址等信息；--json 输出给桌面客户端读取；--no-qr 不打印二维码
   token             设备令牌（桌面客户端用）：create --name 名字 | list | revoke <id>
   passwd            修改登录密码
   entrance          查看安全入口；--reset 重新生成
@@ -159,6 +161,7 @@ func cmdInit(args []string) error {
 	conda := fs.String("conda", "", "conda 安装目录（默认自动检测）")
 	yes := fs.Bool("yes", false, "不提问，全部使用默认值")
 	force := fs.Bool("force", false, "覆盖已有配置")
+	noQR := fs.Bool("no-qr", false, "不打印访问二维码")
 	fs.Parse(args)
 
 	p := paths()
@@ -242,6 +245,9 @@ func cmdInit(args []string) error {
 	}
 	fmt.Println("  ──────────────────────────────────────────")
 	fmt.Println("  下一步：danlu install-service（或直接 danlu serve 先试试）")
+	if !*noQR {
+		return printAccessQR(c.URL())
+	}
 	return nil
 }
 
@@ -294,6 +300,8 @@ func cmdServe(args []string) error {
 	go disks.Run(ctx)
 
 	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, EnvRoot: p.Envs, CondaBase: c.Runtime.CondaBase}
+	terminals := terminal.NewManager()
+	defer terminals.Close()
 	mgr := scheduler.New(st, mon, run, scheduler.Options{
 		SnapshotDir: p.Snapshots,
 		OutputRoot:  outputRoot,
@@ -324,7 +332,7 @@ func cmdServe(args []string) error {
 		Username: c.Auth.Username, SessionTTL: c.Auth.SessionTTL.Duration,
 		MaxFailures: c.Auth.MaxFailures, Lockout: c.Auth.Lockout.Duration,
 	})
-	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, System: host, Auth: au, Runner: run,
+	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, System: host, Auth: au, Runner: run, Terminal: terminals,
 		Static: webui.FS(), Version: version, Disks: disks, Notify: notifier}
 
 	// 请求的 context 都从 base 派生：停止时先取消它，日志 SSE 这类长连接马上退出
@@ -406,6 +414,7 @@ const restartHint = "重启服务后生效：systemctl --user restart danlu"
 func cmdInfo(args []string) error {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "以 JSON 输出（桌面客户端通过 SSH 读取）")
+	noQR := fs.Bool("no-qr", false, "不打印访问二维码")
 	fs.Parse(args)
 	p, c, err := loadForEdit()
 	if err != nil {
@@ -426,6 +435,19 @@ func cmdInfo(args []string) error {
 	outputRoot, _ := config.ResolvePath(c.Runtime.OutputRoot)
 	fmt.Println("输出目录 ", outputRoot)
 	fmt.Println("数据目录 ", p.Home)
+	if !*noQR {
+		return printAccessQR(c.URL())
+	}
+	return nil
+}
+
+func printAccessQR(address string) error {
+	qr, err := qrutil.Terminal(address)
+	if err != nil {
+		return fmt.Errorf("生成访问二维码失败: %w", err)
+	}
+	fmt.Println("手机扫码打开面板：")
+	fmt.Print(qr)
 	return nil
 }
 

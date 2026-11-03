@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Flame, LayoutDashboard, ListChecks, Plus, Settings } from 'lucide-react'
+import { Flame, LayoutDashboard, ListChecks, Plus, Settings, Terminal as TerminalIcon } from 'lucide-react'
 import { useEffect } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api } from '../lib/api'
@@ -9,6 +9,7 @@ import { buttonClass, cx, Kbd } from './ui'
 const nav = [
   { to: '/', label: '总览', icon: LayoutDashboard, end: true },
   { to: '/jobs', label: '任务', icon: ListChecks, end: false },
+  { to: '/terminal', label: '终端', icon: TerminalIcon, end: false },
   { to: '/settings', label: '设置', icon: Settings, end: false },
 ]
 
@@ -27,6 +28,8 @@ export function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 })
+  const showTerminal = settings.data?.terminal_enabled === true
 
   // 快捷键：N 新建任务；/ 搜索任务（任务页自己处理，其他页面先跳过去）
   useEffect(() => {
@@ -79,7 +82,7 @@ export function Layout() {
             </>
           )}
           <nav className="ml-3 hidden h-full items-stretch gap-1 sm:flex">
-            {nav.map((n) => (
+            {nav.filter((n) => n.to !== '/terminal' || showTerminal).map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
@@ -100,10 +103,19 @@ export function Layout() {
             新建任务
             <Kbd>N</Kbd>
           </Link>
+          {showTerminal && (
+            <NavLink
+              to="/terminal"
+              aria-label="网页终端"
+              className={({ isActive }) => cx(buttonClass('ghost', 'icon'), 'ml-auto sm:hidden', isActive && 'bg-hover text-fg')}
+            >
+              <TerminalIcon className="size-5" />
+            </NavLink>
+          )}
           <NavLink
             to="/settings"
             aria-label="设置"
-            className={({ isActive }) => cx(buttonClass('ghost', 'icon'), '-mr-2 ml-auto sm:hidden', isActive && 'bg-hover text-fg')}
+            className={({ isActive }) => cx(buttonClass('ghost', 'icon'), '-mr-2 sm:hidden', !showTerminal && 'ml-auto', isActive && 'bg-hover text-fg')}
           >
             <Settings className="size-5" />
           </NavLink>
@@ -114,7 +126,7 @@ export function Layout() {
         <Outlet />
       </main>
 
-      {/* 手机底部导航：新建放在正中间，设置在顶栏右侧 */}
+      {/* 手机底部导航：新建放在正中间，终端和设置在顶栏右侧 */}
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] sm:hidden">
         <div className="grid h-14 grid-cols-3">
           {[nav[0], { to: '/new', label: '新建', icon: Plus, end: false }, nav[1]].map((n) => (

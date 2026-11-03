@@ -12,6 +12,7 @@ import type {
   Settings,
   SnapshotMeta,
   SubmitReq,
+  TerminalSession,
 } from './types'
 
 /**
@@ -141,6 +142,10 @@ export function createApi(t: Transport, opt: ApiOptions) {
     audit: () => get<{ entries: AuditEntry[] }>('/api/audit'),
     tokens: () => get<{ tokens: DeviceToken[] }>('/api/tokens'),
     revokeToken: (id: number) => post(`/api/tokens/${id}/revoke`),
+
+    terminalSessions: () => get<{ sessions: TerminalSession[] }>('/api/terminal'),
+    openTerminal: (jobId?: number) => post<TerminalSession>('/api/terminal', jobId === undefined ? {} : { job_id: jobId }),
+    closeTerminal: (id: string) => post<{ ok: boolean }>(`/api/terminal/${encodeURIComponent(id)}/close`),
   }
 }
 

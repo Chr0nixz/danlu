@@ -87,6 +87,9 @@ trap cleanup EXIT
 echo "== 初始化 =="
 "$BIN" init --yes --tls off --port $PORT --password testpass123 --public-ip 127.0.0.1 --conda "$T/fakeconda" >"$T/init.log" 2>&1 \
   && ok "init 成功" || { bad "init 失败"; cat "$T/init.log"; exit 1; }
+check "init 默认打印访问二维码" grep -q '手机扫码打开面板' "$T/init.log"
+"$BIN" info --no-qr >"$T/info-no-qr.log" 2>&1
+check "info 支持关闭二维码输出" [ "$(grep -c '手机扫码打开面板' "$T/info-no-qr.log" || true)" = 0 ]
 ENTRANCE=$("$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')
 [ -n "$ENTRANCE" ] || { bad "读不到安全入口"; exit 1; }
 check "快速失败阈值默认为 2 分钟" grep -q 'fail_fast = "2m0s"' "$DANLU_HOME/config.toml"
@@ -126,10 +129,21 @@ check "未过入口访问 API 返回 404" [ "$(code "$BASE/api/me")" = 404 ]
 check "错误入口返回 404" [ "$(code "$BASE/wrongentrance")" = 404 ]
 check "正确入口跳转 302" [ "$(code "$BASE/$ENTRANCE")" = 302 ]
 check "过入口后未登录 API 返回 401" [ "$(code "$BASE/api/me")" = 401 ]
+check "未登录不能读取手机接入二维码" [ "$(code "$BASE/api/settings/qr.svg")" = 401 ]
 check "错误密码返回 401" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"username":"admin","password":"nope"}' "$BASE/api/login")" = 401 ]
 check "正确密码登录成功" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login")" = 200 ]
 check "登录后访问 API 返回 200" [ "$(code "$BASE/api/me")" = 200 ]
+curl -s -D "$T/qr.headers" -b "$JAR" -c "$JAR" -o "$T/qr.svg" "$BASE/api/settings/qr.svg"
+check "设置接口返回 SVG 接入二维码" grep -q '<svg' "$T/qr.svg"
+check "接入二维码禁止缓存" grep -qi '^Cache-Control: private, no-store' "$T/qr.headers"
 check "表单格式的写请求被拒绝" [ "$(code -X POST -d 'x=1' "$BASE/api/jobs")" = 415 ]
+
+echo "== 网页终端 API =="
+TERM_ID=$(api -X POST "$BASE/api/terminal" -d '{}' | json "d['id']")
+check "创建登录 shell 会话" [ -n "$TERM_ID" ]
+check "会话列表包含新终端" [ "$(api "$BASE/api/terminal" | json "any(s['id']=='$TERM_ID' for s in d['sessions'])")" = True ]
+check "关闭终端会话" [ "$(api -X POST "$BASE/api/terminal/$TERM_ID/close" -d '{}' | json "d['ok']")" = True ]
+check "关闭后会话从列表移除" [ "$(api "$BASE/api/terminal" | json "not any(s['id']=='$TERM_ID' for s in d['sessions'])")" = True ]
 
 echo "== GPU =="
 sleep 2

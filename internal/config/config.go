@@ -37,6 +37,11 @@ type Config struct {
 	Runtime   Runtime   `toml:"runtime"`
 	Retention Retention `toml:"retention"`
 	Notify    Notify    `toml:"notify"`
+	Terminal  Terminal  `toml:"terminal"`
+}
+
+type Terminal struct {
+	Enabled bool `toml:"enabled"`
 }
 
 type Server struct {
@@ -105,6 +110,7 @@ func Default() *Config {
 			SnapshotMaxTotalMB: 50,
 		},
 		Retention: Retention{KeepDays: 90, MaxTotalGB: 50},
+		Terminal:  Terminal{Enabled: true},
 	}
 }
 

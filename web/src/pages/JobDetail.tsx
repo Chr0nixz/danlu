@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, RotateCw, X } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, RotateCw, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useRef, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { CancelDialog } from '../components/JobRow'
@@ -15,6 +15,7 @@ const tabs: Tab[] = ['log', 'info', 'code']
 
 export function JobDetail() {
   const id = Number(useParams().id)
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 })
   const q = useQuery({
     queryKey: ['job', id],
     queryFn: () => api.job(id),
@@ -99,8 +100,14 @@ export function JobDetail() {
               <span className="ml-2 font-normal text-fg-3">#{j.id}</span>
             </span>
           </h1>
-          <div className="flex gap-2 [&>*]:flex-1 sm:[&>*]:flex-none">
+          <div className="flex flex-wrap gap-2 [&>*]:flex-1 sm:justify-end sm:[&>*]:flex-none">
             <StarButton job={j} label />
+            {settings.data?.terminal_enabled && (
+              <Link to={`/terminal?job_id=${j.id}`} className={buttonClass('secondary', 'sm')} title="在这个任务的目录和 conda 环境中打开终端">
+                <TerminalIcon />
+                终端
+              </Link>
+            )}
             {j.tracker_url && (
               <a href={j.tracker_url} target="_blank" rel="noreferrer" className={buttonClass('secondary', 'sm')}>
                 {trackerName}

@@ -25,11 +25,13 @@ import (
 	"danlu/internal/gpu"
 	"danlu/internal/logs"
 	"danlu/internal/notify"
+	"danlu/internal/qrutil"
 	"danlu/internal/runner"
 	"danlu/internal/scheduler"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
 	"danlu/internal/system"
+	"danlu/internal/terminal"
 	"danlu/internal/tlsutil"
 )
 
@@ -37,18 +39,19 @@ import (
 const APIVersion = 1
 
 type Server struct {
-	Cfg     *config.Config
-	Paths   config.Paths
-	Store   *store.Store
-	Mgr     *scheduler.Manager
-	GPUs    *gpu.Monitor
-	System  *system.Monitor
-	Disks   *system.DiskMonitor
-	Notify  *notify.Service
-	Auth    *auth.Auth
-	Runner  *runner.Runner
-	Static  fs.FS
-	Version string
+	Cfg      *config.Config
+	Paths    config.Paths
+	Store    *store.Store
+	Mgr      *scheduler.Manager
+	GPUs     *gpu.Monitor
+	System   *system.Monitor
+	Disks    *system.DiskMonitor
+	Notify   *notify.Service
+	Terminal *terminal.Manager
+	Auth     *auth.Auth
+	Runner   *runner.Runner
+	Static   fs.FS
+	Version  string
 
 	conda condaCache
 }
@@ -85,8 +88,13 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("GET /api/settings/ca.crt", s.caCert)
+	mux.HandleFunc("GET /api/settings/qr.svg", s.settingsQR)
 	mux.HandleFunc("POST /api/settings/password", s.changePassword)
 	mux.HandleFunc("POST /api/notify/test", s.notifyTest)
+	mux.HandleFunc("GET /api/terminal", s.listTerminals)
+	mux.HandleFunc("POST /api/terminal", s.openTerminal)
+	mux.HandleFunc("GET /api/terminal/{id}/ws", s.terminalWS)
+	mux.HandleFunc("POST /api/terminal/{id}/close", s.closeTerminal)
 	mux.HandleFunc("GET /api/audit", s.audit)
 	mux.HandleFunc("GET /api/tokens", s.listTokens)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", s.revokeToken)
@@ -765,6 +773,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"username": s.Auth.Username(), "version": s.Version, "tls_mode": s.Cfg.TLS.Mode,
 		"public_ip": s.Cfg.Server.PublicIP, "port": s.Cfg.Server.Port, "data_dir": s.Paths.Home,
 		"conda_base": s.Cfg.Runtime.CondaBase, "ca_available": false,
+		"terminal_enabled": s.Cfg.Terminal.Enabled,
 	}
 	if s.Cfg.TLS.Mode == config.TLSLocalCA {
 		if fp, err := tlsutil.Fingerprint(tlsutil.FilesIn(s.Paths.TLS).CACert); err == nil {
@@ -790,6 +799,18 @@ func (s *Server) caCert(w http.ResponseWriter, r *http.Request) {
 	}
 	attachment(w, "danlu-ca.crt", "application/x-x509-ca-cert")
 	w.Write(b)
+}
+
+func (s *Server) settingsQR(w http.ResponseWriter, r *http.Request) {
+	svg, err := qrutil.SVG(s.Cfg.URL())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "生成接入二维码失败")
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(svg)
 }
 
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {

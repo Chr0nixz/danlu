@@ -85,3 +85,25 @@ func TestDiskAndRetentionConfig(t *testing.T) {
 		*target = original
 	}
 }
+
+func TestTerminalEnabledByDefaultAndCanBeDisabled(t *testing.T) {
+	if !Default().Terminal.Enabled {
+		t.Fatal("终端默认应启用")
+	}
+	p := PathsFor(t.TempDir())
+	base := "[server]\nport = 17699\nentrance = 'abcdef'\n"
+	if err := os.WriteFile(p.Config, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil || !c.Terminal.Enabled {
+		t.Fatalf("旧配置应默认启用终端: %+v, %v", c, err)
+	}
+	if err := os.WriteFile(p.Config, []byte(base+"[terminal]\nenabled = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(p)
+	if err != nil || c.Terminal.Enabled {
+		t.Fatalf("应能通过配置关闭终端: %+v, %v", c, err)
+	}
+}
