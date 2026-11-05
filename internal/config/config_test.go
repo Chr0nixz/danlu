@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,6 +84,31 @@ func TestDiskAndRetentionConfig(t *testing.T) {
 			t.Fatalf("0 应允许关闭对应策略: %v", err)
 		}
 		*target = original
+	}
+}
+
+func TestAuthAndKillGraceMustBePositive(t *testing.T) {
+	base := func() *Config {
+		c := Default()
+		c.Server.Port, c.Server.Entrance = 17699, "abcdef"
+		return c
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("默认配置应通过: %v", err)
+	}
+	for name, set := range map[string]func(*Config, int){
+		"max_failures": func(c *Config, v int) { c.Auth.MaxFailures = v },
+		"session_ttl":  func(c *Config, v int) { c.Auth.SessionTTL.Duration = time.Duration(v) * time.Second },
+		"lockout":      func(c *Config, v int) { c.Auth.Lockout.Duration = time.Duration(v) * time.Second },
+		"kill_grace":   func(c *Config, v int) { c.Runtime.KillGrace.Duration = time.Duration(v) * time.Second },
+	} {
+		for _, v := range []int{0, -1} {
+			c := base()
+			set(c, v)
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s = %d 应被拒绝: %v", name, v, err)
+			}
+		}
 	}
 }
 

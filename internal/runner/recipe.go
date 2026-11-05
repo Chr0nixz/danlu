@@ -38,7 +38,13 @@ func (r *Runner) CapturePackages(ctx context.Context, s Spec, baseEnv []string) 
 		name, args = "python3", []string{"-m", "pip", "freeze"}
 	}
 	cmd := execx.Command(ctx, name, args...)
-	cmd.Env = r.BuildEnv(baseEnv, s)
+	// 不带任务的身份标记：包清单可能比任务本身跑得久，带着标记的话，
+	// 任务收尾清理残留进程时会把它当成任务进程杀掉，还会在备注里多记一个"已清理"
+	for _, kv := range r.BuildEnv(baseEnv, s) {
+		if !strings.HasPrefix(kv, JobMarker+"=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
 	out, err := execx.Output(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("读取环境包列表失败: %w", err)

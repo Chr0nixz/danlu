@@ -99,6 +99,8 @@ type Manager struct {
 	bootID   string
 	wake     chan struct{}
 	cancelAt map[int64]time.Time
+	// noTracker 是日志已超过 1 MB 仍没找到 W&B / SwanLab 链接的任务：只扫开头 1 MB，之后不会再出现，不再重读
+	noTracker map[int64]bool
 	// starting 是已经占位、还在锁外做准备的任务，值表示这期间有没有被取消
 	starting map[int64]*launchState
 	// pending 是内存里比库里新的任务：写库失败了，每一轮重试，库里的旧状态不再作数
@@ -131,7 +133,7 @@ func New(st JobStore, gpus GPUSource, ex Executor, opt Options) *Manager {
 		opt.ManifestTimeout = 10 * time.Second
 	}
 	m := &Manager{st: st, gpus: gpus, ex: ex, opt: opt, bootID: ex.BootID(), wake: make(chan struct{}, 1),
-		cancelAt: map[int64]time.Time{}, starting: map[int64]*launchState{}, pending: map[int64]*store.Job{},
+		cancelAt: map[int64]time.Time{}, noTracker: map[int64]bool{}, starting: map[int64]*launchState{}, pending: map[int64]*store.Job{},
 		pendingEvents: map[int64][]*store.Event{},
 		ctx:           context.Background()}
 	m.snap = func(ctx context.Context, j *store.Job) (*snapshot.Meta, error) {
@@ -172,6 +174,9 @@ type SubmitReq struct {
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const maxNameLen = 100
+
+// trackerScanLimit：W&B / SwanLab 的 run 链接只在日志开头这么多字节里找
+const trackerScanLimit = 1 << 20
 
 func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	req.Workdir = strings.TrimSpace(req.Workdir)
@@ -429,10 +434,13 @@ func (m *Manager) checkRunning(scanTracker bool) {
 				m.ex.KillAll(j.ID, j.PID)
 			}
 		}
-		if scanTracker && j.TrackerURL == "" {
-			if u := logs.FindTracker(m.ex.LogPath(j.ID), 1<<20); u != "" {
+		if scanTracker && j.TrackerURL == "" && !m.noTracker[j.ID] {
+			p := m.ex.LogPath(j.ID)
+			if u := logs.FindTracker(p, trackerScanLimit); u != "" {
 				j.TrackerURL = u
 				m.save(j)
+			} else if fi, err := os.Stat(p); err == nil && fi.Size() >= trackerScanLimit {
+				m.noTracker[j.ID] = true
 			}
 		}
 	}
@@ -524,9 +532,10 @@ func (m *Manager) finalize(j *store.Job) {
 		}
 	}
 	if j.TrackerURL == "" {
-		j.TrackerURL = logs.FindTracker(m.ex.LogPath(j.ID), 1<<20)
+		j.TrackerURL = logs.FindTracker(m.ex.LogPath(j.ID), trackerScanLimit)
 	}
 	delete(m.cancelAt, j.ID)
+	delete(m.noTracker, j.ID)
 	m.transition(j, status, reason)
 	log.Printf("任务 #%d %s 结束：%s %s", j.ID, j.Name, j.Status, j.FailReason)
 }
@@ -731,6 +740,12 @@ func (m *Manager) launch(ctx context.Context, j *store.Job) {
 			j.SnapshotNote = restoreNote
 		} else if meta.SkipCount > 0 {
 			j.SnapshotNote = fmt.Sprintf("有 %d 个文件没有保存（超出大小限制或不是普通文件）", meta.SkipCount)
+		}
+		if meta.Note != "" && j.CodeFrom == nil {
+			if j.SnapshotNote != "" {
+				j.SnapshotNote += "；"
+			}
+			j.SnapshotNote += meta.Note
 		}
 	}
 	recipe := &store.Recipe{Pending: true}

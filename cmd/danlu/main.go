@@ -935,8 +935,8 @@ After=network-online.target
 
 [Service]
 ExecStart=%s serve
-Environment=DANLU_HOME=%s
-Environment=PATH=%s
+Environment=%s
+Environment=%s
 Restart=on-failure
 RestartSec=3
 # 关键：停止或重启 danlu 时只结束 danlu 自己，不要连带杀掉正在跑的训练进程
@@ -945,6 +945,25 @@ KillMode=process
 [Install]
 WantedBy=default.target
 `
+
+// renderServiceUnit 生成 unit 文件。每个值都加双引号并转义：
+// 不加引号时，PATH 里的空格会把值拆开、后半截丢失，% 会被当作 systemd 的占位符展开，
+// 程序路径有空格时 ExecStart 起不来。ExecStart 里的 $ 还会被当作变量展开，要写成 $$。
+func renderServiceUnit(exe, home, path string) (string, error) {
+	for _, v := range []string{exe, home, path} {
+		if strings.ContainsAny(v, "\n\r\x00") {
+			return "", fmt.Errorf("路径里有换行或空字符，没法写进 systemd 服务: %q", v)
+		}
+	}
+	quote := func(s string, dollar bool) string {
+		s = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s)
+		if dollar {
+			s = strings.ReplaceAll(s, "$", "$$")
+		}
+		return `"` + s + `"`
+	}
+	return fmt.Sprintf(serviceUnit, quote(exe, true), quote("DANLU_HOME="+home, false), quote("PATH="+path, false)), nil
+}
 
 func cmdInstallService() error {
 	exe, err := os.Executable()
@@ -964,7 +983,10 @@ func cmdInstallService() error {
 	}
 	unit := filepath.Join(dir, "danlu.service")
 	// 把当前 PATH 写进服务里，训练脚本才能找到你平时用的命令
-	content := fmt.Sprintf(serviceUnit, exe, p.Home, os.Getenv("PATH"))
+	content, err := renderServiceUnit(exe, p.Home, os.Getenv("PATH"))
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(unit, []byte(content), 0o644); err != nil {
 		return err
 	}

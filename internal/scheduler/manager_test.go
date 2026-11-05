@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1116,6 +1117,44 @@ func TestRenameValidation(t *testing.T) {
 	}
 	if _, err := h.m.Rename(a+100, "x"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("不存在的任务应该返回 ErrNotFound: %v", err)
+	}
+}
+
+// 日志超过 1 MB 还没有 W&B / SwanLab 链接，就不再每轮重读开头；短日志继续找，链接出现后记下
+func TestTrackerScanStopsAfterLimit(t *testing.T) {
+	h := newHarness(t, 0)
+	long, short := h.add(0), h.add(0)
+	h.tick()
+	h.expect(long, store.StatusRunning)
+	h.expect(short, store.StatusRunning)
+	if err := os.WriteFile(h.ex.LogPath(long), bytes.Repeat([]byte("step\n"), trackerScanLimit/5+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.ex.LogPath(short), []byte("step 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.m.step(true, false)
+	h.m.mu.Lock()
+	marked, shortMarked := h.m.noTracker[long], h.m.noTracker[short]
+	h.m.mu.Unlock()
+	if !marked || shortMarked {
+		t.Fatalf("超过 1 MB 的日志应停止扫描，短日志不应：long=%v short=%v", marked, shortMarked)
+	}
+	link := "wandb: View run at https://wandb.ai/me/proj/runs/abc123\n"
+	if err := os.WriteFile(h.ex.LogPath(short), []byte("step 1\n"+link), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.m.step(true, false)
+	if got := h.job(short).TrackerURL; got != "https://wandb.ai/me/proj/runs/abc123" {
+		t.Fatalf("短日志里的链接没有记下: %q", got)
+	}
+	h.ex.finish(long, 0)
+	h.tick()
+	h.m.mu.Lock()
+	_, left := h.m.noTracker[long]
+	h.m.mu.Unlock()
+	if left {
+		t.Fatal("任务结束后应删掉 noTracker 标记")
 	}
 }
 

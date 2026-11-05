@@ -238,6 +238,19 @@ func (c *Config) Validate() error {
 	if c.Runtime.SnapshotMaxFileMB <= 0 || c.Runtime.SnapshotMaxTotalMB <= 0 {
 		return errors.New("快照大小上限必须大于 0")
 	}
+	// 这几项为 0 或负数时没有合理含义：max_failures = 0 第一次输错就锁定，
+	// kill_grace = 0 取消时立刻强杀，session_ttl / lockout 为 0 时会话立即过期、锁定不生效
+	if c.Auth.MaxFailures <= 0 {
+		return errors.New("auth.max_failures 必须大于 0")
+	}
+	for name, d := range map[string]time.Duration{
+		"auth.session_ttl": c.Auth.SessionTTL.Duration, "auth.lockout": c.Auth.Lockout.Duration,
+		"runtime.kill_grace": c.Runtime.KillGrace.Duration,
+	} {
+		if d <= 0 {
+			return fmt.Errorf("%s 必须大于 0", name)
+		}
+	}
 	if c.Runtime.FailFast.Duration < 0 {
 		return errors.New("runtime.fail_fast 不能为负数；设为 0s 可关闭快速失败暂停")
 	}

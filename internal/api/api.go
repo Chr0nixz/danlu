@@ -171,6 +171,9 @@ func attachment(w http.ResponseWriter, name, contentType string) {
 // sseWriteTimeout 是日志 SSE 每次写的期限，每写一次续期一次。
 const sseWriteTimeout = 30 * time.Second
 
+// logAuthInterval 是日志 SSE 多久复查一次凭证。单测里调短
+var logAuthInterval = 5 * time.Second
+
 // noWriteTimeout 清掉服务器的写超时：下载大日志和快照时，手机网络慢也能下完。
 func noWriteTimeout(w http.ResponseWriter) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
@@ -696,8 +699,15 @@ func (s *Server) jobLogStream(w http.ResponseWriter, r *http.Request) {
 	p := s.Runner.LogPath(j.ID)
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
-	lastBeat := time.Now()
+	lastBeat, lastAuth := time.Now(), time.Now()
 	for {
+		// 和网页终端一样：握手之后定时用当初的凭证复查，退出登录、改密码、吊销令牌后断开
+		if time.Since(lastAuth) >= logAuthInterval {
+			if s.Auth != nil && !s.Auth.Authorized(r) {
+				return
+			}
+			lastAuth = time.Now()
+		}
 		data, next, size, rerr := logs.ReadRange(p, off, 64<<10)
 		if rerr == nil && size < off {
 			off = 0 // 日志被截断过，从头开始

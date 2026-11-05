@@ -56,6 +56,8 @@ type Meta struct {
 	SkipCount int         `json:"skip_count"`
 	Truncated bool        `json:"truncated"`
 	TotalSize int64       `json:"total_size"`
+	// Note 是需要用户知道的情况，比如 git 拒绝读取工作目录
+	Note string `json:"note,omitempty"`
 }
 
 const maxSkipList = 200
@@ -97,7 +99,9 @@ func Take(ctx context.Context, workdir, dir string, id int64, opt Options) (*Met
 	meta := &Meta{Workdir: workdir, CreatedAt: time.Now().Unix(), Files: []FileEntry{}, Skipped: []Skip{}}
 	var candidates []string
 	var diff []byte
-	if gitOK(ctx, workdir) {
+	isGit, note := gitCheck(ctx, workdir)
+	meta.Note = note
+	if isGit {
 		meta.Git, diff = gitInfo(ctx, workdir)
 		files, err := gitFiles(ctx, workdir)
 		if err != nil {
@@ -236,8 +240,24 @@ func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 }
 
 func gitOK(ctx context.Context, dir string) bool {
+	ok, _ := gitCheck(ctx, dir)
+	return ok
+}
+
+// gitCheck 判断 dir 是不是 git 工作区。git 因为目录属于其他用户而拒绝读取（dubious ownership）时，
+// 返回一条说明：这种情况不能静默当成非 git 目录，用户要知道 commit 信息为什么没了。
+// 不用 -c safe.directory 绕过：这个检查防的是别人仓库里的配置在我们身上执行命令。
+func gitCheck(ctx context.Context, dir string) (bool, string) {
 	out, err := git(ctx, dir, "rev-parse", "--is-inside-work-tree")
-	return err == nil && strings.TrimSpace(string(out)) == "true"
+	if err == nil {
+		return strings.TrimSpace(string(out)) == "true", ""
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && bytes.Contains(ee.Stderr, []byte("dubious ownership")) {
+		return false, fmt.Sprintf("工作目录属于其他用户，git 拒绝读取（dubious ownership），没有记下 commit，按非 git 目录保存。"+
+			"确认可信后执行 git config --global --add safe.directory %s", dir)
+	}
+	return false, ""
 }
 
 const maxDiff = 5 << 20
