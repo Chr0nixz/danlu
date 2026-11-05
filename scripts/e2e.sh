@@ -209,6 +209,16 @@ check "工作目录不存在时拒绝" [ "$(code -X POST -H 'Content-Type: appli
 check "卡数超过总数时拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$W\",\"cmd\":\"x\",\"gpus\":9}" "$BASE/api/jobs")" = 400 ]
 check "不允许覆盖 CUDA_VISIBLE_DEVICES" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$W\",\"cmd\":\"x\",\"gpus\":1,\"env\":{\"CUDA_VISIBLE_DEVICES\":\"0\"}}" "$BASE/api/jobs")" = 400 ]
 
+LONGNAME=$(python3 -c 'print("训" * 90)')
+LN=$(submit "{\"name\":\"$LONGNAME\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
+check "90 个汉字的任务名能正常启动" wait_status "$LN" succeeded 10
+check "输出目录名不超过 255 字节，任务名原样保存" [ "$(job "$LN" "len(d['output_dir'].rsplit('/',1)[1].encode()) <= 255 and d['name'] == '训' * 90")" = True ]
+LW=$T/$(python3 -c 'print("w" * 120)'); mkdir -p "$LW"
+check "工作目录名很长时不填任务名也能提交" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$LW\",\"cmd\":\"true\",\"gpus\":0}" "$BASE/api/jobs")" = 201 ]
+PE=$(submit "{\"name\":\"path-env\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0,\"conda_env\":\"$T/other-envs/x\"}")
+check "路径形式的 conda 环境能记下包清单" wait_recipe "$PE" 20
+check "路径形式的环境记录成功" [ "$(job "$PE" "bool(d['recipe'].get('env_hash')) and not d['recipe'].get('env_error')")" = True ]
+
 echo "== Bash 环境（.bashrc 里起了后台进程）=="
 X=$(submit "{\"name\":\"X\",\"workdir\":\"$W\",\"cmd\":\"echo bashrc=\$E2E_BASHRC; sleep 1\",\"gpus\":0,\"inherit_bashrc\":true}")
 sleep 0.5
@@ -414,6 +424,8 @@ check "快照重跑用相对路径写出产物" wait_status "$S4D" succeeded 20
 check "快照重跑读到混合目录里被 Git 忽略的文件" [ "$(api "$BASE/api/jobs/$S4D/log?tail=10000" | json "'weights-v1' in d['data']")" = True ]
 check "快照之后新建的代码文件没有混进快照重跑" [ "$(api "$BASE/api/jobs/$S4D/log?tail=10000" | json "'no-add' in d['data']")" = True ]
 check "快照备注写明哪些内容来自工作目录" [ "$(job "$S4D" "'config/model.weights' in d['snapshot_note'] and 'data/' in d['snapshot_note'] and 'add.py' not in d['snapshot_note']")" = True ]
+TRACE_RUN=$(trace_path "$DANLU_HOME/run/$S4D/code/checkpoints/best.pt")
+check "快照重跑写出的 checkpoint 反查到这次重跑" [ "$(echo "$TRACE_RUN" | json "[(m['job']['id'], m['source']) for m in d['matches']][0]")" = "($S4D, 'run_code')" ]
 
 echo "== 设备令牌（桌面客户端）=="
 INFO=$("$BIN" info --json)

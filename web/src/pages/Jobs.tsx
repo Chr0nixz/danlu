@@ -196,7 +196,7 @@ export function Jobs() {
               {trace.data.matches.map((match) => (
                 <div key={match.job.id}>
                   <div className="px-3 pt-2 text-xs text-fg-3 sm:px-4">
-                    来源：{match.source === 'output_dir' ? '输出目录' : match.source === 'danlu_json' ? 'danlu.json' : '可能是'}
+                    来源：{match.source === 'output_dir' ? '输出目录' : match.source === 'run_code' ? '快照重跑目录' : match.source === 'danlu_json' ? 'danlu.json' : '可能是'}
                   </div>
                   <JobRow job={match.job} selection={selectJob(match.job)} />
                 </div>

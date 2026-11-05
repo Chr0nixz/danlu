@@ -511,7 +511,7 @@ func (s *Server) tracePath(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "解析输出目录失败: "+err.Error())
 		return
 	}
-	result, err := jobtrace.Search(s.Store, root, r.URL.Query().Get("path"))
+	result, err := jobtrace.Search(s.Store, root, s.Paths.Run, r.URL.Query().Get("path"))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, jobtrace.ErrPathRequired) || errors.Is(err, jobtrace.ErrPathTooLong) || errors.Is(err, jobtrace.ErrPathNotAbs) {

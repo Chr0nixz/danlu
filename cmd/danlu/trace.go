@@ -26,7 +26,7 @@ func cmdTrace(args []string) error {
 	}
 	defer st.Close()
 
-	result, err := trace.Search(st, root, args[0])
+	result, err := trace.Search(st, root, p.Run, args[0])
 	if err != nil {
 		return err
 	}
@@ -53,6 +53,8 @@ func traceSourceLabel(source trace.Source) string {
 	switch source {
 	case trace.SourceOutputDir:
 		return "输出目录"
+	case trace.SourceRunCode:
+		return "快照重跑目录"
 	case trace.SourceManifest:
 		return "danlu.json"
 	default:

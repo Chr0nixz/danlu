@@ -26,6 +26,29 @@ func TestCapturePackagesUsesConfiguredConda(t *testing.T) {
 	}
 }
 
+// 路径形式的环境（不在 <conda_base>/envs 下）要用 -p，按名字的环境用 -n
+func TestCapturePackagesPathEnvUsesPrefixFlag(t *testing.T) {
+	base := t.TempDir()
+	bin := filepath.Join(base, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 假 conda 把收到的参数原样打印出来
+	if err := os.WriteFile(filepath.Join(bin, "conda"), []byte("#!/bin/sh\necho \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{CondaBase: base}
+	for env, want := range map[string]string{
+		"/home/u/.conda/envs/x": "list -p /home/u/.conda/envs/x --export\n",
+		"train":                 "list -n train --export\n",
+	} {
+		got, err := r.CapturePackages(context.Background(), Spec{CondaEnv: env}, []string{"PATH=/bin"})
+		if err != nil || string(got) != want {
+			t.Fatalf("环境 %s：CapturePackages = %q, %v，应为 %q", env, got, err, want)
+		}
+	}
+}
+
 func TestCapturePackagesUsesTaskPython(t *testing.T) {
 	bin := t.TempDir()
 	python := filepath.Join(bin, "python3")

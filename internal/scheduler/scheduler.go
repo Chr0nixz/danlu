@@ -199,7 +199,13 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 		return nil, invalid("命令不能为空")
 	}
 	if req.Name == "" {
-		req.Name = filepath.Base(req.Workdir) + "-" + time.Now().Format("0102-1504")
+		// 先截短目录名再拼时间，目录名很长时也不会超过任务名长度限制
+		suffix := "-" + time.Now().Format("0102-1504")
+		base := []rune(filepath.Base(req.Workdir))
+		if limit := maxNameLen - len([]rune(suffix)); len(base) > limit {
+			base = base[:limit]
+		}
+		req.Name = string(base) + suffix
 	}
 	if len([]rune(req.Name)) > maxNameLen {
 		return nil, invalid("任务名太长")

@@ -70,7 +70,7 @@ export interface Job {
   wait_reason?: string
 }
 
-export type TraceSource = 'output_dir' | 'danlu_json' | 'guess'
+export type TraceSource = 'output_dir' | 'run_code' | 'danlu_json' | 'guess'
 
 export interface TraceMatch {
   job: Job

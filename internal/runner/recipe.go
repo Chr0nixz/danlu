@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"danlu/internal/execx"
 )
@@ -27,7 +28,12 @@ func (r *Runner) CapturePackages(ctx context.Context, s Spec, baseEnv []string) 
 		if _, err := os.Stat(name); err != nil {
 			name = filepath.Join(r.CondaBase, "condabin", "conda")
 		}
-		args = []string{"list", "-n", s.CondaEnv, "--export"}
+		// 不在 <conda_base>/envs 下的环境以绝对路径作名字，conda 的 -n 不接受带 / 的值，要用 -p
+		flag := "-n"
+		if strings.HasPrefix(s.CondaEnv, "/") {
+			flag = "-p"
+		}
+		args = []string{"list", flag, s.CondaEnv, "--export"}
 	} else {
 		name, args = "python3", []string{"-m", "pip", "freeze"}
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"danlu/internal/store"
@@ -47,7 +48,7 @@ func TestSearchByOutputDirManifestAndGuess(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := Search(st, root, tt.path)
+			result, err := Search(st, root, "", tt.path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +65,7 @@ func TestSearchByOutputDirManifestAndGuess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(job.OutputDir, "danlu.json"), manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Search(st, root, filepath.Join(job.OutputDir, "danlu.json"))
+	result, err := Search(st, root, "", filepath.Join(job.OutputDir, "danlu.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +73,7 @@ func TestSearchByOutputDirManifestAndGuess(t *testing.T) {
 		t.Fatalf("duplicate matches were not merged by priority: %+v", result.Matches)
 	}
 
-	result, err = Search(st, root, filepath.Join(root, "another-project", "1-train", "latest.pt"))
+	result, err = Search(st, root, "", filepath.Join(root, "another-project", "1-train", "latest.pt"))
 	if err != nil || len(result.Matches) != 0 {
 		t.Fatalf("其他项目目录借用了任务编号: %+v %v", result, err)
 	}
@@ -88,12 +89,61 @@ func TestSearchByOutputDirManifestAndGuess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fallbackDir, "danlu.json"), []byte(`{"id":999999}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err = Search(st, root, filepath.Join(fallbackDir, "latest.pt"))
+	result, err = Search(st, root, "", filepath.Join(fallbackDir, "latest.pt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Matches) != 1 || result.Matches[0].Job.ID != job.ID || result.Matches[0].Source != SourceManifest {
 		t.Fatalf("parent manifest fallback failed: %+v", result.Matches)
+	}
+}
+
+// 快照重跑在 run/<id>/code/ 里执行：相对路径写出的 checkpoint 要反查到这次重跑，不是源任务
+func TestSearchRunCodeDir(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "danlu.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	workdir := filepath.Join(t.TempDir(), "project")
+	source := &store.Job{Name: "src", Workdir: workdir, Cmd: "python train.py", Status: store.StatusSucceeded}
+	if err := st.InsertJob(source); err != nil {
+		t.Fatal(err)
+	}
+	ended := int64(1)
+	source.SnapshotOK, source.EndedAt = true, &ended // 重跑要求源任务有可用快照
+	if err := st.SaveJob(source); err != nil {
+		t.Fatal(err)
+	}
+	plain := &store.Job{Name: "plain", Workdir: workdir, Cmd: "python train.py", Status: store.StatusSucceeded}
+	if err := st.InsertJob(plain); err != nil {
+		t.Fatal(err)
+	}
+	rerun := &store.Job{Name: "rerun", Workdir: workdir, Cmd: "python train.py", Status: store.StatusSucceeded, CodeFrom: &source.ID}
+	if err := st.InsertJob(rerun); err != nil {
+		t.Fatal(err)
+	}
+	runRoot := filepath.Join(t.TempDir(), "run")
+	outputs := filepath.Join(t.TempDir(), "outputs")
+	id := func(j *store.Job) string { return strconv.FormatInt(j.ID, 10) }
+
+	result, err := Search(st, outputs, runRoot, filepath.Join(runRoot, id(rerun), "code", "checkpoints", "best.pt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Matches) != 1 || result.Matches[0].Job.ID != rerun.ID || result.Matches[0].Source != SourceRunCode {
+		t.Fatalf("应反查到重跑任务 #%d: %+v", rerun.ID, result.Matches)
+	}
+	// 不是快照重跑的任务不在 code/ 里执行；run/<id> 下的其他文件也不算产物
+	for _, p := range []string{
+		filepath.Join(runRoot, id(plain), "code", "best.pt"),
+		filepath.Join(runRoot, id(rerun), "run.sh"),
+		filepath.Join(runRoot, "999", "code", "best.pt"),
+	} {
+		result, err := Search(st, outputs, runRoot, p)
+		if err != nil || len(result.Matches) != 0 {
+			t.Fatalf("%s 不应匹配: %+v %v", p, result.Matches, err)
+		}
 	}
 }
 
@@ -104,10 +154,10 @@ func TestSearchValidatesAbsolutePathAndReturnsEmptyMatches(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := Search(st, t.TempDir(), "relative/path"); err == nil {
+	if _, err := Search(st, t.TempDir(), "", "relative/path"); err == nil {
 		t.Fatal("relative path was accepted")
 	}
-	result, err := Search(st, t.TempDir(), filepath.Join(t.TempDir(), "unmatched.pt"))
+	result, err := Search(st, t.TempDir(), "", filepath.Join(t.TempDir(), "unmatched.pt"))
 	if err != nil {
 		t.Fatal(err)
 	}

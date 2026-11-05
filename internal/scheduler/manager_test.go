@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1115,6 +1116,25 @@ func TestRenameValidation(t *testing.T) {
 	}
 	if _, err := h.m.Rename(a+100, "x"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("不存在的任务应该返回 ErrNotFound: %v", err)
+	}
+}
+
+// 工作目录名很长时，不填任务名也能提交：默认名先截短目录名再拼时间
+func TestSubmitDefaultNameWithLongWorkdir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Submit 要求以 / 开头的工作目录，只在 Linux 上测")
+	}
+	h := newHarness(t, 0)
+	dir := filepath.Join(t.TempDir(), strings.Repeat("a", 120))
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	j, err := h.m.Submit(SubmitReq{Workdir: dir, Cmd: "true"})
+	if err != nil {
+		t.Fatalf("长目录名的默认任务名被拒: %v", err)
+	}
+	if n := len([]rune(j.Name)); n > maxNameLen || !strings.HasPrefix(j.Name, "aaaa") {
+		t.Fatalf("默认任务名 %q（%d 字）", j.Name, n)
 	}
 }
 

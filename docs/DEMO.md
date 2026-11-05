@@ -268,7 +268,7 @@ GET  /api/workdirs/recent              最近用过的工作目录
 
 GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 fail_kind、error_line 和 traceback_offset）
 GET  /api/jobs?order=ended&before=&before_id=  只要已结束的任务，按结束时间倒序；before / before_id 是上一页最后一条的结束时间和 id（游标翻页，多台服务器的历史按时间合并时用）
-GET  /api/trace?path=                  从绝对路径反查任务，返回匹配来源（output_dir、danlu_json、guess）
+GET  /api/trace?path=                  从绝对路径反查任务，返回匹配来源（output_dir、run_code（快照重跑的 run/<id>/code/）、danlu_json、guess）
 GET  /api/compare?a=&b=                两次任务的命令词、环境变量差异、快照文件差异、包版本及配方
 POST /api/jobs                         提交任务
 GET  /api/jobs/{id}                    任务详情

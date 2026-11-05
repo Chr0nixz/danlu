@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"danlu/internal/store"
 )
@@ -67,6 +68,31 @@ func TestOutputPathKeepsTaskNameInsideProject(t *testing.T) {
 	got := OutputPath(filepath.Join(t.TempDir(), "outputs"), "/work/project", 42, "../train\\test")
 	if filepath.Base(got) != "42-.._train_test" || filepath.Base(filepath.Dir(got)) != "project" {
 		t.Fatalf("OutputPath escaped or changed project grouping: %q", got)
+	}
+}
+
+// 90 个汉字的任务名（270 字节）不能让输出目录的一段超过 255 字节，也不能截出半个字
+func TestOutputPathTruncatesLongNamesByBytes(t *testing.T) {
+	name := strings.Repeat("训", 90)
+	got := OutputPath("/out", "/work/"+strings.Repeat("项", 100), 123456, name)
+	seg, project := filepath.Base(got), filepath.Base(filepath.Dir(got))
+	if len(seg) > maxSegmentBytes || len(project) > maxSegmentBytes {
+		t.Fatalf("段太长：%d / %d 字节", len(seg), len(project))
+	}
+	if !utf8.ValidString(seg) || !utf8.ValidString(project) || !strings.HasPrefix(seg, "123456-训") {
+		t.Fatalf("截断结果不对：%q %q", project, seg)
+	}
+	if short := OutputPath("/out", "/work/p", 1, "run"); filepath.Base(short) != "1-run" {
+		t.Fatalf("短名字不应被截：%q", short)
+	}
+	for _, c := range []struct {
+		s    string
+		n    int
+		want string
+	}{{"abc", 5, "abc"}, {"abc", 2, "ab"}, {"训练", 3, "训"}, {"训练", 4, "训"}, {"训练", 2, ""}, {"a训", 0, ""}} {
+		if got := TruncateBytes(c.s, c.n); got != c.want {
+			t.Errorf("TruncateBytes(%q, %d) = %q，应为 %q", c.s, c.n, got, c.want)
+		}
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"danlu/internal/store"
 )
@@ -52,15 +53,36 @@ type manifestSnapshot struct {
 
 // OutputPath 生成不受任务名称或工作目录内容影响的输出路径。
 func OutputPath(root, workdir string, id int64, name string) string {
-	project := safePathComponent(filepath.Base(filepath.Clean(workdir)))
+	project := strings.TrimSpace(TruncateBytes(safePathComponent(filepath.Base(filepath.Clean(workdir))), maxSegmentBytes))
 	if project == "" || project == "." || project == ".." {
 		project = "project"
 	}
-	jobName := safePathComponent(name)
+	idPart := strconv.FormatInt(id, 10) + "-"
+	// Linux 单段文件名最长 255 字节，一个汉字占 3 字节：任务名按字符数限制，这里还要按字节截断。
+	// 只截目录名，任务名本身照原样保存
+	jobName := strings.TrimSpace(TruncateBytes(safePathComponent(name), maxSegmentBytes-len(idPart)))
 	if jobName == "" || jobName == "." || jobName == ".." {
 		jobName = "job"
 	}
-	return filepath.Join(root, project, strconv.FormatInt(id, 10)+"-"+jobName)
+	return filepath.Join(root, project, idPart+jobName)
+}
+
+// maxSegmentBytes 给输出路径的单段留出余量（上限 255 字节），也给后续加后缀留空间
+const maxSegmentBytes = 200
+
+// TruncateBytes 把 s 截到不超过 n 字节，截在字符边界上。
+func TruncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 0 {
+		return ""
+	}
+	cut := n // len(s) > n，s[n] 存在；往前退到字符的起始字节
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func safePathComponent(value string) string {

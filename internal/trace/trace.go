@@ -27,8 +27,10 @@ type Source string
 
 const (
 	SourceOutputDir Source = "output_dir"
-	SourceManifest  Source = "danlu_json"
-	SourceGuess     Source = "guess"
+	// SourceRunCode：快照重跑在 <数据目录>/run/<id>/code/ 里执行，相对路径写出的产物落在这里
+	SourceRunCode  Source = "run_code"
+	SourceManifest Source = "danlu_json"
+	SourceGuess    Source = "guess"
 )
 
 type Match struct {
@@ -46,8 +48,9 @@ type JobStore interface {
 	JobsByWorkdirs([]string) ([]*store.Job, error)
 }
 
-// Search 按输出目录、danlu.json、命令中的路径片段依次查找。
-func Search(st JobStore, outputRoot, input string) (Result, error) {
+// Search 按输出目录、快照重跑目录、danlu.json、命令中的路径片段依次查找。
+// runRoot 是 <数据目录>/run，为空时不查快照重跑目录。
+func Search(st JobStore, outputRoot, runRoot, input string) (Result, error) {
 	if input == "" {
 		return Result{}, ErrPathRequired
 	}
@@ -92,6 +95,12 @@ func Search(st JobStore, outputRoot, input string) (Result, error) {
 		}
 	}
 
+	if job, err := runCodeJob(st, runRoot, input); err != nil {
+		return Result{}, err
+	} else {
+		add(job, SourceRunCode)
+	}
+
 	if job, err := manifestJob(st, input); err != nil {
 		return Result{}, err
 	} else {
@@ -129,9 +138,43 @@ func Search(st JobStore, outputRoot, input string) (Result, error) {
 	return Result{Path: input, Matches: matches}, nil
 }
 
+// runCodeJob 识别 <runRoot>/<id>/code[/…]，对应用快照重跑的任务 <id>。
+func runCodeJob(st JobStore, runRoot, input string) (*store.Job, error) {
+	if runRoot == "" {
+		return nil, nil
+	}
+	root, err := filepath.Abs(runRoot)
+	if err != nil {
+		return nil, nil
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), input)
+	if err != nil || isOutside(rel) {
+		return nil, nil
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 || parts[1] != "code" {
+		return nil, nil
+	}
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id <= 0 {
+		return nil, nil
+	}
+	job, err := st.GetJob(id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if job.CodeFrom == nil {
+		return nil, nil // 只有快照重跑在 code/ 里执行
+	}
+	return job, nil
+}
+
 func sourcePriority(source Source) int {
 	switch source {
-	case SourceOutputDir:
+	case SourceOutputDir, SourceRunCode:
 		return 0
 	case SourceManifest:
 		return 1
