@@ -81,6 +81,7 @@ start_server() {
 cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
   [ -n "$NTFY_PID" ] && kill "$NTFY_PID" 2>/dev/null
+  [ -n "${TWIN_PID:-}" ] && kill "$TWIN_PID" 2>/dev/null
   [ -f "$T/bashrc-bg.pid" ] && kill "$(cat "$T/bashrc-bg.pid")" 2>/dev/null
 }
 trap cleanup EXIT
@@ -602,6 +603,50 @@ echo ok >"$T/smi.mode"
 check "nvidia-smi 恢复后不再报错" wait_until 25 bash -c "! curl -s -b '$JAR' '$BASE/api/gpus' | grep -q '\"error\"'"
 check "GPU 恢复后清除错误持续时间" wait_until 25 gpus_error_cleared
 check "恢复后排队的任务分到卡并成功" wait_status "$GJ" succeeded 15
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+
+echo "== 两个数据目录的同号任务互不影响 =="
+TA_HOME=$T/home-twin-a TA_PORT=$((PORT + 6)) TB_HOME=$T/home-twin-b TB_PORT=$((PORT + 7))
+for h in "$TA_HOME:$TA_PORT" "$TB_HOME:$TB_PORT"; do
+  DANLU_HOME=${h%:*} "$BIN" init --yes --tls off --port "${h#*:}" --password testpass123 --public-ip 127.0.0.1 --no-qr >/dev/null
+  sed -i 's/kill_grace = .*/kill_grace = "3s"/' "${h%:*}/config.toml"
+done
+# A 用 start_server（SERVER_PID），B 单独起，两个实例同时在跑
+BASE=http://127.0.0.1:$TA_PORT
+start_server DANLU_HOME="$TA_HOME"
+env DANLU_HOME="$TB_HOME" HOME="$T/userhome" "$BIN" serve >>"$T/twin-b.log" 2>&1 &
+TWIN_PID=$!
+wait_until 10 curl -s -o /dev/null "http://127.0.0.1:$TB_PORT/" || { bad "B 没有启动"; cat "$T/twin-b.log"; }
+twin_login() { # 数据目录 端口 cookie 文件
+  curl -s -c "$3" -o /dev/null "http://127.0.0.1:$2/$(DANLU_HOME=$1 "$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')"
+  curl -s -b "$3" -c "$3" -o /dev/null -H 'Content-Type: application/json' -d '{"username":"admin","password":"testpass123"}' "http://127.0.0.1:$2/api/login"
+}
+twin_login "$TA_HOME" "$TA_PORT" "$T/cookies-ta"; twin_login "$TB_HOME" "$TB_PORT" "$T/cookies-tb"
+on_a() { BASE=http://127.0.0.1:$TA_PORT JAR=$T/cookies-ta "$@"; }
+on_b() { BASE=http://127.0.0.1:$TB_PORT JAR=$T/cookies-tb "$@"; }
+A1=$(on_a submit "{\"name\":\"twin-a1\",\"workdir\":\"$W\",\"cmd\":\"sleep 60\",\"gpus\":0}")
+check "A 的任务编号从 1 开始" [ "$A1" = 1 ]
+check "A 的 #1 开始运行" on_a wait_started 1 10
+B1=$(on_b submit "{\"name\":\"twin-b1\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
+check "B 的任务编号也是 1" [ "$B1" = 1 ]
+check "B 的 #1 成功结束" on_b wait_status 1 succeeded 10
+check "B 的 #1 收尾时没有清理 A 的进程" [ "$(on_b job 1 "'已清理' in d['notes']")" = False ]
+sleep 3 # 留出 A 的一轮监控
+check "B 的 #1 结束后 A 的 #1 仍在运行" [ "$(on_a job 1 "d['status']")" = running ]
+A2=$(on_a submit "{\"name\":\"twin-a2\",\"workdir\":\"$W\",\"cmd\":\"sleep 60\",\"gpus\":0}")
+B2=$(on_b submit "{\"name\":\"twin-b2\",\"workdir\":\"$W\",\"cmd\":\"sleep 60\",\"gpus\":0}")
+check "两边的第二个任务都是 #2" [ "$A2$B2" = 22 ]
+check "A 的 #2 开始运行" on_a wait_started 2 10
+check "B 的 #2 开始运行" on_b wait_started 2 10
+# URL 写死端口：$BASE 在调用前就展开了，on_b 改不到它
+on_b api -X POST "http://127.0.0.1:$TB_PORT/api/jobs/2/cancel" -d '{}' >/dev/null
+check "取消 B 的 #2" on_b wait_status 2 cancelled 15
+sleep 3
+check "取消 B 的 #2 后 A 的 #2 仍在运行" [ "$(on_a job 2 "d['status']")" = running ]
+check "A 的 #1 仍在运行" [ "$(on_a job 1 "d['status']")" = running ]
+for id in 1 2; do on_a api -X POST "http://127.0.0.1:$TA_PORT/api/jobs/$id/cancel" -d '{}' >/dev/null; done
+check "A 的任务能正常取消" on_a wait_status 2 cancelled 15
+kill "$TWIN_PID" 2>/dev/null; wait "$TWIN_PID" 2>/dev/null; TWIN_PID=
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
 
 echo "== ntfy 手机推送（本地记录服务）=="

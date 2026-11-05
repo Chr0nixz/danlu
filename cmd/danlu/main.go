@@ -315,7 +315,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	mon := gpu.NewMonitor(gpu.NewSource())
+	mon := gpu.NewMonitor(gpu.NewSource(p.Run))
 	go mon.Run(ctx)
 	host := system.NewMonitor(system.NewSource())
 	go host.Run(ctx)

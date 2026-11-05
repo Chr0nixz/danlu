@@ -35,7 +35,7 @@ type Executor interface {
 	// Start 写脚本并 fork/exec，毫秒级
 	Start(s runner.Spec, env []string) (pid int, start uint64, err error)
 	Alive(jobID int64, pid int, start uint64) bool
-	// Adopt 找回启动途中 danlu 退出时留下的进程（读 pid 文件并核对 DANLU_JOB_ID）
+	// Adopt 找回启动途中 danlu 退出时留下的进程（读 pid 文件并核对 DANLU_RUN_DIR）
 	Adopt(jobID int64) (pid int, start uint64, ok bool)
 	// Launched 返回包装脚本留下的 pid，不要求进程仍存活；文件损坏时 pid 为 0、ok 为 true
 	Launched(jobID int64) (pid int, ok bool)
@@ -507,7 +507,7 @@ func (m *Manager) finalize(j *store.Job) {
 			j.TracebackOffset = &offset
 		}
 	}
-	// 只按 DANLU_JOB_ID 标记清理残留进程，不按进程组：
+	// 只按 DANLU_RUN_DIR 标记清理残留进程，不按进程组：
 	// 包装脚本退出后进程组号可能被别的进程复用
 	if n := m.ex.KillAll(j.ID, 0); n > 0 {
 		note := fmt.Sprintf("已清理 %d 个残留进程", n)

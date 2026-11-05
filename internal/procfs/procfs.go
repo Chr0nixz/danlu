@@ -1,6 +1,6 @@
 // Package procfs 读取 Linux /proc 里的进程信息。
 //
-// danlu 用环境变量 DANLU_JOB_ID 标记任务的所有子孙进程：
+// danlu 用环境变量 JobMarker 标记任务的所有子孙进程：
 // torchrun 会把每个 worker 放进新的 session，进程组追踪不到它们，
 // 但环境变量会一路继承下去，读 /proc/<pid>/environ 就能认出来。
 package procfs
@@ -10,9 +10,38 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// JobMarker 的值是任务的运行目录 <数据目录>/run/<id>，每个数据目录都不一样。
+// 不用 DANLU_JOB_ID：编号在每个数据目录里都从 1 开始，同一用户下两个 danlu 的同号任务会撞上。
+const JobMarker = "DANLU_RUN_DIR"
+
+// JobOf 从进程的 JobMarker 取出任务编号；进程不属于 runRoot 下的任务时返回 0。
+func JobOf(pid int, runRoot string) int64 {
+	if runRoot == "" {
+		return 0
+	}
+	v, ok := EnvVar(pid, JobMarker)
+	if !ok {
+		return 0
+	}
+	return JobFromRunDir(runRoot, v)
+}
+
+// JobFromRunDir 解析 <runRoot>/<id>，不是这个形式时返回 0。
+func JobFromRunDir(runRoot, dir string) int64 {
+	if filepath.Dir(filepath.Clean(dir)) != filepath.Clean(runRoot) {
+		return 0
+	}
+	id, err := strconv.ParseInt(filepath.Base(dir), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
+}
 
 type Stat struct {
 	PID       int

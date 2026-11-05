@@ -116,7 +116,7 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
 ### 4.1 GPU 面板
 
 - 每 2 秒执行一次 `nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits`。
-- 同时执行 `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits`，再读取每个进程 `/proc/<pid>/environ` 里的 `DANLU_JOB_ID`：
+- 同时执行 `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits`，再读取每个进程 `/proc/<pid>/environ` 里的 `DANLU_RUN_DIR`（`<数据目录>/run/<id>`；只认本实例数据目录下的，别的数据目录的同号任务算外部进程）：
   - 属于某个正在运行、并且分到了这张卡的 danlu 任务 → 这张卡显示为**该任务占用**；
   - 其他情况（没有标记、任务已结束、跑到了没分给它的卡上）→ 显示为**外部进程**（附上 pid 和进程所属用户），调度时不分配这张卡。
   - 为什么不用进程组：torchrun 会把每个 worker 放进**新的 session**，进程组追踪不到它们；环境变量会一路继承下去，靠它识别最可靠。
@@ -169,7 +169,7 @@ finish $?
   1. 占位（锁内）：选好卡和端口，任务写成 running、pid 为 0，同时记下开机标识 `boot_id`。写库失败就不启动，下一轮再试；
   2. 准备（锁外）：做快照、加载 `.bashrc`，都有超时。这期间提交、取消、其他任务的收尾都不用等；
   3. 启动（锁内）：这期间被取消了就直接记为已取消，danlu 正在停止就放回队列；否则 fork/exec，毫秒级。
-- **启动方式**：`setsid` 新建一个进程组；stdin 指向 `/dev/null`；stdout 和 stderr 合并写入 `logs/<id>.log`。记录 pid，以及 `/proc/<pid>/stat` 里的进程启动时间，用来防止 pid 被复用时认错进程；读不到启动时间时改为核对进程的 `DANLU_JOB_ID`。启动后写库失败时，任务留在内存里接着监控，下一轮重试写库，不会再启动一次。
+- **启动方式**：`setsid` 新建一个进程组；stdin 指向 `/dev/null`；stdout 和 stderr 合并写入 `logs/<id>.log`。记录 pid，以及 `/proc/<pid>/stat` 里的进程启动时间，用来防止 pid 被复用时认错进程；读不到启动时间时改为核对进程的 `DANLU_RUN_DIR`。启动后写库失败时，任务留在内存里接着监控，下一轮重试写库，不会再启动一次。
 - **注入的环境变量**：
 
   | 变量 | 值 | 作用 |
@@ -179,12 +179,13 @@ finish $?
   | `PET_MASTER_PORT` | 一个空闲端口 | torchrun 自动读取它作为 `--master_port`，避免多个任务撞端口 |
   | `PYTHONUNBUFFERED=1` | | **否则输出重定向到文件时，Python 的 print 会被缓冲，日志要很久才出现** |
   | `DANLU_JOB_ID`、`DANLU_JOB_NAME` | | 方便在代码里引用 |
+  | `DANLU_RUN_DIR` | `<数据目录>/run/<id>` | 任务进程的身份标记：取消、收尾清理、认领和 GPU 归属都按它找进程。不用 `DANLU_JOB_ID`，因为编号在每个数据目录里都从 1 开始 |
   | `DANLU_OUTPUT_DIR` | `<output_root>/<项目>/<任务 id>-<任务名>/`（默认 `~/danlu-outputs`） | 保存模型、checkpoint 等训练产物；danlu 会在其中维护 `danlu.json`，不会清理该目录 |
   | `WANDB_TAGS` | 追加 `danlu-<id>` | 在 W&B 里按标签找回任务 |
 
 - 勾选“Bash 环境”时，danlu 用交互式 Bash 加载服务器用户的 `~/.bashrc`，把其中导出的变量加入任务环境。任务表单里的自定义变量优先于 `.bashrc`，danlu 管理的变量仍由 danlu 注入。文件缺失、加载失败或超过 10 秒时，任务会启动失败。`.bashrc` 里用 `&` 起的后台进程，读完环境后会被结束掉，不会留在服务器上。
 
-- **取消**：向整个进程组，以及所有带 `DANLU_JOB_ID=<id>` 标记的进程发 SIGTERM，等 30 秒（可配置），还没退出就发 SIGKILL。
+- **取消**：向整个进程组，以及所有带 `DANLU_RUN_DIR=<数据目录>/run/<id>` 标记的进程发 SIGTERM，等 30 秒（可配置），还没退出就发 SIGKILL。
 - **收尾**：任务结束后，扫描 `/proc`，找出仍带着这个任务标记的残留进程（比如 DDP 的孤儿 worker）并全部结束掉，在任务上注明"已清理 N 个残留进程"。收尾时只按标记清理、不按进程组号清理，因为包装脚本退出后，进程组号可能已经被别的进程复用了。
 - **重启后接管**：danlu 启动时，检查所有状态为 running 的任务：
   - pid 还在，并且进程启动时间和记录的一致 → 继续监控（改为每 2 秒轮询一次）；

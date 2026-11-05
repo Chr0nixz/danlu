@@ -36,6 +36,9 @@ type Spec struct {
 	OutputDir string
 }
 
+// JobMarker 是任务进程的身份标记，值是 RunDir(id)，见 procfs.JobMarker。
+const JobMarker = procfs.JobMarker
+
 func (r *Runner) RunDir(id int64) string  { return filepath.Join(r.RunRoot, strconv.FormatInt(id, 10)) }
 func (r *Runner) LogPath(id int64) string { return filepath.Join(r.LogRoot, fmt.Sprintf("%d.log", id)) }
 
@@ -126,7 +129,7 @@ func (r *Runner) BuildEnv(base []string, s Spec) []string {
 	set("PYTHONUNBUFFERED", "1")
 	set("DANLU_JOB_ID", id)
 	set("DANLU_JOB_NAME", s.Name)
-	set("DANLU_RUN_DIR", r.RunDir(s.JobID))
+	set(JobMarker, r.RunDir(s.JobID))
 	set("DANLU_WORKDIR", s.Workdir)
 	set("DANLU_CONDA_BASE", r.CondaBase)
 	set("DANLU_CONDA_ENV", s.CondaEnv)
@@ -171,7 +174,7 @@ func (r *Runner) Launched(id int64) (int, bool) {
 }
 
 // Alive 判断任务的包装脚本还在不在。没有记下启动时间时（启动后马上读 /proc 失败），
-// 改为核对进程环境里的 DANLU_JOB_ID，防止 pid 被别的进程复用后认错。
+// 改为核对进程环境里的 JobMarker，防止 pid 被别的进程复用后认错。
 func (r *Runner) Alive(id int64, pid int, start uint64) bool {
 	if !procfs.Alive(pid, start) {
 		return false
@@ -179,12 +182,12 @@ func (r *Runner) Alive(id int64, pid int, start uint64) bool {
 	if start != 0 {
 		return true
 	}
-	v, ok := procfs.EnvVar(pid, "DANLU_JOB_ID")
-	return ok && v == strconv.FormatInt(id, 10)
+	v, ok := procfs.EnvVar(pid, JobMarker)
+	return ok && v == r.RunDir(id)
 }
 
 // Adopt 找回 danlu 启动途中退出时留下的任务进程，返回包装脚本的 pid 和启动时间。
-// 先读 pid 文件；没有的话（脚本还没来得及写），再按 DANLU_JOB_ID 找会话首进程：
+// 先读 pid 文件；没有的话（脚本还没来得及写），再按 JobMarker 找会话首进程：
 // 包装脚本是用 setsid 启动的，它的 pid 就是进程组号。
 func (r *Runner) Adopt(id int64) (int, uint64, bool) {
 	if pid, ok := readInt(filepath.Join(r.RunDir(id), "pid")); ok && r.Alive(id, pid, 0) {
@@ -192,7 +195,7 @@ func (r *Runner) Adopt(id int64) (int, uint64, bool) {
 			return pid, st.StartTime, true
 		}
 	}
-	for _, pid := range procfs.FindByEnv("DANLU_JOB_ID", strconv.FormatInt(id, 10)) {
+	for _, pid := range procfs.FindByEnv(JobMarker, r.RunDir(id)) {
 		if st, err := procfs.ReadStat(pid); err == nil && st.PGID == pid {
 			return pid, st.StartTime, true
 		}

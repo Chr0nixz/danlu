@@ -68,7 +68,7 @@ func releaseVersion(version string) bool {
 }
 
 func gpuCheck(ctx context.Context) Check {
-	src := gpu.NewSource()
+	src := gpu.NewSource("")
 	info := gpu.MachineInfo{}
 	if machine, ok := src.(gpu.MachineSource); ok {
 		var err error

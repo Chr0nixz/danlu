@@ -52,7 +52,9 @@ type MachineSource interface {
 }
 
 // NewSource 默认用 nvidia-smi；设置 DANLU_FAKE_GPUS=N 时用假 GPU（测试用）。
-func NewSource() Source {
+// runRoot 是本实例的 <数据目录>/run，只有运行目录在它下面的进程才算本实例的任务；
+// 为空时不识别任务进程（比如 doctor 只看卡在不在）。
+func NewSource(runRoot string) Source {
 	if n, _ := strconv.Atoi(os.Getenv("DANLU_FAKE_GPUS")); n > 0 {
 		busy := map[int]bool{}
 		for _, s := range strings.Split(os.Getenv("DANLU_FAKE_BUSY"), ",") {
@@ -62,12 +64,14 @@ func NewSource() Source {
 		}
 		return &Fake{N: n, Busy: busy}
 	}
-	return SMI{}
+	return SMI{RunRoot: runRoot}
 }
 
 // ---------- nvidia-smi ----------
 
-type SMI struct{}
+type SMI struct {
+	RunRoot string // 见 NewSource
+}
 
 const gpuQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
 
@@ -85,7 +89,7 @@ func smi(ctx context.Context, args ...string) ([]byte, error) {
 	return execx.Output(execx.Command(ctx, "nvidia-smi", append(args, "--format=csv,noheader,nounits")...))
 }
 
-func (SMI) Query(ctx context.Context) ([]GPU, error) {
+func (s SMI) Query(ctx context.Context) ([]GPU, error) {
 	out, err := smi(ctx, "--query-gpu="+gpuQuery)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi 执行失败: %w", err)
@@ -108,10 +112,8 @@ func (SMI) Query(ctx context.Context) ([]GPU, error) {
 		if !ok {
 			continue
 		}
-		p := Proc{PID: a.PID, UsedMemMB: a.UsedMemMB, User: procfs.Owner(a.PID)}
-		if v, ok := procfs.EnvVar(a.PID, "DANLU_JOB_ID"); ok {
-			p.JobID, _ = strconv.ParseInt(v, 10, 64)
-		}
+		// 别的数据目录的 danlu 任务也算外部进程：编号可能和本实例的任务相同
+		p := Proc{PID: a.PID, UsedMemMB: a.UsedMemMB, User: procfs.Owner(a.PID), JobID: procfs.JobOf(a.PID, s.RunRoot)}
 		gpus[i].Procs = append(gpus[i].Procs, p)
 	}
 	return gpus, nil

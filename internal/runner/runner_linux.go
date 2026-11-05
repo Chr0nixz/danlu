@@ -3,7 +3,6 @@ package runner
 import (
 	"os"
 	"os/exec"
-	"strconv"
 	"syscall"
 
 	"danlu/internal/procfs"
@@ -40,20 +39,21 @@ func (r *Runner) Start(s Spec, env []string) (int, uint64, error) {
 	return pid, st.StartTime, nil
 }
 
-// Signal 给任务的整个进程组，以及所有带 DANLU_JOB_ID 标记的子孙进程发信号，
-// 返回收到信号的标记进程数量。
-func Signal(jobID int64, pgid int, sig syscall.Signal) int {
+// signal 给任务的整个进程组，以及所有带本任务 DANLU_RUN_DIR 标记的子孙进程发信号，
+// 返回收到信号的标记进程数量。按运行目录认进程而不是按任务编号：
+// 编号在每个数据目录里都从 1 开始，同一用户下另一个 danlu 的同号任务不能被误杀。
+func (r *Runner) signal(jobID int64, pgid int, sig syscall.Signal) int {
 	if pgid > 0 {
 		_ = syscall.Kill(-pgid, sig)
 	}
-	pids := procfs.FindByEnv("DANLU_JOB_ID", strconv.FormatInt(jobID, 10))
+	pids := procfs.FindByEnv(JobMarker, r.RunDir(jobID))
 	for _, pid := range pids {
 		_ = syscall.Kill(pid, sig)
 	}
 	return len(pids)
 }
 
-func (r *Runner) Terminate(jobID int64, pgid int) { Signal(jobID, pgid, syscall.SIGTERM) }
+func (r *Runner) Terminate(jobID int64, pgid int) { r.signal(jobID, pgid, syscall.SIGTERM) }
 
 // KillAll 强制结束任务的所有进程，返回清理掉的进程数。
-func (r *Runner) KillAll(jobID int64, pgid int) int { return Signal(jobID, pgid, syscall.SIGKILL) }
+func (r *Runner) KillAll(jobID int64, pgid int) int { return r.signal(jobID, pgid, syscall.SIGKILL) }
