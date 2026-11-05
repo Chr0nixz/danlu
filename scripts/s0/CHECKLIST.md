@@ -37,7 +37,7 @@
 | B2 | 有其他用户或容器在用卡时跑一次 `collect.sh` | `gpu-procs.txt` 里能看到他们的进程；面板上那几张卡标成外部进程 | 报告。没有这种情况就写"没条件" |
 | B3 | 第 A5 条取消后，在 SSH 里运行 `bash ~/s0/jobs/kill_worker.sh <id> dry` | 列不出任何进程 | 输出 |
 | B4 | 提交 `torchrun --nproc_per_node=2 ddp_dummy.py --minutes 10`，跑起来后 `bash ~/s0/jobs/kill_worker.sh <id>` 杀掉一个 worker | 任务失败；记下面板上显示的原因（预计是"退出码 N"或"进程被外部终止"）；卡上没有残留进程 | 任务详情截图；日志文件 `~/.danlu/logs/<id>.log` |
-| B5 | 安卓 Chrome 上从设置页下载 CA 证书并安装，再打开面板 | 不再有证书警告 | 截图；如果装 CA 的步骤卡住了，写下卡在哪一步（S3 要写装 CA 的说明） |
+| B5 | 在电脑上用 `ssh <服务器> danlu ca > danlu-ca.crt` 取回 CA，传到安卓手机安装，再打开面板 | 不再有证书警告 | 截图；如果装 CA 的步骤卡住了，写下卡在哪一步（S3 要写装 CA 的说明） |
 | B6 | （可选）能重启机器的话：跑着一个 `ddp_dummy.py --minutes 60` 时重启 | 开机后不用登录，danlu 就已经在运行（linger）；那个任务显示"服务器重启，任务中断" | 开机后的任务详情截图；`collect.sh` 报告 |
 
 ## C. 失败日志样本（给 S1 的失败归类用）

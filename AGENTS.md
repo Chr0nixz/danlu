@@ -77,13 +77,18 @@ bash scripts/dev-wsl.sh  # demo server on 127.0.0.1:17600 (TLS off, fake GPUs, s
 6. `api.Server`, which also serves the embedded `internal/webui`
 7. `tlsutil.CertManager`: the certificate lives in memory and is served through `GetCertificate`; it reloads changed cert files every minute and renews the local-CA cert daily
 
-On SIGTERM, `serve` cancels the requests' base context (log SSE exits), waits for in-flight requests (`Shutdown`, 5 s), then waits for `Manager.Run` to return, which itself waits for jobs being launched to reach the database. Only then does the database close.
+Before opening the database, `serve` takes an exclusive `flock` on `~/.danlu/serve.lock` (Linux only), so a second instance on the same data directory exits before it migrates, recovers or schedules anything. It also binds the port before `Recover()`, so a port clash never touches jobs either.
+
+On SIGTERM, `serve` cancels the requests' base context (log SSE exits), waits for in-flight requests (`Shutdown`, 5 s), then waits for `Manager.Run` to return, which itself waits for jobs being launched to reach the database. Only then does the database close. Background `danlu.json` writes get at most `ManifestTimeout` (10 s) on the way out, because an output directory on stuck network storage must not hold up shutdown.
 
 ### Request gating (`internal/auth`)
 
 - **Gate cookie.** Visiting `/<entrance>` sets it. Without a valid gate cookie, every path returns an empty 404.
 - **Sessions.** `/api/login` needs only the gate. Every other `/api/*` route also needs a session; on a 401 the frontend redirects to `/login`.
 - **CSRF.** Non-GET API calls must send `Content-Type: application/json`, which together with `SameSite=Strict` cookies is the CSRF defence.
+- **Long-lived connections.** The middleware only sees the handshake, so the terminal WebSocket re-checks the handshake's credentials with `Auth.Authorized` before every input and every 5 s. A password change (including `danlu passwd` from another process), logout, session expiry or token revocation closes it with 4401, and the panel goes to `/login`.
+- **Login rate limit.** Logins from one IP run one at a time (`Auth.lockIP`), and `RecordFailure` bumps the counter and sets the lock in one statement, so concurrent guesses can't outrun `max_failures` or clear a lock.
+- **CA distribution.** The first CA a device trusts comes over SSH (`danlu ca`), never from the panel over an unverified connection.
 - **Device tokens.** These are for the desktop client.
   - A request with a valid `Authorization: Bearer <token>` skips the gate and session checks. An invalid token still gets the empty 404, so the server stays unrecognisable.
   - Tokens are long-lived and stored only as SHA-256 hashes (`device_tokens` table).
@@ -99,7 +104,7 @@ The job lifecycle spans `scheduler`, `runner`, `procfs`, `snapshot` and `store`.
 - **Scheduling.** Strict FIFO: when the job at the head of the queue doesn't fit, nothing behind it starts. Jobs get whole GPUs only, and a card with any external compute process is never allocated. While GPU data is untrusted (`Latest()` errors: stale, or `gpu.ErrProcsUnknown`), no GPU job starts.
 - **Three-step start.** Write before you fork, so a job can never start twice:
   1. Reserve, under the lock: the job is saved as `running` with `pid = 0`, its GPUs, port and `boot_id`. If that write fails, nothing starts.
-  2. Prepare, outside the lock (`launch`): the snapshot (size-capped, 10 s timeout; on failure it is noted on the job, which starts anyway) and `LoadEnv` (`.bashrc`, 10 s).
+  2. Prepare, outside the lock (`launch`): the snapshot (size-capped, 10 s timeout; on failure it is noted on the job, which starts anyway), `LoadEnv` (`.bashrc`, 10 s) and the first `danlu.json` write (10 s; a timeout fails the job). `runner` serialises manifest writes per output directory, so one stuck directory only blocks its own job.
   3. Start, under the lock: cancelled meanwhile → `cancelled`; danlu stopping → back to the queue; otherwise fork/exec and save the pid. Jobs in this window are in `Manager.starting`.
 - **Unsaved state.** When a save fails, the job goes into `Manager.pending` and the in-memory copy wins until a later round saves it.
 - **Launch.** `runner` writes two scripts into `~/.danlu/run/<id>/`: a fixed wrapper, `run.sh`, and the user command, `cmd.sh`. It starts them with `setsid`.

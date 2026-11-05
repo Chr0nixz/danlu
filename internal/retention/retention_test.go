@@ -2,6 +2,7 @@ package retention
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"danlu/internal/config"
+	"danlu/internal/snapshot"
 	"danlu/internal/store"
 )
 
@@ -243,5 +245,78 @@ func TestPruneSymlinkCannotEscape(t *testing.T) {
 	}
 	if _, err := os.Stat(file); err != nil {
 		t.Fatal("清理越过了符号链接")
+	}
+}
+
+// 快照重跑在 run/<id>/code/ 里用相对路径写出的产物不清理，也不计入总量；
+// 恢复出来的代码、指回工作目录的链接和包装脚本照常清理
+func TestPruneKeepsArtifactsOfSnapshotRerun(t *testing.T) {
+	p := newPruner(t)
+	work := t.TempDir()
+	j := &store.Job{Name: "重跑", Workdir: work, Cmd: "train", Status: store.StatusSucceeded}
+	if err := p.Store.InsertJob(j); err != nil {
+		t.Fatal(err)
+	}
+	ended := time.Now().Add(-120 * 24 * time.Hour).Unix()
+	j.EndedAt = &ended
+	if err := p.Store.SaveJob(j); err != nil {
+		t.Fatal(err)
+	}
+	put := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := fmt.Sprint(j.ID)
+	put(filepath.Join(p.Paths.Logs, id+".log"), strings.Repeat("x", 100))
+	meta, _ := json.Marshal(snapshot.Meta{Files: []snapshot.FileEntry{{Path: "train.py"}, {Path: "cfg/a.yaml"}, {Path: "src/model.py"}}})
+	put(filepath.Join(p.Paths.Snapshots, id+".meta.json"), string(meta))
+	put(filepath.Join(p.Paths.Snapshots, id+".tar.gz"), "tar")
+	run := filepath.Join(p.Paths.Run, id)
+	code := filepath.Join(run, "code")
+	put(filepath.Join(run, "run.sh"), "wrapper")
+	put(filepath.Join(code, "train.py"), "print(1)")
+	put(filepath.Join(code, "cfg/a.yaml"), "lr: 1")
+	put(filepath.Join(code, "src/model.py"), "model")
+	put(filepath.Join(work, "data/sample.bin"), "数据")
+	if err := os.Symlink(filepath.Join(work, "data"), filepath.Join(code, "data")); err != nil {
+		t.Skipf("当前系统不能创建符号链接: %v", err)
+	}
+	put(filepath.Join(code, "checkpoints/best.pt"), strings.Repeat("m", 1000))
+	if err := os.Symlink("best.pt", filepath.Join(code, "checkpoints/latest.pt")); err != nil {
+		t.Fatal(err)
+	}
+	put(filepath.Join(code, "cfg/out.json"), strings.Repeat("o", 1000))
+
+	managed := int64(100 + len(meta) + len("tar") + len("wrapper") + len("print(1)") + len("lr: 1") + len("model"))
+	p.Options = Options{KeepDays: 90, DryRun: true}
+	r, err := p.Prune(context.Background())
+	if err != nil || r.TotalBytes != managed || len(r.Jobs) != 1 || r.Jobs[0].Bytes != managed {
+		t.Fatalf("产物不应计入总量: 期望 %d，得到 %+v %v", managed, r, err)
+	}
+	p.Options.DryRun = false
+	if _, err := p.Prune(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"checkpoints/best.pt", "checkpoints/latest.pt", "cfg/out.json"} {
+		if _, err := os.Lstat(filepath.Join(code, rel)); err != nil {
+			t.Fatalf("误删产物 %s: %v", rel, err)
+		}
+	}
+	for _, path := range []string{filepath.Join(run, "run.sh"), filepath.Join(code, "train.py"), filepath.Join(code, "cfg/a.yaml"),
+		filepath.Join(code, "src"), filepath.Join(code, "data"), filepath.Join(p.Paths.Snapshots, id+".meta.json")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s 应该已清理: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(work, "data/sample.bin")); err != nil {
+		t.Fatal("删链接时动了工作目录里的文件")
+	}
+	if got, _ := p.Store.GetJob(j.ID); got.PrunedAt == nil {
+		t.Fatal("清理状态未记录")
 	}
 }

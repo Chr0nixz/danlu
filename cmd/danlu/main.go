@@ -57,6 +57,7 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   entrance          查看安全入口；--reset 重新生成
   port <端口>       修改端口
   cert --regen      重新生成本地 CA 和证书（公网 IP 变化后使用）
+  ca                把本地 CA 证书打印到标准输出，首次接入时用：ssh <服务器> danlu ca > danlu-ca.crt
   install-service   安装为 systemd 用户服务（开机自启、退出 SSH 后继续运行）
   restart           重启服务（正在跑的训练不受影响）
   logs [-n 行数]    查看服务日志（journalctl）
@@ -97,6 +98,8 @@ func main() {
 		err = cmdPort(args)
 	case "cert":
 		err = cmdCert(args)
+	case "ca":
+		err = cmdCA(args)
 	case "restart":
 		err = cmdRestart()
 	case "logs":
@@ -255,6 +258,10 @@ func cmdInit(args []string) error {
 	}
 	fmt.Println("  ──────────────────────────────────────────")
 	fmt.Println("  下一步：danlu install-service（或直接 danlu serve 先试试）")
+	if c.TLS.Mode == config.TLSLocalCA {
+		fmt.Println("  打开面板前，先在自己的电脑上取回并安装 CA：ssh <这台服务器> danlu ca > danlu-ca.crt")
+		fmt.Println("  浏览器提示证书不受信任时不要继续登录")
+	}
 	if !*noQR {
 		return printAccessQR(c.URL())
 	}
@@ -272,6 +279,12 @@ func cmdServe(args []string) error {
 	if err := p.MkdirAll(); err != nil {
 		return err
 	}
+	// 先锁数据目录再开库：迁移、接管任务和调度都只能由一个实例做
+	unlock, err := lockHome(p.Home)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	secret, err := config.EnsureSecret(p)
 	if err != nil {
 		return err
@@ -325,7 +338,14 @@ func cmdServe(args []string) error {
 		FailFast:        c.Runtime.FailFast.Duration,
 		Disks:           disks,
 		DiskMinBytes:    uint64(c.Runtime.DiskMinGB) << 30,
+		ManifestTimeout: 10 * time.Second,
 	})
+	// 先占住端口再接管任务：端口被占用时直接退出，不碰任何任务
+	ln, err := net.Listen("tcp", net.JoinHostPort(c.Server.Bind, strconv.Itoa(c.Server.Port)))
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
 	mgr.Recover()
 	// Run 退出前会等正在启动的任务都落库。数据库要在它之后关：defer 按相反的顺序执行
 	mgrDone := make(chan struct{})
@@ -350,7 +370,6 @@ func cmdServe(args []string) error {
 	base, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
 	httpSrv := &http.Server{
-		Addr:              net.JoinHostPort(c.Server.Bind, strconv.Itoa(c.Server.Port)),
 		Handler:           srv.Handler(),
 		BaseContext:       func(net.Listener) context.Context { return base },
 		ReadHeaderTimeout: 10 * time.Second,
@@ -364,7 +383,7 @@ func cmdServe(args []string) error {
 
 	log.Printf("danlu %s 启动，数据目录 %s", version, p.Home)
 	log.Printf("访问地址 %s", c.URL())
-	listen := httpSrv.ListenAndServe
+	serve := func() error { return httpSrv.Serve(ln) }
 	switch c.TLS.Mode {
 	case config.TLSLocalCA, config.TLSFile:
 		certFile, keyFile := c.TLS.CertFile, c.TLS.KeyFile
@@ -381,15 +400,15 @@ func cmdServe(args []string) error {
 		}
 		go certs.Run(ctx)
 		httpSrv.TLSConfig = &tls.Config{GetCertificate: certs.GetCertificate}
-		listen = func() error { return httpSrv.ListenAndServeTLS("", "") }
+		serve = func() error { return httpSrv.ServeTLS(ln, "", "") }
 	default:
 		log.Printf("⚠ 没有启用 HTTPS，只能用于本地测试")
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- listen() }()
+	go func() { errc <- serve() }()
 	select {
 	case err := <-errc:
-		return err // 端口被占用之类的启动错误
+		return err
 	case <-ctx.Done():
 	}
 
@@ -750,7 +769,36 @@ func cmdCert(args []string) error {
 	if err := config.Save(p, c); err != nil {
 		return err
 	}
-	fmt.Println("已重新生成 CA 和证书。之前安装过 CA 的设备需要删掉旧 CA、重新安装新的。" + restartHint)
+	fmt.Println("已重新生成 CA 和证书。之前安装过 CA 的设备需要删掉旧 CA，用 ssh <这台服务器> danlu ca > danlu-ca.crt 取回新的再安装。" + restartHint)
+	return nil
+}
+
+// cmdCA 把本地 CA 证书打印到标准输出。首次接入和换 CA 时经 SSH 取回：SSH 已经核实了服务器身份，
+// 装好 CA 再打开面板，就不用跳过浏览器的证书警告，密码不会交给冒充面板的人。
+// 指纹打印到标准错误，不混进证书文件。
+func cmdCA(args []string) error {
+	fs := flag.NewFlagSet("ca", flag.ExitOnError)
+	fs.Parse(args)
+	p, c, err := loadForEdit()
+	if err != nil {
+		return err
+	}
+	if c.TLS.Mode != config.TLSLocalCA {
+		return fmt.Errorf("HTTPS 模式是 %s，没有使用本地 CA", c.TLS.Mode)
+	}
+	f := tlsutil.FilesIn(p.TLS).CACert
+	pem, err := os.ReadFile(f)
+	if err != nil {
+		return fmt.Errorf("读取 CA 证书失败: %w", err)
+	}
+	fp, err := tlsutil.Fingerprint(f)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stdout.Write(pem); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "CA 指纹（SHA-256）", fp)
 	return nil
 }
 

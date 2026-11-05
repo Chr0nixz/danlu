@@ -14,6 +14,8 @@ export interface TerminalSocket {
 
 /** 会话被另一个页面接走时服务器用的关闭码 */
 export const TERMINAL_REPLACED = 4001
+/** 登录已失效（改了密码、退出登录或会话到期）时服务器用的关闭码 */
+export const TERMINAL_UNAUTHORIZED = 4401
 
 /** offset 是已经写进终端的输出末尾，服务器只补发之后的部分；首次连接传 null，补发整个缓冲。 */
 export function connectTerminal(id: string, offset: number | null, handlers: TerminalSocketHandlers): TerminalSocket {

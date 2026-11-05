@@ -63,6 +63,7 @@ type DiskSource interface {
 type JobStore interface {
 	InsertJob(*store.Job) error
 	SaveJob(*store.Job) error
+	RenameJob(int64, string) error
 	Transition(*store.Job, ...*store.Event) error
 	TransitionWithSetting(*store.Job, string, string, ...*store.Event) error
 	GetSetting(string) (string, error)
@@ -85,6 +86,8 @@ type Options struct {
 	FailFast        time.Duration
 	Disks           DiskSource
 	DiskMinBytes    uint64
+	// ManifestTimeout 是写 danlu.json 最多等多久：启动前写不完按失败处理，停止时写不完不再等。为 0 时用 10 秒
+	ManifestTimeout time.Duration
 }
 
 type Manager struct {
@@ -124,6 +127,9 @@ type Manager struct {
 type launchState struct{ cancelled bool }
 
 func New(st JobStore, gpus GPUSource, ex Executor, opt Options) *Manager {
+	if opt.ManifestTimeout <= 0 {
+		opt.ManifestTimeout = 10 * time.Second
+	}
 	m := &Manager{st: st, gpus: gpus, ex: ex, opt: opt, bootID: ex.BootID(), wake: make(chan struct{}, 1),
 		cancelAt: map[int64]time.Time{}, starting: map[int64]*launchState{}, pending: map[int64]*store.Job{},
 		pendingEvents: map[int64][]*store.Event{},
@@ -165,6 +171,8 @@ type SubmitReq struct {
 
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+const maxNameLen = 100
+
 func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	req.Workdir = strings.TrimSpace(req.Workdir)
 	req.Cmd = strings.TrimSpace(req.Cmd)
@@ -193,7 +201,7 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	if req.Name == "" {
 		req.Name = filepath.Base(req.Workdir) + "-" + time.Now().Format("0102-1504")
 	}
-	if len([]rune(req.Name)) > 100 {
+	if len([]rune(req.Name)) > maxNameLen {
 		return nil, invalid("任务名太长")
 	}
 	for k := range req.Env {
@@ -284,6 +292,29 @@ func (m *Manager) Cancel(id int64) (*store.Job, error) {
 	return j, nil
 }
 
+// Rename 改任务名，任何状态都能改。只改记录：已经占位的任务，输出目录和 DANLU_JOB_NAME 仍是启动时的名字。
+func (m *Manager) Rename(id int64, name string) (*store.Job, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, invalid("任务名不能为空")
+	}
+	if len([]rune(name)) > maxNameLen {
+		return nil, invalid("任务名太长")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.st.RenameJob(id, name); err != nil {
+		return nil, err
+	}
+	// 写库失败待重试的副本盖过库里的记录，也要改掉，否则之后的输出目录和结束通知还用旧名字
+	if p, ok := m.pending[id]; ok {
+		p.Name = name
+		cp := *p
+		return &cp, nil
+	}
+	return m.st.GetJob(id)
+}
+
 // ---------- 主循环 ----------
 
 // Recover 在启动时调用：仍在运行的任务继续监控，已经结束的补做收尾，启动途中被打断的按 reconcile 处理。
@@ -331,7 +362,7 @@ func (m *Manager) Run(ctx context.Context) {
 	defer func() {
 		m.launches.Wait()
 		m.captures.Wait()
-		m.manifests.Wait()
+		m.waitManifests()
 	}()
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -563,6 +594,9 @@ func (m *Manager) schedule() {
 		if _, unsaved := m.pending[j.ID]; unsaved {
 			return // 重新排队等事件先落库，再启动下一次准备
 		}
+		if _, preparing := m.starting[j.ID]; preparing {
+			return // 库里是排队、内存里还在准备，只会是库被别的进程改过：不能再启动一次
+		}
 		needGPU := j.GPUsReq > 0 || len(j.GPUsPinned) > 0
 		if needGPU && !gpuKnown {
 			return // GPU 信息暂时拿不到（或者不可信），等下一轮
@@ -698,12 +732,16 @@ func (m *Manager) launch(ctx context.Context, j *store.Job) {
 	j.Recipe = recipe
 	var manifestErr error
 	if ctx.Err() == nil && envErr == nil {
-		manifestErr = m.writeManifest(j)
+		manifestErr = m.writeManifest(ctx, j)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ls := m.starting[j.ID]
+	ls, ok := m.starting[j.ID]
+	if !ok {
+		log.Printf("任务 #%d 的启动记录不见了，不再启动", j.ID)
+		return
+	}
 	delete(m.starting, j.ID)
 	switch {
 	case ls.cancelled:
@@ -854,7 +892,9 @@ func (m *Manager) waitMachineRecipe(ctx context.Context, assigned []int) (*store
 	}
 }
 
-func (m *Manager) writeManifest(j *store.Job) error {
+// writeManifest 在启动前写清单。输出目录可能在卡住的网络存储上，最多等 ManifestTimeout，
+// 超时按写入失败处理；卡住的那次写入留在后台，按目录加锁，挡不住别的任务。
+func (m *Manager) writeManifest(ctx context.Context, j *store.Job) error {
 	if j.OutputDir == "" {
 		return nil
 	}
@@ -862,7 +902,35 @@ func (m *Manager) writeManifest(j *store.Job) error {
 	if err != nil {
 		return err
 	}
-	return m.ex.WriteManifest(j.OutputDir, data)
+	dir := j.OutputDir
+	done := make(chan error, 1)
+	m.manifests.Add(1)
+	go func() {
+		defer m.manifests.Done()
+		done <- m.ex.WriteManifest(dir, data)
+	}()
+	timer := time.NewTimer(m.opt.ManifestTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("输出目录 %s 超过 %s 没有响应", dir, m.opt.ManifestTimeout)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// waitManifests 在停止时等后台的清单写入，最多等 ManifestTimeout。清单只写文件、不碰数据库，
+// 来不及写完的那份留在原样（临时文件会残留在输出目录里），不让卡住的存储拖住 danlu 退出。
+func (m *Manager) waitManifests() {
+	done := make(chan struct{})
+	go func() { m.manifests.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(m.opt.ManifestTimeout):
+		log.Printf("还有任务清单超过 %s 没写完，可能是输出目录没有响应，不再等待", m.opt.ManifestTimeout)
+	}
 }
 
 func (m *Manager) queueManifest(j *store.Job, force ...bool) {

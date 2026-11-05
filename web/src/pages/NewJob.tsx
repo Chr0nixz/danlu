@@ -85,12 +85,14 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
       if (errors[field]) setErrors((e) => ({ ...e, [field]: undefined }))
     }
 
-  // 没选过 conda 环境时，默认选第一个非 base 的环境
+  // 新建任务时默认选第一个非 base 的环境。只在环境列表第一次到达时选一次，之后用户选了"不使用 conda"也要保留
+  const condaDefaulted = useRef(false)
   useEffect(() => {
-    if (!source && !condaEnv && conda.data?.envs.length) {
-      setCondaEnv(conda.data.envs.find((e) => e.name !== 'base')?.name ?? conda.data.envs[0].name)
-    }
-  }, [conda.data, source, condaEnv])
+    const envs = conda.data?.envs
+    if (source || condaDefaulted.current || !envs?.length) return
+    condaDefaulted.current = true
+    setCondaEnv((current) => current || (envs.find((e) => e.name !== 'base')?.name ?? envs[0].name))
+  }, [conda.data, source])
 
   const submit = useMutation({
     mutationFn: api.submit,

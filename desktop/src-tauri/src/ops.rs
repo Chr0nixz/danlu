@@ -52,6 +52,21 @@ fn now_sec() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+/// 升级前在跑的任务（`before_pid` 是当时的 pid）有没有被这次重启打断。只看结束时间不够：
+/// 重启期间正常跑完的训练也会在重启之后才记下结束时间。
+fn interrupted(before_pid: i64, restarted_at: i64, job: &serde_json::Value) -> bool {
+    if job["ended_at"].as_i64().is_some_and(|e| e < restarted_at) {
+        return false; // 重启之前就结束了，和升级无关
+    }
+    match job["status"].as_str() {
+        // 接管成功的是同一个进程；升级时还在准备（pid 为 0）的任务停服时放回队列，重新启动也正常
+        Some("running") => before_pid > 0 && job["pid"].as_i64() != Some(before_pid),
+        Some("queued") => before_pid > 0,
+        // 留下了退出码（自己跑完或报错）、被取消、启动失败都不是重启造成的；没留下退出码就没了才是
+        _ => matches!(job["fail_kind"].as_str(), Some("killed" | "reboot")),
+    }
+}
+
 fn remote_err(e: RemoteError) -> String {
     match e {
         RemoteError::Exit(code, stderr) => {
@@ -106,7 +121,13 @@ pub async fn upgrade_server(
     let me = http.get_json(&servers, &name, "/api/me").await?;
     let from = me["version"].as_str().unwrap_or("").to_string();
     let running = http.get_json(&servers, &name, "/api/jobs?status=running&size=200").await?;
-    let running: Vec<i64> = running["jobs"].as_array().into_iter().flatten().filter_map(|j| j["id"].as_i64()).collect();
+    // (任务编号, 升级前的 pid)；pid 为 0 的还在准备，没有进程
+    let running: Vec<(i64, i64)> = running["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|j| Some((j["id"].as_i64()?, j["pid"].as_i64().unwrap_or(0))))
+        .collect();
     say(format!("当前版本 {from}，在跑的任务 {} 个", running.len()));
 
     let exe = if s.exe.is_empty() {
@@ -147,13 +168,12 @@ pub async fn upgrade_server(
     }
     let mut problem = (!serving).then(|| format!("30 秒内 /api/me 仍然不是 {to}"));
 
-    // 检查二：升级前在跑的任务都还在跑（新进程接管成功）。期间正常结束的不算
+    // 检查二：升级前在跑的任务没有被重启打断（新进程接管成功，或者期间自己正常结束）
     if serving {
         let mut lost = vec![];
-        for id in &running {
+        for (id, pid) in &running {
             let j = http.get_json(&servers, &name, &format!("/api/jobs/{id}")).await?;
-            let still = j["status"] == "running" || j["ended_at"].as_i64().is_some_and(|e| e < restarted_at);
-            if !still {
+            if interrupted(*pid, restarted_at, &j) {
                 lost.push(format!("{name}-{id}"));
             }
         }
@@ -242,4 +262,38 @@ pub async fn service_action(
     fleet.poke();
     let command = log.iter().filter(|l| l.starts_with("$ ")).map(|l| &l[2..]).collect::<Vec<_>>().join(" && ");
     Ok(ActionResult { command, output: log.join("\n") })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn finished_during_restart_is_not_interrupted() {
+        let ok = json!({"status": "succeeded", "ended_at": 200, "exit_code": 0, "fail_kind": ""});
+        assert!(!interrupted(42, 100, &ok));
+        let failed = json!({"status": "failed", "ended_at": 200, "exit_code": 1, "fail_kind": "exception"});
+        assert!(!interrupted(42, 100, &failed));
+        let cancelled = json!({"status": "cancelled", "ended_at": 200, "fail_kind": ""});
+        assert!(!interrupted(42, 100, &cancelled));
+    }
+
+    #[test]
+    fn vanished_without_exit_code_is_interrupted() {
+        let killed = json!({"status": "failed", "ended_at": 200, "exit_code": null, "fail_kind": "killed"});
+        assert!(interrupted(42, 100, &killed));
+        // 重启之前就没了的不算这次升级
+        assert!(!interrupted(42, 300, &killed));
+    }
+
+    #[test]
+    fn running_must_be_the_same_process() {
+        assert!(!interrupted(42, 100, &json!({"status": "running", "pid": 42})));
+        assert!(interrupted(42, 100, &json!({"status": "running", "pid": 77})));
+        assert!(interrupted(42, 100, &json!({"status": "queued", "pid": 0})));
+        // 升级时还在准备的任务被放回队列或重新启动都正常
+        assert!(!interrupted(0, 100, &json!({"status": "queued", "pid": 0})));
+        assert!(!interrupted(0, 100, &json!({"status": "running", "pid": 77})));
+    }
 }

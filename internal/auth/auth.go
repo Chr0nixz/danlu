@@ -66,10 +66,40 @@ type Auth struct {
 
 	usedMu sync.Mutex
 	used   map[int64]time.Time // 设备令牌上次写入"最后使用时间"的时刻，避免每个请求都写库
+
+	loginMu sync.Mutex
+	logins  map[string]*ipLock // 正在登录的 IP，用完即删
+}
+
+type ipLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func New(st *store.Store, opt Options) *Auth {
-	return &Auth{opt: opt, store: st, used: map[int64]time.Time{}}
+	return &Auth{opt: opt, store: st, used: map[int64]time.Time{}, logins: map[string]*ipLock{}}
+}
+
+// lockIP 让同一 IP 的登录一个接一个处理。否则并发的请求都在锁定生效前通过检查，各自跑完 bcrypt，
+// 失败次数上限就挡不住猜密码。
+func (a *Auth) lockIP(ip string) func() {
+	a.loginMu.Lock()
+	l := a.logins[ip]
+	if l == nil {
+		l = &ipLock{}
+		a.logins[ip] = l
+	}
+	l.refs++
+	a.loginMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		a.loginMu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(a.logins, ip)
+		}
+		a.loginMu.Unlock()
+	}
 }
 
 func HashPassword(pw string) (string, error) {
@@ -222,6 +252,16 @@ func (a *Auth) SessionValid(r *http.Request) bool {
 	return err == nil && c.Value != "" && a.store.SessionValid(hashToken(c.Value))
 }
 
+// Authorized 用请求当初带的凭证重新判断现在还能不能访问 /api，条件和 Middleware 相同。
+// 网页终端这类长连接只在握手时经过 Middleware，之后靠它复查：改密码、退出登录、会话到期、
+// 吊销设备令牌都会让它返回 false。改密码可能来自另一个进程（danlu passwd），所以每次都查库。
+func (a *Auth) Authorized(r *http.Request) bool {
+	if tok, device := bearerToken(r); device {
+		return a.deviceValid(tok, ClientIP(r))
+	}
+	return a.gateValid(r) && a.SessionValid(r)
+}
+
 // ---------- 设备令牌 ----------
 
 // NewDeviceToken 生成一个设备令牌并入库，返回令牌 id 和令牌本身。令牌只在这里出现一次。
@@ -274,6 +314,7 @@ func (a *Auth) CurrentSessionHash(r *http.Request) string {
 // Login 校验用户名密码，成功后写会话 cookie。锁定时返回 ErrLocked 和剩余时间。
 func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass, code string) (time.Duration, error) {
 	ip := ClientIP(r)
+	defer a.lockIP(ip)()
 	if until := a.store.LockedUntil(ip); !until.IsZero() {
 		return time.Until(until), ErrLocked
 	}

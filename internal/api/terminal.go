@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"danlu/internal/auth"
@@ -123,7 +124,12 @@ const (
 	terminalWriteTimeout = 10 * time.Second
 	// 会话被另一个页面接走时的关闭码，面板据此不再自动重连
 	terminalReplaced websocket.StatusCode = 4001
+	// 握手时的凭证失效了（改密码、退出登录、会话到期、吊销令牌），面板据此跳到登录页
+	terminalUnauthorized websocket.StatusCode = 4401
 )
+
+// terminalAuthInterval 是没有输入时多久复查一次凭证：撤权后输出也要停。单测里调短
+var terminalAuthInterval = 5 * time.Second
 
 // terminalWS 把终端输出以二进制帧发给浏览器。?offset= 是浏览器已经收到的输出末尾，重连时只补发之后的部分；
 // 每段输出之前，如果起点和浏览器算的不一致（首次连接或缓冲已覆盖），先发文本帧 {"type":"offset","offset":N}。
@@ -170,6 +176,34 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 		defer wcancel()
 		return conn.Write(wctx, typ, data)
 	}
+	// 握手只在开头经过鉴权。之后每条输入写进 PTY 之前都用握手时的凭证复查一次，没有输入时也定时查，
+	// 撤权后立刻断开，不再执行命令、也不再推送输出
+	var revoked atomic.Bool
+	authorized := func() bool {
+		if s.Auth == nil || s.Auth.Authorized(r) {
+			return true
+		}
+		if revoked.CompareAndSwap(false, true) {
+			// 先发关闭码再取消：取消读取时库会自己用 1008 关闭连接，面板就分不出是撤权
+			_ = conn.Close(terminalUnauthorized, "unauthorized")
+		}
+		cancel()
+		return false
+	}
+	go func() {
+		ticker := time.NewTicker(terminalAuthInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !authorized() {
+					return
+				}
+			}
+		}
+	}()
 
 	go func() {
 		ticker := time.NewTicker(terminalPingInterval)
@@ -195,6 +229,9 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 			typ, data, err := conn.Read(ctx)
 			if err != nil {
 				cancel()
+				return
+			}
+			if !authorized() {
 				return
 			}
 			switch typ {

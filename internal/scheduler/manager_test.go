@@ -40,6 +40,7 @@ type fakeExec struct {
 	packages   []byte
 	packageErr error
 	packageFn  func(context.Context, runner.Spec, []string) ([]byte, error)
+	manifestFn func(dir string) error // 为空时立即返回
 }
 
 func newExec() *fakeExec {
@@ -169,7 +170,12 @@ func (f *fakeExec) StorePackages(packages []byte) (string, error) {
 	return "fake-package-hash", nil
 }
 
-func (f *fakeExec) WriteManifest(string, []byte) error { return nil }
+func (f *fakeExec) WriteManifest(dir string, _ []byte) error {
+	if f.manifestFn != nil {
+		return f.manifestFn(dir)
+	}
+	return nil
+}
 
 func (f *fakeExec) LogPath(id int64) string {
 	if f.logRoot != "" {
@@ -910,6 +916,78 @@ func TestShutdownDuringLaunch(t *testing.T) {
 	h.events(a, store.EventJobRequeued)
 }
 
+// 库里的任务在准备期间被别的进程改回排队（比如同一数据目录的第二个 danlu 做了接管），
+// 不会再占位启动一次，原来的启动照常完成
+func TestRequeuedInDBWhileStartingDoesNotLaunchTwice(t *testing.T) {
+	h := newHarness(t, 1)
+	release := make(chan struct{})
+	h.ex.loadEnv = func(context.Context) error { <-release; return nil }
+	a := h.add(1)
+	h.m.step(false, true)
+	h.expect(a, store.StatusRunning)
+	j := h.job(a)
+	j.Status, j.GPUsAssigned, j.MasterPort, j.StartedAt = store.StatusQueued, nil, 0, nil
+	if err := h.st.Store.SaveJob(j); err != nil {
+		t.Fatal(err)
+	}
+	h.m.step(false, true)
+	close(release)
+	h.m.launches.Wait()
+	h.m.captures.Wait()
+	h.m.manifests.Wait()
+	if ids := h.ex.startedIDs(); !slices.Equal(ids, []int64{a}) {
+		t.Fatalf("任务应该只启动一次: %v", ids)
+	}
+	h.expect(a, store.StatusRunning, 0)
+}
+
+// 一个输出目录卡住（比如网络存储），只让它自己的任务启动失败，别的任务照常启动
+func TestStuckManifestFailsOnlyItsJob(t *testing.T) {
+	h := newHarness(t, 0)
+	h.m.opt.ManifestTimeout = 100 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	a, b := h.add(0), h.add(0)
+	h.ex.manifestFn = func(dir string) error {
+		if strings.HasPrefix(filepath.Base(dir), fmt.Sprintf("%d-", a)) {
+			<-release
+		}
+		return nil
+	}
+	h.m.step(false, true)
+	within(t, 2*time.Second, "启动", h.m.launches.Wait)
+	h.m.captures.Wait()
+	h.expect(b, store.StatusRunning)
+	if j := h.job(a); j.Status != store.StatusFailed || j.FailKind != "start" || !strings.Contains(j.FailReason, "没有响应") {
+		t.Fatalf("卡住的输出目录应该让任务启动失败: %s %s %s", j.Status, j.FailKind, j.FailReason)
+	}
+	if ids := h.ex.startedIDs(); !slices.Equal(ids, []int64{b}) {
+		t.Fatalf("只应启动另一个任务: %v", ids)
+	}
+}
+
+// 停止时清单写入卡住，danlu 最多等 ManifestTimeout 就退出
+func TestShutdownDoesNotWaitForStuckManifest(t *testing.T) {
+	h := newHarness(t, 0)
+	h.m.opt.ManifestTimeout = 100 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	h.ex.manifestFn = func(string) error { <-release; return nil }
+	a := h.add(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { h.m.Run(ctx); close(done) }()
+	h.m.Wake()
+	for i := 0; h.job(a).Status != store.StatusFailed; i++ {
+		if i == 200 {
+			t.Fatal("任务没有因清单超时失败")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	within(t, 2*time.Second, "Run", func() { <-done })
+}
+
 // ---------- 取消 ----------
 
 func TestCancelQueued(t *testing.T) {
@@ -950,6 +1028,94 @@ func TestCancelRunningKillsAfterGrace(t *testing.T) {
 	h.tick()
 	h.expect(a, store.StatusCancelled)
 	h.events(a, store.EventJobStarted, store.EventJobFinished)
+}
+
+// ---------- 改名 ----------
+
+func TestRenameQueuedStartsWithNewName(t *testing.T) {
+	h := newHarness(t, 1)
+	a := h.add(1)
+	if _, err := h.m.Rename(a, "  vit-lr3e-4  "); err != nil {
+		t.Fatal(err)
+	}
+	h.tick()
+	j := h.job(a)
+	if j.Name != "vit-lr3e-4" || filepath.Base(j.OutputDir) != fmt.Sprintf("%d-vit-lr3e-4", a) {
+		t.Fatalf("改名后启动：名字 %q，输出目录 %q", j.Name, j.OutputDir)
+	}
+	h.ex.mu.Lock()
+	spec := h.ex.started[0]
+	h.ex.mu.Unlock()
+	if spec.Name != "vit-lr3e-4" {
+		t.Fatalf("DANLU_JOB_NAME 用的是 %q", spec.Name)
+	}
+}
+
+func TestRenameRunningKeepsOutputDir(t *testing.T) {
+	h := newHarness(t, 1)
+	a := h.add(1)
+	h.tick()
+	dir := h.job(a).OutputDir
+	if _, err := h.m.Rename(a, "新名字"); err != nil {
+		t.Fatal(err)
+	}
+	h.ex.finish(a, 0)
+	h.tick()
+	j := h.job(a)
+	if j.Status != store.StatusSucceeded || j.Name != "新名字" || j.OutputDir != dir {
+		t.Fatalf("运行中改名后收尾: %+v", j)
+	}
+	events := h.events(a, store.EventJobStarted, store.EventJobFinished)
+	var finished struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(events[1].Data, &finished); err != nil || finished.Name != "新名字" {
+		t.Fatalf("结束事件里的名字 %q，err=%v", finished.Name, err)
+	}
+}
+
+// 写库失败待重试的副本盖过库里的记录，改名也要改到它，结束事件才是新名字
+func TestRenameUpdatesPendingCopy(t *testing.T) {
+	h := newHarness(t, 1)
+	a := h.add(1)
+	h.tick()
+	h.st.setFail(func(j *store.Job) bool { return j.CancelRequested && j.Status == store.StatusRunning })
+	if _, err := h.m.Cancel(a); err == nil {
+		t.Fatal("取消请求写库失败应返回错误")
+	}
+	got, err := h.m.Rename(a, "改过的名字")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CancelRequested || got.Name != "改过的名字" {
+		t.Fatalf("应该返回内存里较新的副本: %+v", got)
+	}
+	h.ex.finish(a, 143)
+	h.tick()
+	h.expect(a, store.StatusCancelled)
+	events := h.events(a, store.EventJobStarted, store.EventJobFinished)
+	var finished struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(events[1].Data, &finished); err != nil || finished.Name != "改过的名字" {
+		t.Fatalf("结束事件里的名字 %q，err=%v", finished.Name, err)
+	}
+}
+
+func TestRenameValidation(t *testing.T) {
+	h := newHarness(t, 0)
+	a := h.add(0)
+	for _, name := range []string{"", "   ", strings.Repeat("名", maxNameLen+1)} {
+		if _, err := h.m.Rename(a, name); !IsValidation(err) {
+			t.Fatalf("任务名 %q 应该返回校验错误: %v", name, err)
+		}
+	}
+	if _, err := h.m.Rename(a, strings.Repeat("名", maxNameLen)); err != nil {
+		t.Fatalf("%d 个字的任务名应该可以: %v", maxNameLen, err)
+	}
+	if _, err := h.m.Rename(a+100, "x"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("不存在的任务应该返回 ErrNotFound: %v", err)
+	}
 }
 
 // ---------- 重启后接管（第 5.1 节的表） ----------

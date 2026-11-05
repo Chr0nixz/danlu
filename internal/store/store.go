@@ -445,6 +445,22 @@ func (s *Store) SaveJob(j *Job) error {
 	return saveJob(s.db, j)
 }
 
+// RenameJob 只改任务名。SaveJob 不写名字，调度器手里的旧副本落库时不会把新名字改回去。
+func (s *Store) RenameJob(id int64, name string) error {
+	res, err := s.db.Exec("UPDATE jobs SET name=? WHERE id=?", name, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 type jobWriter interface {
 	Exec(string, ...any) (sql.Result, error)
 }
@@ -731,22 +747,17 @@ func (s *Store) LockedUntil(ip string) time.Time {
 }
 
 // RecordFailure 记一次失败，达到 max 次后锁定 lockout，并返回是否刚被锁定。
+// 计数加一和锁定在同一条语句里完成，并发的失败不会互相覆盖；已有的锁定只会延长，不会被清掉。
 func (s *Store) RecordFailure(ip string, max int, lockout time.Duration) (bool, error) {
-	var count int
-	err := s.db.QueryRow("SELECT count FROM login_failures WHERE ip=?", ip).Scan(&count)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	count++
-	locked := count >= max
-	until := int64(0)
-	if locked {
-		until = time.Now().Add(lockout).Unix()
-		count = 0
-	}
-	_, err = s.db.Exec(`INSERT INTO login_failures (ip, count, locked_until) VALUES (?,?,?)
-		ON CONFLICT(ip) DO UPDATE SET count=excluded.count, locked_until=excluded.locked_until`, ip, count, until)
-	return locked, err
+	until := time.Now().Add(lockout).Unix()
+	var lockedUntil int64
+	err := s.db.QueryRow(`INSERT INTO login_failures (ip, count, locked_until)
+		VALUES (?1, CASE WHEN 1 >= ?2 THEN 0 ELSE 1 END, CASE WHEN 1 >= ?2 THEN ?3 ELSE 0 END)
+		ON CONFLICT(ip) DO UPDATE SET
+			count = CASE WHEN login_failures.count + 1 >= ?2 THEN 0 ELSE login_failures.count + 1 END,
+			locked_until = CASE WHEN login_failures.count + 1 >= ?2 THEN ?3 ELSE login_failures.locked_until END
+		RETURNING locked_until`, ip, max, until).Scan(&lockedUntil)
+	return err == nil && lockedUntil == until, err
 }
 
 func (s *Store) ResetFailures(ip string) error {

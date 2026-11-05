@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -107,12 +108,41 @@ func ManifestJSON(job *store.Job) ([]byte, error) {
 	return json.MarshalIndent(doc, "", "  ")
 }
 
+type dirLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockManifest 锁住一个输出目录的清单。manifestMu 只保护 manifestLocks，从不在文件 I/O 期间持有。
+func (r *Runner) lockManifest(dir string) func() {
+	dir = filepath.Clean(dir)
+	r.manifestMu.Lock()
+	if r.manifestLocks == nil {
+		r.manifestLocks = map[string]*dirLock{}
+	}
+	l := r.manifestLocks[dir]
+	if l == nil {
+		l = &dirLock{}
+		r.manifestLocks[dir] = l
+	}
+	l.refs++
+	r.manifestMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		r.manifestMu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(r.manifestLocks, dir)
+		}
+		r.manifestMu.Unlock()
+	}
+}
+
 func (r *Runner) WriteManifest(outputDir string, data []byte) error {
 	if outputDir == "" {
 		return nil
 	}
-	r.manifestMu.Lock()
-	defer r.manifestMu.Unlock()
+	defer r.lockManifest(outputDir)()
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return err
 	}

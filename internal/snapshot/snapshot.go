@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -215,12 +216,17 @@ func walkFiles(ctx context.Context, root string, meta *Meta) ([]string, error) {
 		}
 		rel, _ := filepath.Rel(root, p)
 		rel = filepath.ToSlash(rel)
-		if codeNames[d.Name()] || codeExt[strings.ToLower(filepath.Ext(d.Name()))] {
+		if isCodeFile(d.Name()) {
 			out = append(out, rel)
 		}
 		return nil
 	})
 	return out, err
+}
+
+// isCodeFile 是非 git 目录收进快照的文件
+func isCodeFile(name string) bool {
+	return codeNames[name] || codeExt[strings.ToLower(filepath.Ext(name))]
 }
 
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
@@ -280,6 +286,31 @@ func gitFiles(ctx context.Context, dir string) ([]string, error) {
 		files = append(files, s)
 	}
 	return files, nil
+}
+
+// gitIgnored 返回 paths（相对 dir）里现在被 .gitignore 忽略的那些。已跟踪的文件不算忽略。
+func gitIgnored(ctx context.Context, dir string, paths []string) (map[string]bool, error) {
+	ignored := map[string]bool{}
+	if len(paths) == 0 {
+		return ignored, nil
+	}
+	cmd := execx.Command(ctx, "git", "-C", dir, "check-ignore", "-z", "--stdin")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
+	out, err := execx.Output(cmd)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return ignored, nil // 一个都没被忽略
+	}
+	if err != nil {
+		return nil, fmt.Errorf("git check-ignore 失败: %w", err)
+	}
+	for _, p := range bytes.Split(out, []byte{0}) {
+		if len(p) > 0 {
+			ignored[string(p)] = true
+		}
+	}
+	return ignored, nil
 }
 
 // GitHead 返回目录当前的 commit 和是否有未提交改动，用于重跑时提示"代码已变化"。

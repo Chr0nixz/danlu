@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,6 +111,60 @@ func TestLockoutAfterFailures(t *testing.T) {
 	n, _ := resp.Body.Read(buf[:])
 	if resp.StatusCode != 401 || !strings.Contains(string(buf[:n]), "尝试次数过多") {
 		t.Fatalf("锁定期间正确密码也应被拒绝，实际 %d %s", resp.StatusCode, buf[:n])
+	}
+}
+
+// 同一 IP 并发猜密码：只有前 MaxFailures 次真正校验密码，锁定生效后一直有效
+func TestConcurrentFailuresRespectLockout(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := SetPassword(st, "secret-pw"); err != nil {
+		t.Fatal(err)
+	}
+	a := New(st, Options{Entrance: "entry123", Secret: []byte("0123456789abcdef"), Username: "admin",
+		SessionTTL: time.Hour, MaxFailures: 2, Lockout: time.Minute})
+	const n = 21
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := httptest.NewRequest("POST", "/api/login", nil)
+			r.RemoteAddr = "203.0.113.5:4321"
+			_, err := a.Login(httptest.NewRecorder(), r, "admin", "bad", "")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	bad := 0
+	for err := range errs {
+		switch {
+		case errors.Is(err, ErrBadCredentials):
+			bad++
+		case !errors.Is(err, ErrLocked):
+			t.Fatalf("意外的错误: %v", err)
+		}
+	}
+	entries, err := st.ListAudit(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures := 0
+	for _, e := range entries {
+		if e.Action == "login_fail" {
+			failures++
+		}
+	}
+	if bad != 1 || failures != 2 {
+		t.Fatalf("应该只校验 2 次密码（第 2 次触发锁定）：密码错误 %d 次，失败审计 %d 条", bad, failures)
+	}
+	if st.LockedUntil("203.0.113.5").IsZero() {
+		t.Fatal("并发失败后锁定被清掉了")
 	}
 }
 

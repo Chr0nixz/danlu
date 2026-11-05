@@ -20,6 +20,8 @@ type Runner struct {
 	EnvRoot    string // ~/.danlu/envs
 	CondaBase  string
 	manifestMu sync.Mutex
+	// manifestLocks 按输出目录串行写清单，用完即删。一个目录卡住只挡住它自己的任务
+	manifestLocks map[string]*dirLock
 }
 
 type Spec struct {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -138,6 +139,100 @@ func TestTerminalHTTPWebSocketLifecycle(t *testing.T) {
 	if status := apiStatus(t, client, httpSrv.URL, http.MethodPost, "/api/terminal", `{}`); status != http.StatusNotFound {
 		t.Fatalf("disabled open status = %d", status)
 	}
+}
+
+// 握手之后撤权：保持着的终端连接不能再执行命令，也不能继续收输出
+func TestTerminalRevokedCredentialsCloseConnection(t *testing.T) {
+	old := terminalAuthInterval
+	terminalAuthInterval = 100 * time.Millisecond
+	defer func() { terminalAuthInterval = old }()
+	home := t.TempDir()
+	st, err := store.Open(filepath.Join(home, "danlu.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := auth.SetPassword(st, "testpass123"); err != nil {
+		t.Fatal(err)
+	}
+	m := terminal.NewManager()
+	defer m.Close()
+	au := auth.New(st, auth.Options{Entrance: "abcdef", Secret: []byte("test-secret"), Username: "admin", SessionTTL: time.Hour, MaxFailures: 5, Lockout: time.Minute})
+	cfg := config.Default()
+	cfg.Terminal.Enabled = true
+	srv := &Server{Cfg: cfg, Paths: config.PathsFor(home), Store: st, Auth: au, Terminal: m}
+	httpSrv := httptest.NewServer(srv.Handler())
+	defer httpSrv.Close()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Get(httpSrv.URL + "/abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if status := apiStatus(t, client, httpSrv.URL, http.MethodPost, "/api/login", `{"username":"admin","password":"testpass123"}`); status != http.StatusOK {
+		t.Fatalf("login status = %d", status)
+	}
+	open := func() string {
+		created := apiRequest(t, client, httpSrv.URL, http.MethodPost, "/api/terminal", `{}`)
+		defer created.Body.Close()
+		var info terminal.SessionInfo
+		if err := json.NewDecoder(created.Body).Decode(&info); err != nil || info.ID == "" {
+			t.Fatalf("open terminal: %v %+v", err, info)
+		}
+		return "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/api/terminal/" + info.ID + "/ws"
+	}
+	waitClosed := func(ctx context.Context, conn *websocket.Conn) {
+		t.Helper()
+		for {
+			if _, _, err := conn.Read(ctx); err != nil {
+				if websocket.CloseStatus(err) != terminalUnauthorized {
+					t.Fatalf("revoked connection closed with %v, want %d", err, terminalUnauthorized)
+				}
+				return
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 会话被注销（danlu passwd 会删掉所有会话）后，下一条输入不执行
+	conn := dialTerminal(t, client, open())
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte("printf '\\x72eady-marker\\n'\n")); err != nil {
+		t.Fatal(err)
+	}
+	readWSUntil(t, ctx, conn, 0, "ready-marker")
+	if err := st.DeleteSessionsExcept(""); err != nil {
+		t.Fatal(err)
+	}
+	created := filepath.Join(home, "revoked-input")
+	_ = conn.Write(ctx, websocket.MessageBinary, []byte("touch "+created+"\n"))
+	waitClosed(ctx, conn)
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Stat(created); !os.IsNotExist(err) {
+		t.Fatalf("撤权后的输入仍被执行: %v", err)
+	}
+
+	// 设备令牌被吊销后，没有输入的连接也在下一次复查时断开
+	if status := apiStatus(t, client, httpSrv.URL, http.MethodPost, "/api/login", `{"username":"admin","password":"testpass123"}`); status != http.StatusOK {
+		t.Fatalf("relogin status = %d", status)
+	}
+	wsURL := open()
+	id, tok, err := auth.NewDeviceToken(st, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + tok}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RevokeDeviceToken(id); err != nil {
+		t.Fatal(err)
+	}
+	waitClosed(ctx, device)
 }
 
 func apiRequest(t *testing.T, client *http.Client, base, method, path, body string) *http.Response {

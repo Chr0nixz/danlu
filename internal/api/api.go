@@ -86,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs/{id}/env", s.jobEnv)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/star", s.starJob)
+	mux.HandleFunc("POST /api/jobs/{id}/rename", s.renameJob)
 	mux.HandleFunc("GET /api/jobs/{id}/log", s.jobLog)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.jobLogStream)
 	mux.HandleFunc("GET /api/jobs/{id}/log/download", s.jobLogDownload)
@@ -597,6 +598,30 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.views([]*store.Job{j})[0])
 }
 
+func (s *Server) renameJob(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	updated, err := s.Mgr.Rename(j.ID, body.Name)
+	if scheduler.IsValidation(err) {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.Store.Audit(auth.ClientIP(r), "job_rename", fmt.Sprintf("#%d %s → %s", j.ID, j.Name, updated.Name))
+	writeJSON(w, 200, s.views([]*store.Job{updated})[0])
+}
+
 // ---------- 日志 ----------
 
 func (s *Server) jobLog(w http.ResponseWriter, r *http.Request) {
@@ -688,7 +713,21 @@ func (s *Server) jobLogStream(w http.ResponseWriter, r *http.Request) {
 			if next < size {
 				continue
 			}
-		} else if cur, err := s.Store.GetJob(j.ID); err == nil && cur.Finished() && (rerr != nil || off >= size) {
+		} else if cur, err := s.Store.GetJob(j.ID); err == nil && cur.Finished() {
+			if rerr == nil && off < size {
+				// 任务结束了，末尾残缺的字符等不到补齐：换成一个 U+FFFD 发出去，偏移到达文件末尾再发 end
+				if data, next, _, err := logs.ReadFinal(p, off, 64<<10); err == nil && next > off {
+					if len(data) > 0 {
+						t := strings.ToValidUTF8(string(data), "�")
+						b, _ := json.Marshal(map[string]any{"o": next - int64(len(data)), "n": next, "t": t})
+						if !send("data: %s\n\n", b) {
+							return
+						}
+					}
+					off = next
+					continue
+				}
+			}
 			send("event: end\ndata: {\"status\":%q}\n\n", cur.Status)
 			return
 		}

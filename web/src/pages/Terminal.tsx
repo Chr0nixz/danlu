@@ -8,7 +8,7 @@ import { Navigate, useSearchParams } from 'react-router'
 import { type TerminalSession } from '@danlu/core'
 import { Button, Card, cx, ErrorBox, Spinner, Textarea } from '../components/ui'
 import { api } from '../lib/api'
-import { connectTerminal, TERMINAL_REPLACED, type TerminalSocket } from '../lib/terminal'
+import { connectTerminal, TERMINAL_REPLACED, TERMINAL_UNAUTHORIZED, type TerminalSocket } from '../lib/terminal'
 
 const fontSizeKey = 'danlu.terminal.fontSize'
 const encoder = new TextEncoder()
@@ -238,6 +238,12 @@ function TerminalSessionPanel({
           }
           if (event.code === TERMINAL_REPLACED) {
             setStatus('replaced')
+            return
+          }
+          if (event.code === TERMINAL_UNAUTHORIZED) {
+            // 和接口返回 401 一样回登录页，登录后回到这里
+            ended = true
+            location.href = `/login?next=${encodeURIComponent(location.pathname + location.search)}`
             return
           }
           setStatus('reconnecting')

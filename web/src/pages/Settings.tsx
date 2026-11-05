@@ -117,7 +117,7 @@ export function Settings() {
                 referrerPolicy="no-referrer"
                 className="size-48 rounded-md border border-line bg-white p-2"
               />
-              <p className="max-w-prose text-ui leading-relaxed text-fg-2">二维码包含完整安全入口地址。首次访问时，浏览器可能提示证书不受信任；可先进入设置下载并安装本机 CA。</p>
+              <p className="max-w-prose text-ui leading-relaxed text-fg-2">二维码包含完整安全入口地址。手机先装好本机 CA（从这台电脑把 danlu-ca.crt 传过去），再扫码打开；仍提示证书不受信任时不要登录。</p>
             </div>
           )}
         </div>
@@ -234,12 +234,12 @@ function CaInstallSection({ fingerprint, platform, onPlatform }: { fingerprint: 
     ],
     other: [
       '下载 danlu-ca.crt，并按系统或浏览器文档将它导入受信任的根 CA 存储。',
-      '确认导入的是下方指纹对应的证书，然后重新打开浏览器。',
+      '确认导入的证书指纹和 danlu info 显示的一致，然后重新打开浏览器。',
     ],
   }
 
   return (
-    <Section title="安装 CA 证书" desc="本机 CA 只为这台服务器的 IP 签发证书。每台设备安装一次；导入前请核对 SHA-256 指纹。">
+    <Section title="安装 CA 证书" desc="本机 CA 只为这台服务器的 IP 签发证书，每台设备安装一次。导入前和服务器上 danlu info 显示的 CA 指纹核对，对不上不要安装；还没装 CA 的设备，从已装好的电脑传过去，或用 ssh <服务器> danlu ca > danlu-ca.crt 取回。">
       <div className="space-y-4">
         <a href="/api/settings/ca.crt" download="danlu-ca.crt" className={buttonClass('primary', 'sm')}>
           <Download />

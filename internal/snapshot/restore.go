@@ -10,7 +10,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -123,7 +125,6 @@ func Restore(ctx context.Context, snapshots, runRoot, workdir string, source, id
 		return nil, "", err
 	}
 	defer code.Close()
-	archivedTop := map[string]bool{}
 	err = visitArchive(ctx, ArchivePath(snapshots, source), func(h *tar.Header, r io.Reader) error {
 		if strings.Contains("/"+h.Name+"/", "/.git/") {
 			return fmt.Errorf("快照包含 git 管理文件 %q", h.Name)
@@ -132,8 +133,6 @@ func Restore(ctx context.Context, snapshots, runRoot, workdir string, source, id
 		if err != nil {
 			return err
 		}
-		top, _, _ := strings.Cut(h.Name, "/")
-		archivedTop[top] = true
 		if err := code.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 			return err
 		}
@@ -148,7 +147,7 @@ func Restore(ctx context.Context, snapshots, runRoot, workdir string, source, id
 		return nil, "", err
 	}
 
-	note, err := linkCurrentFiles(ctx, code, workdir, archivedTop, meta)
+	note, err := linkCurrentFiles(ctx, code, workdir, meta)
 	if err != nil {
 		return nil, "", err
 	}
@@ -161,23 +160,102 @@ func Restore(ctx context.Context, snapshots, runRoot, workdir string, source, id
 	return meta, note, nil
 }
 
-func linkCurrentFiles(ctx context.Context, code *os.Root, workdir string, archivedTop map[string]bool, meta *Meta) (string, error) {
+// linkCurrentFiles 把快照之外、任务仍要用的文件链接回原工作目录：
+//   - git 目录：现在被 .gitignore 忽略的（数据、权重、输出等），以及快照时因大小等原因跳过的；
+//   - 非 git 目录：快照规则本来就不收的（非代码文件、一个文件都没收的目录），以及跳过的。
+//
+// 快照之后才新建的代码文件不链接，跑的仍是快照里的代码。只往下走快照里也有的目录：
+// 快照一个文件都没收的目录整个链接一次，大的数据目录不用逐个文件处理。
+func linkCurrentFiles(ctx context.Context, code *os.Root, workdir string, meta *Meta) (string, error) {
+	skipped := map[string]bool{}
+	for _, s := range meta.Skipped {
+		if !fs.ValidPath(s.Path) || s.Path == "." {
+			return "", fmt.Errorf("快照清单包含无效路径 %q", s.Path)
+		}
+		skipped[s.Path] = true
+	}
+	// 原目录里有、快照里没有的条目
+	type candidate struct {
+		rel string
+		dir bool
+	}
+	var candidates []candidate
+	workdirMissing := false
+	var walk func(dir string) error
+	walk = func(dir string) error {
+		entries, err := os.ReadDir(filepath.Join(workdir, filepath.FromSlash(dir)))
+		if dir == "" && errors.Is(err, os.ErrNotExist) {
+			workdirMissing = true
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			rel := path.Join(dir, entry.Name())
+			if rel == ".git" {
+				continue
+			}
+			fi, err := code.Lstat(filepath.FromSlash(rel))
+			switch {
+			case err == nil:
+				// 快照里的版本优先；两边都是目录时往下找快照没收的文件
+				if fi.IsDir() && entry.IsDir() {
+					if err := walk(rel); err != nil {
+						return err
+					}
+				}
+			case errors.Is(err, os.ErrNotExist):
+				candidates = append(candidates, candidate{rel, entry.IsDir()})
+			default:
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(""); err != nil {
+		return "", err
+	}
+
+	// 跳过清单不全时分不清哪些是被跳过的，只能把快照之外的都链上
+	linkAll := meta.SkipCount > len(meta.Skipped)
+	var ignored map[string]bool
+	var ignoreNote string
+	if meta.Git != nil && !linkAll {
+		rels := make([]string, len(candidates))
+		for i, c := range candidates {
+			rels[i] = c.rel
+		}
+		var err error
+		if ignored, err = gitIgnored(ctx, workdir, rels); err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			linkAll = true
+			ignoreNote = "判断不了哪些文件被 Git 忽略（" + err.Error() + "），快照之外的文件都用了工作目录里现在的版本"
+		}
+	}
+	wanted := func(c candidate) bool {
+		switch {
+		case linkAll || skipped[c.rel]:
+			return true
+		case meta.Git != nil:
+			return ignored[c.rel]
+		default:
+			return c.dir || !isCodeFile(path.Base(c.rel))
+		}
+	}
+
 	var linked, missing []string
+	linkedSet := map[string]bool{}
 	link := func(rel string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		name, err := filepath.Localize(rel)
-		if err != nil || name == "." {
-			return fmt.Errorf("快照清单包含无效路径 %q", rel)
-		}
-		if _, err := code.Lstat(name); err == nil {
-			return nil // 已恢复的快照文件优先。
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+		name := filepath.FromSlash(rel)
 		original := filepath.Join(workdir, name)
-		if _, err := os.Stat(original); errors.Is(err, os.ErrNotExist) {
+		fi, err := os.Lstat(original)
+		if errors.Is(err, os.ErrNotExist) {
 			missing = append(missing, rel)
 			return nil
 		} else if err != nil {
@@ -189,53 +267,78 @@ func linkCurrentFiles(ctx context.Context, code *os.Root, workdir string, archiv
 		if err := code.Symlink(original, name); err != nil {
 			return err
 		}
+		linkedSet[rel] = true
+		if fi.IsDir() {
+			rel += "/"
+		}
+		linked = append(linked, rel)
 		return nil
 	}
-	entries, err := os.ReadDir(workdir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	for _, entry := range entries {
-		if entry.Name() != ".git" && !archivedTop[entry.Name()] {
-			if err := link(entry.Name()); err != nil {
-				return "", err
-			}
-		}
-	}
-	// 已链接的顶层目录会带上子文件。只在从快照恢复的目录中单独补链接。
-	for _, skipped := range meta.Skipped {
-		top, _, _ := strings.Cut(skipped.Path, "/")
-		if top == ".git" {
-			continue
-		}
-		original := filepath.Join(workdir, filepath.FromSlash(skipped.Path))
-		if !fs.ValidPath(skipped.Path) || skipped.Path == "." {
-			return "", fmt.Errorf("快照清单包含无效路径 %q", skipped.Path)
-		}
-		if _, err := os.Stat(original); errors.Is(err, os.ErrNotExist) {
-			missing = append(missing, skipped.Path)
-			continue
-		} else if err != nil {
+	for _, c := range candidates {
+		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if archivedTop[top] {
-			if err := link(skipped.Path); err != nil {
+		if wanted(c) {
+			if err := link(c.rel); err != nil {
 				return "", err
 			}
 		}
-		linked = append(linked, skipped.Path)
 	}
+	// 跳过的文件在没有链接的目录里时，单独补上
+	for _, s := range meta.Skipped {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		top, _, _ := strings.Cut(s.Path, "/")
+		if top == ".git" || underLinked(s.Path, linkedSet) {
+			continue
+		}
+		name, err := filepath.Localize(s.Path)
+		if err != nil {
+			return "", fmt.Errorf("快照清单包含无效路径 %q", s.Path)
+		}
+		if _, err := code.Lstat(name); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if err := link(s.Path); err != nil {
+			return "", err
+		}
+	}
+	sort.Strings(linked)
 	var notes []string
 	if len(linked) > 0 {
-		notes = append(notes, "以下文件用的是现在的版本："+strings.Join(linked, "、"))
+		notes = append(notes, "以下内容不在快照里，用的是工作目录里现在的版本："+listPaths(linked))
 	}
 	if len(missing) > 0 {
-		notes = append(notes, "原目录中缺少："+strings.Join(missing, "、"))
+		notes = append(notes, "原目录中缺少："+listPaths(missing))
 	}
-	if meta.SkipCount > len(meta.Skipped) || errors.Is(err, os.ErrNotExist) {
+	if ignoreNote != "" {
+		notes = append(notes, ignoreNote)
+	}
+	if meta.SkipCount > len(meta.Skipped) || workdirMissing {
 		notes = append(notes, "快照跳过清单不全或原工作目录不存在，可能缺文件")
 	}
 	return strings.Join(notes, "。"), ctx.Err()
+}
+
+// underLinked 判断 rel 本身或它的某个上级目录已经链接过
+func underLinked(rel string, linked map[string]bool) bool {
+	for p := rel; p != "." && p != "/"; p = path.Dir(p) {
+		if linked[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// listPaths 最多列 20 项，免得一个大目录把备注撑满
+func listPaths(paths []string) string {
+	if len(paths) <= 20 {
+		return strings.Join(paths, "、")
+	}
+	return strings.Join(paths[:20], "、") + fmt.Sprintf(" 等 %d 项", len(paths))
 }
 
 func linkSnapshot(dir string, source, id int64) error {

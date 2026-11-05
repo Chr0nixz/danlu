@@ -28,6 +28,20 @@ func TestReadRangeAlignsStart(t *testing.T) {
 	}
 }
 
+// 结束的任务末尾留着半个字符：ReadRange 一直等它补齐，ReadFinal 把它读掉、到达文件末尾
+func TestReadFinalConsumesTruncatedTail(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "l.log")
+	os.WriteFile(p, []byte("ok\n训"[:5]), 0o644) // "训" 只有前两个字节
+	data, next, _, err := ReadRange(p, 3, 100)
+	if err != nil || len(data) != 0 || next != 3 {
+		t.Fatalf("ReadRange 应该保留残缺字节: %q next=%d err=%v", data, next, err)
+	}
+	data, next, size, err := ReadFinal(p, 3, 100)
+	if err != nil || string(data) != "训"[:2] || next != size {
+		t.Fatalf("ReadFinal 应该读到文件末尾: %q next=%d size=%d err=%v", data, next, size, err)
+	}
+}
+
 func TestLastLine(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "l.log")
 	os.WriteFile(p, []byte("start\nepoch 1:  10%|#   | 1/10\repoch 1:  50%|#####| 5/10\x1b[0m\r\n\n"), 0o644)

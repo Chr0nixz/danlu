@@ -3,6 +3,7 @@ package retention
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"danlu/internal/config"
+	"danlu/internal/snapshot"
 	"danlu/internal/store"
 )
 
@@ -72,7 +74,128 @@ func (p *Pruner) Run(ctx context.Context) {
 
 func pathsFor(id int64) []string {
 	n := strconv.FormatInt(id, 10)
-	return []string{"logs/" + n + ".log", "snapshots/" + n + ".tar.gz", "snapshots/" + n + ".meta.json", "snapshots/" + n + ".diff", "run/" + n}
+	return []string{"logs/" + n + ".log", "snapshots/" + n + ".tar.gz", "snapshots/" + n + ".meta.json", "snapshots/" + n + ".diff", runPath(id)}
+}
+
+func runPath(id int64) string { return "run/" + strconv.FormatInt(id, 10) }
+
+// restoredFiles 是快照清单里的文件，也就是快照重跑在 code/ 里恢复出来的文件。
+// 清单已经不在时返回空：code/ 里剩下的普通文件都当产物保留。
+func restoredFiles(root *os.Root, id int64) []string {
+	b, err := fs.ReadFile(root.FS(), "snapshots/"+strconv.FormatInt(id, 10)+".meta.json")
+	if err != nil {
+		return nil
+	}
+	var meta snapshot.Meta
+	if json.Unmarshal(b, &meta) != nil {
+		return nil
+	}
+	files := make([]string, 0, len(meta.Files))
+	for _, f := range meta.Files {
+		if fs.ValidPath(f.Path) && f.Path != "." {
+			files = append(files, f.Path)
+		}
+	}
+	return files
+}
+
+// pruneRun 清理（dryRun 时只统计）一个任务的运行目录，返回其中由丹炉管理的字节数。
+// 快照重跑的 code/ 里有恢复出来的代码、指回原工作目录的链接，还有任务用相对路径写出的产物
+// （checkpoints/ 之类）。只删前两种；产物和装着产物的目录留下，也不计入总量。
+func pruneRun(root *os.Root, id int64, workdir, home string, protected []string, dryRun bool) (int64, error) {
+	name := runPath(id)
+	code := name + "/code"
+	fi, err := root.Lstat(name)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	whole := !fi.IsDir() // 运行目录本身是符号链接时只删链接
+	if !whole {
+		ci, err := root.Lstat(code)
+		if err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
+		whole = err != nil || !ci.IsDir() // 不是快照重跑：整个运行目录都是丹炉写的
+	}
+	if whole {
+		size, err := sizeOf(root, name, home, protected)
+		if err != nil || dryRun {
+			return size, err
+		}
+		return size, root.RemoveAll(name)
+	}
+
+	var size int64
+	entries, err := fs.ReadDir(root.FS(), name)
+	if err != nil {
+		return 0, err
+	}
+	for _, e := range entries {
+		if e.Name() == "code" {
+			continue
+		}
+		child := name + "/" + e.Name()
+		n, err := sizeOf(root, child, home, protected)
+		if err != nil {
+			return size, err
+		}
+		size += n
+		if !dryRun {
+			if err := root.RemoveAll(child); err != nil {
+				return size, err
+			}
+		}
+	}
+	for _, rel := range restoredFiles(root, id) {
+		p := code + "/" + rel
+		if isProtected(home, p, protected) {
+			continue
+		}
+		fi, err := root.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue // 已经不在、被任务换成了别的，或者路径经过链接：都留下
+		}
+		size += fi.Size()
+		if !dryRun {
+			if err := root.Remove(p); err != nil && !os.IsNotExist(err) {
+				return size, err
+			}
+		}
+	}
+	if dryRun {
+		return size, nil
+	}
+	// 指回原工作目录的链接是恢复时建的；任务自己建的链接指向别处，留下。WalkDir 不跟随链接
+	var dirs []string
+	err = fs.WalkDir(root.FS(), code, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			dirs = append(dirs, p)
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		target, err := root.Readlink(p)
+		if err != nil || target != filepath.Join(workdir, filepath.FromSlash(strings.TrimPrefix(p, code+"/"))) {
+			return nil
+		}
+		return root.Remove(p)
+	})
+	if err != nil {
+		return size, err
+	}
+	// 从里往外删空目录；还装着产物的目录删不掉，正好留下
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = root.Remove(dirs[i])
+	}
+	_ = root.Remove(name)
+	return size, nil
 }
 
 // canonical 也支持尚未创建或已经清掉的路径；解析最近的现有父目录里的符号链接。
@@ -117,16 +240,43 @@ func checkProtected(home, rel string, protected []string) error {
 	return nil
 }
 
-func sizeOf(root *os.Root, name, home string, protected []string) (int64, error) {
-	excluded := func(rel string) bool {
-		full := filepath.Join(home, filepath.FromSlash(rel))
-		for _, output := range protected {
-			if inside(full, output) {
-				return true
-			}
-		}
-		return false
+// runTotal 统计 run/ 里由丹炉管理的字节数，快照重跑写在 code/ 里的产物不算
+func runTotal(root *os.Root, home string, protected []string) (int64, error) {
+	entries, err := fs.ReadDir(root.FS(), "run")
+	if err != nil {
+		return 0, err
 	}
+	var total int64
+	for _, e := range entries {
+		name := "run/" + e.Name()
+		id, parseErr := strconv.ParseInt(e.Name(), 10, 64)
+		var n int64
+		if parseErr == nil && runPath(id) == name {
+			n, err = pruneRun(root, id, "", home, protected, true)
+		} else {
+			n, err = sizeOf(root, name, home, protected)
+		}
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// isProtected 判断数据目录里的 rel 是否落在某个输出目录里
+func isProtected(home, rel string, protected []string) bool {
+	full := filepath.Join(home, filepath.FromSlash(rel))
+	for _, output := range protected {
+		if inside(full, output) {
+			return true
+		}
+	}
+	return false
+}
+
+func sizeOf(root *os.Root, name, home string, protected []string) (int64, error) {
+	excluded := func(rel string) bool { return isProtected(home, rel, protected) }
 	if excluded(name) {
 		return 0, nil
 	}
@@ -224,7 +374,12 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return r, fmt.Errorf("管理目录 %s 是符号链接，停止清理", dir)
 		}
-		n, err := sizeOf(root, dir, home, protected)
+		var n int64
+		if dir == "run" {
+			n, err = runTotal(root, home, protected)
+		} else {
+			n, err = sizeOf(root, dir, home, protected)
+		}
 		if err != nil {
 			return r, err
 		}
@@ -265,7 +420,13 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 				targetErr = err
 				break
 			}
-			n, err := sizeOf(root, name, home, protected)
+			var n int64
+			var err error
+			if name == runPath(j.ID) {
+				n, err = pruneRun(root, j.ID, j.Workdir, home, protected, true)
+			} else {
+				n, err = sizeOf(root, name, home, protected)
+			}
 			if err != nil {
 				targetErr = err
 				break
@@ -285,10 +446,16 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 			if !claimed {
 				continue
 			}
+			// 运行目录先清：分辨 code/ 里恢复出来的文件要用快照清单，清单要留到最后再删
+			if _, err := pruneRun(root, j.ID, j.Workdir, home, protected, false); err != nil {
+				targetErr = err
+			}
 			for _, name := range pathsFor(j.ID) {
-				if err := root.RemoveAll(name); err != nil {
-					targetErr = err
+				if targetErr != nil {
 					break
+				}
+				if name != runPath(j.ID) {
+					targetErr = root.RemoveAll(name)
 				}
 			}
 			var at *int64

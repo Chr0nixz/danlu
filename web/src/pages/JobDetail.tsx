@@ -1,12 +1,12 @@
-import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, GitCompareArrows, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
-import { useRef, useState, type ReactNode } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, GitCompareArrows, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
+import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { CancelDialog } from '../components/JobRow'
 import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
 import { StarButton, StarError, StarMenuItem } from '../components/StarButton'
-import { Alert, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, hitArea, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
+import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, hitArea, Input, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
 import { ApiError, compactProgress, duration, fmtTime, isActive, jobDuration, now, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 
@@ -43,6 +43,8 @@ export function JobDetail() {
       { replace: true },
     )
   const [confirming, setConfirming] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const renameButton = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
 
   const showLog = (offset?: number) => {
@@ -116,64 +118,90 @@ export function JobDetail() {
     <div className="space-y-4">
       <div className="space-y-2">
         <BackLink />
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-          <h1 className="flex min-w-0 flex-1 items-start gap-2 text-xl font-semibold tracking-tight">
-            <StatusIcon status={j.status} cancelling={j.cancel_requested} className="mt-1.5 size-5" />
-            <span className="min-w-0 break-all">
-              {j.name}
-              <span className="ml-2 font-normal text-fg-3">#{j.id}</span>
-              {j.starred && <Star role="img" aria-label="已标星" className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
-            </span>
-          </h1>
+        {renaming ? (
+          <RenameForm
+            job={j}
+            onDone={() => {
+              setRenaming(false)
+              requestAnimationFrame(() => renameButton.current?.focus())
+            }}
+          />
+        ) : (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <div className="flex min-w-0 flex-1 items-start gap-1">
+              <h1 className="flex min-w-0 items-start gap-2 text-xl font-semibold tracking-tight">
+                <StatusIcon status={j.status} cancelling={j.cancel_requested} className="mt-1.5 size-5" />
+                <span className="min-w-0 break-all">
+                  {j.name}
+                  <span className="ml-2 font-normal text-fg-3">#{j.id}</span>
+                  {j.starred && <Star role="img" aria-label="已标星" className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
+                </span>
+              </h1>
+              <button
+                ref={renameButton}
+                type="button"
+                className={cx(buttonClass('ghost', 'icon-sm'), '-mt-0.5 text-fg-3 max-sm:hidden')}
+                aria-label="修改任务名"
+                title="修改任务名"
+                onClick={() => setRenaming(true)}
+              >
+                <Pencil aria-hidden />
+              </button>
+            </div>
 
-          {/* 电脑：操作都露在外面，主操作放最右 */}
-          <div className="hidden flex-wrap justify-end gap-2 sm:flex">
-            <StarButton job={j} label />
-            {terminal && (
-              <Link to={`/terminal?job_id=${j.id}`} className={buttonClass('secondary', 'sm')} title="在这个任务的目录和 conda 环境中打开终端">
-                <TerminalIcon aria-hidden />
-                终端
-              </Link>
-            )}
-            {tracker(buttonClass('secondary', 'sm'))}
-            <Link to={`/compare?a=${j.id}`} className={buttonClass('secondary', 'sm')}>
-              <GitCompareArrows aria-hidden />
-              和…对比
-            </Link>
-            {canCancel && (
-              <Link to={`/new?from=${j.id}`} className={buttonClass('secondary', 'sm')} title={rerunTitle}>
-                <RotateCw aria-hidden />
-                {rerunLabel}
-              </Link>
-            )}
-            {primary('')}
-          </div>
-
-          {/* 手机：一行放主操作和实验记录，其余收进"更多"，把首屏留给日志 */}
-          <div className="flex items-center gap-2 sm:hidden">
-            {primary('h-11 px-3.5 text-sm')}
-            {tracker(cx(buttonClass('secondary', 'sm'), 'h-11 px-3.5 text-sm'))}
-            <Menu label="更多操作" className="ml-auto" buttonClassName="size-11">
-              <StarMenuItem job={j} />
-              {canCancel && (
-                <Link role="menuitem" to={`/new?from=${j.id}`} className={menuItemClass}>
-                  <RotateCw aria-hidden />
-                  {rerunLabel}
-                </Link>
-              )}
+            {/* 电脑：操作都露在外面，主操作放最右 */}
+            <div className="hidden flex-wrap justify-end gap-2 sm:flex">
+              <StarButton job={j} label />
               {terminal && (
-                <Link role="menuitem" to={`/terminal?job_id=${j.id}`} className={menuItemClass}>
+                <Link to={`/terminal?job_id=${j.id}`} className={buttonClass('secondary', 'sm')} title="在这个任务的目录和 conda 环境中打开终端">
                   <TerminalIcon aria-hidden />
                   终端
                 </Link>
               )}
-              <Link role="menuitem" to={`/compare?a=${j.id}`} className={menuItemClass}>
+              {tracker(buttonClass('secondary', 'sm'))}
+              <Link to={`/compare?a=${j.id}`} className={buttonClass('secondary', 'sm')}>
                 <GitCompareArrows aria-hidden />
                 和…对比
               </Link>
-            </Menu>
+              {canCancel && (
+                <Link to={`/new?from=${j.id}`} className={buttonClass('secondary', 'sm')} title={rerunTitle}>
+                  <RotateCw aria-hidden />
+                  {rerunLabel}
+                </Link>
+              )}
+              {primary('')}
+            </div>
+
+            {/* 手机：一行放主操作和实验记录，其余收进"更多"，把首屏留给日志 */}
+            <div className="flex items-center gap-2 sm:hidden">
+              {primary('h-11 px-3.5 text-sm')}
+              {tracker(cx(buttonClass('secondary', 'sm'), 'h-11 px-3.5 text-sm'))}
+              <Menu label="更多操作" className="ml-auto" buttonClassName="size-11">
+                <StarMenuItem job={j} />
+                <button type="button" role="menuitem" className={menuItemClass} onClick={() => setRenaming(true)}>
+                  <Pencil aria-hidden />
+                  改名
+                </button>
+                {canCancel && (
+                  <Link role="menuitem" to={`/new?from=${j.id}`} className={menuItemClass}>
+                    <RotateCw aria-hidden />
+                    {rerunLabel}
+                  </Link>
+                )}
+                {terminal && (
+                  <Link role="menuitem" to={`/terminal?job_id=${j.id}`} className={menuItemClass}>
+                    <TerminalIcon aria-hidden />
+                    终端
+                  </Link>
+                )}
+                <Link role="menuitem" to={`/compare?a=${j.id}`} className={menuItemClass}>
+                  <GitCompareArrows aria-hidden />
+                  和…对比
+                </Link>
+              </Menu>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       <MetaStrip j={j} />
@@ -220,6 +248,64 @@ function PrunedFiles({ job }: { job: Job }) {
       <p className="font-medium">日志和代码快照已按保留策略清理</p>
       <p className="text-fg-3">清理于 {fmtTime(job.pruned_at)}。任务记录、环境信息和训练产物仍保留，可在“详情”中查看。</p>
     </Card>
+  )
+}
+
+/** 就地改名：Enter 保存，Esc 放弃，名字没变就直接退出。已经启动过的任务只改记录，输出目录不跟着改 */
+function RenameForm({ job: j, onDone }: { job: Job; onDone: () => void }) {
+  const qc = useQueryClient()
+  const [name, setName] = useState(j.name)
+  const hintId = useId()
+  const rename = useMutation({
+    mutationFn: (next: string) => api.rename(j.id, next),
+    onSuccess: (updated) => {
+      qc.setQueryData(['job', j.id], updated)
+      void qc.invalidateQueries({ queryKey: ['jobs'] })
+      announce(`任务 #${j.id} 已改名为 ${updated.name}`)
+      onDone()
+    },
+  })
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    const next = name.trim()
+    if (next === j.name) onDone()
+    else rename.mutate(next)
+  }
+  const launched = !!(j.output_dir || j.started_at)
+  return (
+    <form onSubmit={submit} className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Input
+          aria-label={`任务 #${j.id} 的名字`}
+          aria-describedby={launched ? hintId : undefined}
+          aria-invalid={rename.isError || undefined}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              onDone()
+            }
+          }}
+          onFocus={(e) => e.currentTarget.select()}
+          autoFocus
+          maxLength={100}
+          className="flex-1 max-sm:h-11"
+        />
+        <Button type="submit" variant="primary" size="sm" loading={rename.isPending} className="max-sm:h-11 max-sm:px-3.5 max-sm:text-sm">
+          保存
+        </Button>
+        <Button size="sm" onClick={onDone} className="max-sm:h-11 max-sm:px-3.5 max-sm:text-sm">
+          取消
+        </Button>
+      </div>
+      {launched && (
+        <p id={hintId} className="text-xs text-fg-3">
+          只改任务记录里的名字；输出目录和 DANLU_JOB_NAME 仍是启动时的名字。
+        </p>
+      )}
+      <ErrorBox error={rename.error} />
+    </form>
   )
 }
 

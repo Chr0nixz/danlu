@@ -14,6 +14,16 @@ import (
 // ReadRange 读取 [off, off+limit) 之间的内容，首尾都对齐到完整的 UTF-8 字符。
 // 返回实际读到的数据、下一次应该从哪里读，以及文件当前大小。
 func ReadRange(path string, off, limit int64) ([]byte, int64, int64, error) {
+	return readRange(path, off, limit, false)
+}
+
+// ReadFinal 和 ReadRange 一样，只是不为补齐末尾的字符保留字节，用在任务已经结束、日志不会再增长时：
+// 末尾残缺的字符原样返回（转成 JSON 字符串时变成 U+FFFD），读取位置能到达文件末尾。
+func ReadFinal(path string, off, limit int64) ([]byte, int64, int64, error) {
+	return readRange(path, off, limit, true)
+}
+
+func readRange(path string, off, limit int64, final bool) ([]byte, int64, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, off, 0, err
@@ -40,7 +50,10 @@ func ReadRange(path string, off, limit int64) ([]byte, int64, int64, error) {
 	for skip < len(buf) && skip < 3 && !utf8.RuneStart(buf[skip]) {
 		skip++
 	}
-	data := RuneSafe(buf[skip:])
+	data := buf[skip:]
+	if !final {
+		data = RuneSafe(data)
+	}
 	return data, off + int64(skip) + int64(len(data)), size, nil
 }
 

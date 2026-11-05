@@ -119,11 +119,13 @@ chmod +x "$T/fakeconda/bin/conda"
 W=$T/work; mkdir -p "$W"
 git -C "$W" init -q && echo 'print("v1")' > "$W/train.py" && git -C "$W" add . \
   && git -C "$W" -c user.name=t -c user.email=t@t commit -qm init && echo 'print("v2")' > "$W/train.py"
-# 服务进程的 .bashrc：导出一个变量，再起一个占着输出管道的后台进程
+# 服务进程的 .bashrc：导出一个变量，再起一个占着输出管道的后台进程；
+# bashrc-hold 存在时停在这里，让任务停在准备阶段（"单实例"一节用）
 mkdir -p "$T/userhome"
 cat >"$T/userhome/.bashrc" <<EOF
 export E2E_BASHRC=loaded
 sleep 30 & echo \$! > "$T/bashrc-bg.pid"
+while [ -e "$T/bashrc-hold" ]; do sleep 0.1; done
 EOF
 
 start_server
@@ -192,6 +194,15 @@ TRACE_CLI=$(HOME="$T/userhome" "$BIN" trace "$OUTDIR/checkpoints/latest.pt")
 check "danlu trace 输出任务和面板链接" bash -c "printf '%s' '$TRACE_CLI' | grep -Fq '$BASE/jobs/$D'"
 check "B 的日志里 CUDA_VISIBLE_DEVICES=2" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$B/log?tail=10000' | grep -q '\"data\":\"[^\"]*\\\\n2\\\\n'"
 
+echo "== 改名 =="
+check "改名返回去掉首尾空白的新名字" [ "$(api -X POST "$BASE/api/jobs/$D/rename" -d '{"name":"  D-改名  "}' | json "d['name']")" = "D-改名" ]
+check "任务详情里是新名字" [ "$(job "$D" "d['name']")" = "D-改名" ]
+check "已结束任务改名后输出目录不变" [ "$(job "$D" "d['output_dir']")" = "$OUTDIR" ]
+check "按新名字能搜到任务" [ "$(api --get --data-urlencode "q=D-改名" "$BASE/api/jobs" | json "[j['id'] for j in d['jobs']]")" = "[$D]" ]
+check "空名字被拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"name":"  "}' "$BASE/api/jobs/$D/rename")" = 400 ]
+check "不存在的任务改名返回 404" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"name":"x"}' "$BASE/api/jobs/999999/rename")" = 404 ]
+check "改名记入审计日志" [ "$(api "$BASE/api/audit" | json "any(e['action']=='job_rename' and e['detail']=='#$D D → D-改名' for e in d['entries'])")" = True ]
+
 echo "== 校验 =="
 check "工作目录不存在时拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"workdir":"/nope","cmd":"x","gpus":1}' "$BASE/api/jobs")" = 400 ]
 check "卡数超过总数时拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$W\",\"cmd\":\"x\",\"gpus\":9}" "$BASE/api/jobs")" = 400 ]
@@ -208,6 +219,35 @@ check "X 成功" wait_status "$X" succeeded 15
 check "X 的环境里有 .bashrc 导出的变量" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$X/log?tail=10000' | grep -q 'bashrc=loaded'"
 check ".bashrc 起的后台进程已被清理" bash -c "! kill -0 \$(cat '$T/bashrc-bg.pid') 2>/dev/null"
 check "Y 成功" wait_status "$Y" succeeded 10
+
+echo "== 单实例：同一数据目录的第二个 danlu 不碰任务 =="
+touch "$T/bashrc-hold"
+Z=$(submit "{\"name\":\"Z\",\"workdir\":\"$W\",\"cmd\":\"echo z\",\"gpus\":0,\"inherit_bashrc\":true}")
+z_preparing() { [ "$(job "$Z" "(d['status'], d['pid'])")" = "('running', 0)" ]; }
+check "Z 停在加载 .bashrc：已占位，还没有进程" wait_until 5 z_preparing
+env HOME="$T/userhome" timeout 10 "$BIN" serve >"$T/second.log" 2>&1
+SECOND=$?
+check "第二个实例立即退出" [ "$SECOND" = 1 ]
+check "第二个实例说明数据目录被占用" grep -q '另一个 danlu（pid [0-9]*）正在使用数据目录' "$T/second.log"
+check "第二个实例没有把准备中的任务放回队列" z_preparing
+rm -f "$T/bashrc-hold"
+check "Z 照常启动并成功" wait_status "$Z" succeeded 15
+check "原服务仍在运行" kill -0 "$SERVER_PID"
+check "Z 只启动了一次" [ "$(grep -c "任务 #$Z Z 已启动" "$T/server.log")" = 1 ]
+
+echo "== 一个输出目录卡住不影响别的任务 =="
+M1=$(submit "{\"name\":\"M1\",\"workdir\":\"$W\",\"cmd\":\"sleep 4\",\"gpus\":0}")
+check "M1 开始运行" wait_started "$M1" 10
+check "M1 的环境包记录完成" wait_recipe "$M1" 10
+M1OUT=$(job "$M1" "d['output_dir']")
+# 把 danlu.json 换成 FIFO：收尾时读旧清单会一直卡住，模拟没有响应的网络存储
+rm -f "$M1OUT/danlu.json" && mkfifo "$M1OUT/danlu.json"
+check "M1 结束" wait_status "$M1" succeeded 10
+M2=$(submit "{\"name\":\"M2\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
+check "M1 的清单卡住时 M2 照常启动并成功" wait_status "$M2" succeeded 10
+timeout 5 sh -c ': > "$1"' sh "$M1OUT/danlu.json" # 打开写端再关掉，卡住的读取读到 EOF
+m1_manifest_done() { [ -f "$M1OUT/danlu.json" ] && [ "$(manifest "$M1OUT/danlu.json" "d['status']")" = succeeded ]; }
+check "解除阻塞后 M1 的清单换成普通文件并记下结束状态" wait_until 10 m1_manifest_done
 
 echo "== 退出码与残留进程 =="
 E=$(submit "{\"name\":\"E\",\"workdir\":\"$W\",\"cmd\":\"echo bye; exit 3\",\"gpus\":1}")
@@ -310,6 +350,9 @@ check "重启接管不会重复记启动事件" [ "$(event_kinds "$H")" = "job_s
 echo "== 日志 =="
 check "tail 读取到 H 的输出" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$H/log?tail=100000' | grep -q 'step 6'"
 check "SSE 推送日志并在结束后发送 end" bash -c "curl -s -N --max-time 5 -b '$JAR' '$BASE/api/jobs/$H/log/stream?offset=0' | grep -q 'event: end'"
+printf '\xe4\xb8' >>"$DANLU_HOME/logs/$H.log" # 结束的任务末尾留下半个字符
+H_NEXT=$(api "$BASE/api/jobs/$H/log?tail=100" | json "d['next']")
+check "日志末尾有残缺字符时，从 tail 的偏移打开 SSE 也能读到 end" bash -c "curl -s -N --max-time 5 -b '$JAR' '$BASE/api/jobs/$H/log/stream?offset=$H_NEXT' | grep -q 'event: end'"
 L=$(submit "{\"name\":\"L\",\"workdir\":\"$W\",\"cmd\":\"printf 'epoch 1:  10%%\\\\repoch 1:  70%%\\\\n'; sleep 3\",\"gpus\":0}")
 wait_status "$L" running 10; sleep 1
 check "运行中的任务列表带最后一行日志（\\r 进度已折叠）" \
@@ -328,7 +371,7 @@ echo "== 对比任务与快照重跑 =="
 S4=$T/s4-project
 mkdir -p "$S4/data" "$S4/config"
 git -C "$S4" init -q
-printf 'data/\n' > "$S4/.gitignore"
+printf 'data/\nconfig/*.weights\n' > "$S4/.gitignore"
 printf 'print("snapshot-v1")\n' > "$S4/train.py"
 printf 'print("removed")\n' > "$S4/remove.py"
 printf 'small\n' > "$S4/config/options.txt"
@@ -337,6 +380,7 @@ printf 'large-file\n' | dd of="$S4/config/large.bin" conv=notrunc status=none
 git -C "$S4" add .
 git -C "$S4" -c user.name=t -c user.email=t@t commit -qm compare
 echo data-v1 > "$S4/data/sample.bin"
+echo weights-v1 > "$S4/config/model.weights" # 已跟踪的 config/ 里被 Git 忽略的文件
 S4A=$(submit "{\"name\":\"compare-A\",\"workdir\":\"$S4\",\"cmd\":\"python3 train.py --lr 3e-4\",\"env\":{\"RUN\":\"A\",\"ONLY_A\":\"\"},\"gpus\":1,\"conda_env\":\"myenv\"}")
 check "基准任务成功" wait_status "$S4A" succeeded 20
 check "基准任务记录环境包" wait_recipe "$S4A" 10
@@ -364,6 +408,11 @@ check "快照重跑运行旧代码并读取当前数据及被跳过的文件" [ 
 check "快照重跑记录来源和当前版本文件" [ "$(job "$S4C" "d['code_from']==$S4A and 'config/large.bin' in d['snapshot_note'] and d['snapshot_ok']")" = True ]
 check "原快照与重跑任务的代码包复用同一个文件" test "$DANLU_HOME/snapshots/$S4A.tar.gz" -ef "$DANLU_HOME/snapshots/$S4C.tar.gz"
 check "快照重跑结束后标星可保留其文件" [ "$(api -X POST "$BASE/api/jobs/$S4C/star" -d '{"starred":true}' | json "d['starred']")" = True ]
+S4D=$(submit "{\"name\":\"restore-artifacts\",\"workdir\":\"$S4\",\"cmd\":\"cat config/model.weights; [ -e add.py ] && echo has-add || echo no-add; mkdir -p checkpoints && printf model > checkpoints/best.pt\",\"gpus\":0,\"rerun_of\":$S4A,\"code_from\":$S4A}")
+check "快照重跑用相对路径写出产物" wait_status "$S4D" succeeded 20
+check "快照重跑读到混合目录里被 Git 忽略的文件" [ "$(api "$BASE/api/jobs/$S4D/log?tail=10000" | json "'weights-v1' in d['data']")" = True ]
+check "快照之后新建的代码文件没有混进快照重跑" [ "$(api "$BASE/api/jobs/$S4D/log?tail=10000" | json "'no-add' in d['data']")" = True ]
+check "快照备注写明哪些内容来自工作目录" [ "$(job "$S4D" "'config/model.weights' in d['snapshot_note'] and 'data/' in d['snapshot_note'] and 'add.py' not in d['snapshot_note']")" = True ]
 
 echo "== 设备令牌（桌面客户端）=="
 INFO=$("$BIN" info --json)
@@ -464,6 +513,10 @@ prune_now() { env HOME="$T/userhome" "$BIN" prune --older-than 0s --json >"$T/pr
 check "实际清理命令成功" prune_now
 check "清理后任务记录保留并写入清理时间" [ "$(job "$D" "d['pruned_at'] is not None and d['status']=='succeeded'")" = True ]
 check "完成任务的日志、快照和运行目录已清理" bash -c "test ! -e '$DANLU_HOME/logs/$D.log' && test ! -e '$DANLU_HOME/snapshots/$D.tar.gz' && test ! -e '$DANLU_HOME/run/$D'"
+check "快照重跑写在相对路径下的产物在清理后保留" grep -q model "$DANLU_HOME/run/$S4D/code/checkpoints/best.pt"
+check "快照重跑恢复的代码、链接和包装脚本已清理" bash -c "test ! -e '$DANLU_HOME/run/$S4D/code/train.py' && test ! -L '$DANLU_HOME/run/$S4D/code/data' && test ! -e '$DANLU_HOME/run/$S4D/run.sh' && test ! -e '$DANLU_HOME/snapshots/$S4D.meta.json'"
+check "清理链接不影响原工作目录" bash -c "test -f '$S4/data/sample.bin' && test -f '$S4/config/model.weights'"
+check "快照重跑记为已清理" [ "$(job "$S4D" "d['pruned_at'] is not None")" = True ]
 check "标星任务的日志和快照保留" bash -c "test -f '$DANLU_HOME/logs/$A.log' && test -f '$DANLU_HOME/snapshots/$A.tar.gz'"
 check "运行任务继续运行且保留日志" [ "$(job "$PR" "d['status']")" = running ]
 check "清理不改训练输出或任务清单" [ "$(sha256sum "$OUTDIR/danlu.json")" = "$MANIFEST_SUM" ]
@@ -742,6 +795,17 @@ ASSET=$(curl -s -b "$JAR" "$BASE/" | grep -o '/assets/index-[^"]*\.js' | head -1
 check "首页引用带哈希的入口脚本" [ -n "$ASSET" ]
 check "接受 gzip 时返回构建时预压缩的资源" bash -c "curl -s -D - -o '$T/asset.gz' -b '$JAR' -H 'Accept-Encoding: gzip' '$BASE$ASSET' | grep -qi '^content-encoding: gzip' && gzip -t '$T/asset.gz'"
 check "不接受 gzip 时返回原文" bash -c "! curl -s -D - -o /dev/null -b '$JAR' '$BASE$ASSET' | grep -qi '^content-encoding'"
+
+echo "== 并发登录限速 =="
+audit_fails() {
+  python3 -c 'import sqlite3,sys; print(sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True).execute("SELECT count(*) FROM audit WHERE action=?",("login_fail",)).fetchone()[0])' "$DANLU_HOME/danlu.db"
+}
+FAILS_BEFORE=$(audit_fails)
+rm -f "$T/jar-race"; curl -s -c "$T/jar-race" -o /dev/null "$BASE/$S5_ENTRANCE"
+seq 21 | xargs -P 21 -I{} curl -s -o /dev/null -b "$T/jar-race" -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"wrong"}' "$BASE/api/login"
+check "同一 IP 并发输错 21 次，只校验到上限 5 次" [ $(( $(audit_fails) - FAILS_BEFORE )) = 5 ]
+check "并发失败后锁定仍然有效（429）" [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$T/jar-race" -H 'Content-Type: application/json' -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login")" = 429 ]
 kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
 
 echo "== HTTPS（本地 CA）=="
@@ -758,6 +822,12 @@ if command -v openssl >/dev/null; then
 fi
 check "curl 带上 CA 访问安全入口得到 302" [ "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$CA" "$TLS_URL")" = 302 ]
 check "不带 CA 时证书校验失败" bash -c "! curl -s -o /dev/null '$TLS_URL'"
+"$BIN" ca >"$T/fetched-ca.crt" 2>"$T/ca-stderr.log"
+check "danlu ca 输出的就是本地 CA 证书" cmp -s "$T/fetched-ca.crt" "$CA"
+INFO_FP=$("$BIN" info --no-qr | awk '/CA 指纹/{print $NF}')
+check "danlu ca 的指纹和 danlu info 一致" bash -c "[ -n '$INFO_FP' ] && grep -qF '$INFO_FP' '$T/ca-stderr.log'"
+check "用 danlu ca 取回的 CA 能校验面板证书" [ "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$T/fetched-ca.crt" "$TLS_URL")" = 302 ]
+check "没有使用本地 CA 时 danlu ca 报错" bash -c "! env DANLU_HOME='$MAIN_HOME' '$BIN' ca >/dev/null 2>&1"
 "$BIN" doctor --json >"$T/doctor-tls.json"
 python3 - "$T/doctor-tls.json" <<'PY' && ok "doctor 确认本地 CA 和服务器证书有效、证书包含 public_ip" || bad "doctor 的证书检查不正确"
 import json,sys
