@@ -12,7 +12,7 @@ func TestRenderServiceUnitQuotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`ExecStart="/opt/my tools/danlu$$1" serve`,
+		`ExecStart="/opt/my tools/danlu$1" serve`,
 		`Environment="DANLU_HOME=/home/u/.danlu"`,
 		`Environment="PATH=/usr/bin:/opt/CUDA 12/bin:/x%%y"`,
 		"KillMode=process",

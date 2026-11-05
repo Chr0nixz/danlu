@@ -436,10 +436,16 @@ func (m *Manager) checkRunning(scanTracker bool) {
 		}
 		if scanTracker && j.TrackerURL == "" && !m.noTracker[j.ID] {
 			p := m.ex.LogPath(j.ID)
+			// 先看大小再读：读之前就已经超过 1 MB，这次读到的就是完整的开头 1 MB，没找到才能确定以后也不会有。
+			// 反过来先读后看，读完到看大小之间写进开头的链接会被漏掉
+			full := false
+			if fi, err := os.Stat(p); err == nil {
+				full = fi.Size() >= trackerScanLimit
+			}
 			if u := logs.FindTracker(p, trackerScanLimit); u != "" {
 				j.TrackerURL = u
 				m.save(j)
-			} else if fi, err := os.Stat(p); err == nil && fi.Size() >= trackerScanLimit {
+			} else if full {
 				m.noTracker[j.ID] = true
 			}
 		}

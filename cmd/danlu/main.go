@@ -946,23 +946,20 @@ KillMode=process
 WantedBy=default.target
 `
 
-// renderServiceUnit 生成 unit 文件。每个值都加双引号并转义：
+// renderServiceUnit 生成 unit 文件。每个值都加双引号并转义 \ " %：
 // 不加引号时，PATH 里的空格会把值拆开、后半截丢失，% 会被当作 systemd 的占位符展开，
-// 程序路径有空格时 ExecStart 起不来。ExecStart 里的 $ 还会被当作变量展开，要写成 $$。
+// 程序路径有空格时 ExecStart 起不来。$ 不用转义：systemd 不展开程序路径里的 $，
+// Environment= 也不展开（写成 $$ 反而会原样留下两个 $）。
 func renderServiceUnit(exe, home, path string) (string, error) {
 	for _, v := range []string{exe, home, path} {
 		if strings.ContainsAny(v, "\n\r\x00") {
 			return "", fmt.Errorf("路径里有换行或空字符，没法写进 systemd 服务: %q", v)
 		}
 	}
-	quote := func(s string, dollar bool) string {
-		s = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s)
-		if dollar {
-			s = strings.ReplaceAll(s, "$", "$$")
-		}
-		return `"` + s + `"`
+	quote := func(s string) string {
+		return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s) + `"`
 	}
-	return fmt.Sprintf(serviceUnit, quote(exe, true), quote("DANLU_HOME="+home, false), quote("PATH="+path, false)), nil
+	return fmt.Sprintf(serviceUnit, quote(exe), quote("DANLU_HOME="+home), quote("PATH="+path)), nil
 }
 
 func cmdInstallService() error {
