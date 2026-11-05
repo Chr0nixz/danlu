@@ -40,6 +40,9 @@ func cmdTrace(args []string) error {
 		fmt.Printf("\n#%d %s（%s，%s）\n", job.ID, job.Name, traceSourceLabel(match.Source), job.Status)
 		fmt.Printf("  工作目录：%s\n", job.Workdir)
 		fmt.Printf("  命令：%s\n", job.Cmd)
+		if job.Memo != "" {
+			fmt.Printf("  备注：%s\n", job.Memo)
+		}
 		if job.OutputDir != "" {
 			fmt.Printf("  输出目录：%s\n", job.OutputDir)
 		}

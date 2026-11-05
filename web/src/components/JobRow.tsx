@@ -71,6 +71,11 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
     return { text: `${pos} · ${j.wait_reason || need}` }
   }
   if (j.status === 'running' && j.cancel_requested) return { text: '正在结束进程…', tone: 'text-warn' }
+  const memo = j.memo?.split(/\r?\n/, 1)[0]?.trim()
+  if (!isActive(j) && memo) {
+    const why = j.status === 'failed' ? failText({ ...j, error_line: undefined, last_line: undefined }) : ''
+    return { text: why ? `${why} · ${memo}` : memo, tone: why ? 'text-fail' : undefined }
+  }
   if (j.status === 'failed') return { text: failText(j), tone: 'text-fail' }
   if (j.pruned_at) return { text: '日志和代码快照已清理' }
   if (j.last_line) {
@@ -132,6 +137,9 @@ export function JobRow({ job: j, showCopy = false, selection }: { job: Job; show
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           {gpus.length > 0 && <GpuChips ids={gpus} />}
+          {j.status === 'running' && j.silent_since && (
+            <span className="shrink-0 whitespace-nowrap text-xs text-warn">无输出 {duration(now() - j.silent_since)}</span>
+          )}
           {info.pct != null && (
             <span className="w-10 shrink-0 max-md:hidden" title={`${info.pct}%`}>
               <Meter value={info.pct} className="bg-run" />

@@ -336,6 +336,7 @@ func cmdServe(args []string) error {
 		SnapshotTimeout: 10 * time.Second,
 		KillGrace:       c.Runtime.KillGrace.Duration,
 		FailFast:        c.Runtime.FailFast.Duration,
+		SilenceAlert:    c.Runtime.SilenceAlert.Duration,
 		Disks:           disks,
 		DiskMinBytes:    uint64(c.Runtime.DiskMinGB) << 30,
 		ManifestTimeout: 10 * time.Second,

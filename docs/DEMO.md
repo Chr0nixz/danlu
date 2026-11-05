@@ -22,7 +22,7 @@
 
 **不做（Demo 范围）**：多服务器、通知、CLI、在浏览器里上传代码、优先级、任务依赖、自动重试、参数扫描、告警、PWA、OpenAPI 代码生成。其中多服务器后来交给了桌面客户端（[CLIENT.md](CLIENT.md)），面板本身仍然不做；通知在 Demo 阶段未实现，后来纳入 S2 并已完成 ntfy 手机推送（见 [ROADMAP.md](ROADMAP.md) 和 [PHASES.md](PHASES.md)）。其他后续工作按路线图推进。
 
-**后续定版**：机器体检和 TOTP 两步验证，见 [ROADMAP.md](ROADMAP.md)。
+`v0.2.0` 候选版还包含机器体检、TOTP 和 F1。真机验收及试用安排见 [ROADMAP.md](ROADMAP.md) 与 [PLAN.md](PLAN.md)。
 
 ## 2. 使用流程
 
@@ -267,6 +267,7 @@ GET  /api/fs/dirs?path=                目录自动补全
 GET  /api/workdirs/recent              最近用过的工作目录
 
 GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 fail_kind、error_line 和 traceback_offset）
+GET  /api/jobs?finished_from_event=&finished_to_event=  按结束事件范围筛选原批次，包含两端
 GET  /api/jobs?order=ended&before=&before_id=  只要已结束的任务，按结束时间倒序；before / before_id 是上一页最后一条的结束时间和 id（游标翻页，多台服务器的历史按时间合并时用）
 GET  /api/trace?path=                  从绝对路径反查任务，返回匹配来源（output_dir、run_code（快照重跑的 run/<id>/code/）、danlu_json、guess）
 GET  /api/compare?a=&b=                两次任务的命令词、环境变量差异、快照文件差异、包版本及配方
@@ -276,7 +277,10 @@ GET  /api/jobs/{id}/env                任务记录的环境包列表原文
 POST /api/jobs/{id}/cancel             取消任务
 POST /api/jobs/{id}/star               标星或取消标星（JSON {"starred":true|false}）
 POST /api/jobs/{id}/rename             改任务名（JSON {"name":"…"}，去掉首尾空白后 1–100 个字；任何状态都能改，已启动的任务输出目录和 DANLU_JOB_NAME 不变）
+POST /api/jobs/{id}/memo               保存备注（JSON {"memo":"…"}，可换行，最多 500 字，空串清除）
+POST /api/jobs/{id}/notify             修改结束提醒（JSON {"on":true|false}，任务已结束时返回 409）
 GET  /api/jobs/{id}/log?offset=&limit= 分段读取日志
+GET  /api/jobs/{id}/log/search?q=&limit=200  按关键词搜索可见日志，返回 matches、scanned、size 和 truncated
 GET  /api/jobs/{id}/log/stream         实时日志（SSE）
 GET  /api/jobs/{id}/snapshot           快照文件清单和 git 信息
 GET  /api/jobs/{id}/snapshot/file?path=  快照中单个文件的内容
@@ -285,7 +289,7 @@ GET  /api/jobs/{id}/snapshot/download  下载 tar.gz
 
 GET  /api/settings/ca.crt              下载 CA 证书
 GET  /api/settings/qr.svg              完整安全入口地址的二维码（需登录，禁止缓存）
-GET  /api/settings                    服务配置摘要（含 terminal_enabled、totp_enabled）和 notify（enabled、last_sent_at、last_error；不含 topic 和令牌）
+GET  /api/settings                    服务配置摘要（含 terminal_enabled、totp_enabled）和 notify（enabled、queue_drained、last_sent_at、last_error）
 POST /api/settings/password            修改密码
 GET  /api/terminal                     列出终端会话
 POST /api/terminal                     打开终端（JSON {"job_id"?: number}；可在任务目录和 conda 环境中启动）
@@ -304,6 +308,10 @@ POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 任务对象增加 `starred` 和 `pruned_at`（未清理为 null）。列表支持 `starred=true`。清理中的任务不能改标星，返回 409；已清理任务的日志、SSE、日志下载及快照接口返回 410 和原因，环境包接口仍可用。
 
 `POST /api/jobs` 可用 `code_from` 指定源快照任务，提交的工作目录必须与源任务一致。任务列表支持 `workdir` 精确筛选，容许末尾斜杠。对比的 `env` 和 `packages` 中 `a` / `b` 为 null 表示该侧不存在。快照或包不可用时返回 `code.error` 或 `packages_error`，其他区块仍可用。
+
+提交可带 `memo` 和 `notify_done`。任务列表的关键词查询也查备注。备注和结束推送开关的写接口返回更新后的任务。任务 `profile` 按数据是否可用返回 `gpu` 和 `host`。两者各有 `samples` 和 `covered_seconds`，GPU 还返回 `avg_util` 和各卡的 `peak_mem_mb`、`total_mem_mb`，主机返回 `peak_rss_bytes`。静默中的运行任务带 `silent_since`，为最后一次输出的 Unix 秒。
+
+日志搜索按字面忽略大小写匹配，每行保留最后一个回车刷出的文字，匹配结果的 `offset` 是原始行首字节偏移。每次最多 200 条、1 GiB 或 5 秒，长行返回命中附近的片段。清理后的日志返回 410。
 
 `GET /api/doctor` 和 `danlu doctor --json` 调用同一套检查，覆盖 GPU/驱动、conda、systemd、linger、磁盘、证书、端口、时间同步和版本。`danlu doctor` 有 fail 项时退出码为 1；`--json` 跑完即返回 0，结论都在 JSON 里。TOTP 通过 `danlu totp enable|disable` 管理；登录验证码错误和重放都会计入 IP 登录限速，密码正确、还没填验证码的那一步不计入；设备令牌不受影响。
 
@@ -337,6 +345,7 @@ conda_base         = "/home/me/miniconda3"
 output_root        = "~/danlu-outputs"
 kill_grace         = "30s"
 fail_fast          = "2m"     # 启动后不足这个时长就失败且仍有任务排队时暂停；0s 关闭
+silence_alert      = "30m"    # 日志静默提醒下限，0s 关闭
 disk_warn_gb       = 20       # GiB，0 关闭低余量提示
 disk_min_gb        = 2        # GiB，0 关闭调度保护；磁盘暂停在两倍余量时恢复
 snapshot_max_file_mb  = 1
@@ -348,6 +357,7 @@ max_total_gb       = 50      # GiB，0 关闭按大小清理；两项均为 0 �
 
 [notify]
 ntfy              = ""      # 留空关闭；danlu notify setup 生成随机 topic
+queue_drained     = true    # 队列排空时发送多任务汇总
 # token           = ""      # 自建服务需要鉴权时填写，不通过 API 暴露
 
 [terminal]
@@ -379,7 +389,7 @@ jobs(id, name, workdir, conda_env, cmd, env_json, inherit_bashrc,
      master_port, pid, pid_starttime, exit_code, fail_reason, fail_kind, notes, ext_seen, oom_base,
      traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, cancel_requested, tracker_url,
      git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of,
-     created_at, started_at, ended_at)
+     created_at, started_at, ended_at, memo, profile_json, notify_done)
 sessions(token_hash, created_at, expires_at, ip, user_agent)
 audit(id, ts, ip, action, detail)
 login_failures(ip, count, locked_until)

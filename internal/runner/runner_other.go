@@ -18,6 +18,8 @@ func (r *Runner) Start(s Spec, env []string) (int, uint64, error) {
 func (r *Runner) Terminate(jobID int64, pgid int)   {}
 func (r *Runner) KillAll(jobID int64, pgid int) int { return 0 }
 
+func (r *Runner) ProcStats(jobID int64) ProcessStats { return ProcessStats{} }
+
 func loadBashrcEnvironment(context.Context) ([]string, error) {
 	return nil, errors.New("Bash 环境只支持 Linux")
 }

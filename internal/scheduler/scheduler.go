@@ -47,6 +47,7 @@ type Executor interface {
 	StorePackages([]byte) (string, error)
 	WriteManifest(outputDir string, data []byte) error
 	LogPath(jobID int64) string
+	ProcStats(jobID int64) runner.ProcessStats
 	BootID() string
 }
 
@@ -64,6 +65,7 @@ type JobStore interface {
 	InsertJob(*store.Job) error
 	SaveJob(*store.Job) error
 	RenameJob(int64, string) error
+	SetNotifyDone(int64, bool) (*store.Job, error)
 	Transition(*store.Job, ...*store.Event) error
 	TransitionWithSetting(*store.Job, string, string, ...*store.Event) error
 	GetSetting(string) (string, error)
@@ -84,6 +86,7 @@ type Options struct {
 	SnapshotTimeout time.Duration
 	KillGrace       time.Duration
 	FailFast        time.Duration
+	SilenceAlert    time.Duration
 	Disks           DiskSource
 	DiskMinBytes    uint64
 	// ManifestTimeout 是写 danlu.json 最多等多久：启动前写不完按失败处理，停止时写不完不再等。为 0 时用 10 秒
@@ -117,6 +120,11 @@ type Manager struct {
 	alertError     string
 	gpuErrorSince  time.Time
 	waitReasons    atomic.Pointer[map[int64]string]
+	runStats       map[int64]*runStat
+	runTargets     atomic.Pointer[[]statTarget]
+	procSamples    atomic.Pointer[map[runTarget]procSample]
+	logSamples     atomic.Pointer[map[runTarget]logSample]
+	runtimeViews   atomic.Pointer[map[int64]RuntimeView]
 	// ctx 在 Run 里设置；launch 用它派生快照和加载环境的超时，停止服务时立即放弃
 	ctx       context.Context
 	launches  sync.WaitGroup
@@ -135,6 +143,7 @@ func New(st JobStore, gpus GPUSource, ex Executor, opt Options) *Manager {
 	m := &Manager{st: st, gpus: gpus, ex: ex, opt: opt, bootID: ex.BootID(), wake: make(chan struct{}, 1),
 		cancelAt: map[int64]time.Time{}, noTracker: map[int64]bool{}, starting: map[int64]*launchState{}, pending: map[int64]*store.Job{},
 		pendingEvents: map[int64][]*store.Event{},
+		runStats:      map[int64]*runStat{},
 		ctx:           context.Background()}
 	m.snap = func(ctx context.Context, j *store.Job) (*snapshot.Meta, error) {
 		return snapshot.Take(ctx, j.Workdir, opt.SnapshotDir, j.ID, opt.Snapshot)
@@ -160,6 +169,8 @@ func (m *Manager) Wake() {
 
 type SubmitReq struct {
 	Name          string            `json:"name"`
+	Memo          string            `json:"memo"`
+	NotifyDone    bool              `json:"notify_done"`
 	Workdir       string            `json:"workdir"`
 	CondaEnv      string            `json:"conda_env"`
 	Cmd           string            `json:"cmd"`
@@ -175,10 +186,20 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const maxNameLen = 100
 
+func ValidateMemo(memo string) error {
+	if len([]rune(memo)) > 500 {
+		return invalid("备注最多 500 字")
+	}
+	return nil
+}
+
 // trackerScanLimit：W&B / SwanLab 的 run 链接只在日志开头这么多字节里找
 const trackerScanLimit = 1 << 20
 
 func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
+	if err := ValidateMemo(req.Memo); err != nil {
+		return nil, err
+	}
 	req.Workdir = strings.TrimSpace(req.Workdir)
 	req.Cmd = strings.TrimSpace(req.Cmd)
 	req.Name = strings.TrimSpace(req.Name)
@@ -253,7 +274,7 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	j := &store.Job{Name: req.Name, Workdir: req.Workdir, CondaEnv: strings.TrimSpace(req.CondaEnv), Cmd: req.Cmd,
+	j := &store.Job{Name: req.Name, Memo: req.Memo, NotifyDone: req.NotifyDone, Workdir: req.Workdir, CondaEnv: strings.TrimSpace(req.CondaEnv), Cmd: req.Cmd,
 		Env: req.Env, InheritBashrc: req.InheritBashrc, GPUsReq: req.GPUs, GPUsPinned: pinned,
 		Status: store.StatusQueued, RerunOf: req.RerunOf, CodeFrom: req.CodeFrom}
 	if err := m.st.InsertJob(j); err != nil {
@@ -326,6 +347,25 @@ func (m *Manager) Rename(id int64, name string) (*store.Job, error) {
 	return m.st.GetJob(id)
 }
 
+var ErrNotifyFinished = errors.New("任务已经结束，不能修改结束提醒")
+
+func (m *Manager) SetNotifyDone(id int64, on bool) (*store.Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.pending[id]
+	if job == nil {
+		var err error
+		job, err = m.st.GetJob(id)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if job.Finished() {
+		return nil, ErrNotifyFinished
+	}
+	return m.st.SetNotifyDone(id, on)
+}
+
 // ---------- 主循环 ----------
 
 // Recover 在启动时调用：仍在运行的任务继续监控，已经结束的补做收尾，启动途中被打断的按 reconcile 处理。
@@ -370,6 +410,10 @@ func (m *Manager) Run(ctx context.Context) {
 	m.mu.Lock()
 	m.ctx = ctx
 	m.mu.Unlock()
+	go m.sampleProcesses(ctx)
+	if m.opt.SilenceAlert > 0 {
+		go m.sampleLogs(ctx)
+	}
 	defer func() {
 		m.launches.Wait()
 		m.captures.Wait()
@@ -408,7 +452,12 @@ func (m *Manager) checkRunning(scanTracker bool) {
 		log.Printf("读取运行中任务失败: %v", err)
 		return
 	}
-	gpus, _, gpuErr := m.gpus.Latest()
+	gpus, gpuAt, gpuErr := m.gpus.Latest()
+	now := time.Now()
+	targets := make([]statTarget, 0, len(running))
+	views := make(map[int64]RuntimeView, len(running))
+	procs := m.procSamples.Load()
+	logSamples := m.logSamples.Load()
 	for _, j := range running {
 		if _, ok := m.starting[j.ID]; ok {
 			continue // 还在 launch 里，pid 还没有
@@ -421,6 +470,17 @@ func (m *Manager) checkRunning(scanTracker bool) {
 			m.finalize(j)
 			continue
 		}
+		target := runTarget{j.ID, j.PID, j.PIDStart}
+		stat := m.updateRunStat(j, target, gpus, gpuAt, gpuErr, procs, now)
+		if logSamples != nil {
+			stat.observeLog((*logSamples)[target], j.StartedAt, now, m.opt.SilenceAlert)
+		}
+		targets = append(targets, statTarget{runTarget: target, procAfter: stat.silentDetected})
+		view := RuntimeView{Profile: stat.profile.Clone()}
+		if !stat.silentSince.IsZero() {
+			view.SilentSince = stat.silentSince.Unix()
+		}
+		views[j.ID] = view
 		if gpuErr == nil && !j.ExtSeen && hasExternalProcess(gpus, j) {
 			j.ExtSeen = true
 			m.save(j)
@@ -450,6 +510,8 @@ func (m *Manager) checkRunning(scanTracker bool) {
 			}
 		}
 	}
+	m.runTargets.Store(&targets)
+	m.runtimeViews.Store(&views)
 }
 
 func hasExternalProcess(gpus []gpu.GPU, j *store.Job) bool {

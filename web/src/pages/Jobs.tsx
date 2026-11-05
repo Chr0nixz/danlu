@@ -28,6 +28,9 @@ export function Jobs() {
   // recent=24h：只看最近 24 小时内结束的，总览摘要里的"失败"链接到这里
   const recent = params.get('recent') === '24h'
   const starred = params.get('starred') === '1'
+  const finishedFrom = Number(params.get('finished_from_event'))
+  const finishedTo = Number(params.get('finished_to_event'))
+  const batch = Number.isSafeInteger(finishedFrom) && Number.isSafeInteger(finishedTo) && finishedFrom > 0 && finishedTo >= finishedFrom
   const [text, setText] = useState(params.get('q') ?? '')
   const q = params.get('q') ?? ''
   const searchRef = useRef<HTMLInputElement>(null)
@@ -79,8 +82,12 @@ export function Jobs() {
   }, [])
 
   const res = useQuery({
-    queryKey: ['jobs', 'list', status, q, page, recent, starred],
-    queryFn: () => api.jobs({ status, q, page, size: SIZE, starred: starred || undefined, ended_after: recent ? Math.floor(now() - RECENT_SEC) : undefined }),
+    queryKey: ['jobs', 'list', status, q, page, recent, starred, finishedFrom, finishedTo],
+    queryFn: () => api.jobs({
+      status, q, page, size: SIZE, starred: starred || undefined,
+      ended_after: recent ? Math.floor(now() - RECENT_SEC) : undefined,
+      finished_from_event: batch ? finishedFrom : undefined, finished_to_event: batch ? finishedTo : undefined,
+    }),
     enabled: !q.startsWith('/'),
     refetchInterval: 5000,
     placeholderData: (prev) => prev,
@@ -184,6 +191,11 @@ export function Jobs() {
             <X className="size-3.5" aria-hidden />
           </button>
         )}
+        {batch && (
+          <Button size="sm" aria-label="查看全部批次" onClick={() => set({ finished_from_event: '', finished_to_event: '', page: '' })}>
+            本批已结束任务 <X aria-hidden />
+          </Button>
+        )}
       </div>}
 
       <ErrorBox error={pathSearch ? trace.error : res.error} />
@@ -211,7 +223,7 @@ export function Jobs() {
             selection={selection ? selectJob : undefined}
             jobs={res.data?.jobs ?? []}
             empty={
-              q || status || recent || starred ? (
+              q || status || recent || starred || batch ? (
                 <Empty>没有符合条件的任务</Empty>
               ) : (
                 <Empty action={<Link to="/new" className={buttonClass('primary', 'sm')}>新建任务</Link>}>还没有任务，炉子还没点火</Empty>

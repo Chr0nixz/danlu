@@ -74,7 +74,7 @@ func (s *Server) compareJobs(w http.ResponseWriter, r *http.Request) {
 	packages, packageError := s.comparePackages(a, b)
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"a": a, "b": b,
+		"a": s.withProfile(a), "b": s.withProfile(b),
 		"command_a": commandTokens(a.Cmd), "command_b": commandTokens(b.Cmd),
 		"env": changes(a.Env, b.Env), "code": code,
 		"packages": packages, "packages_error": packageError,

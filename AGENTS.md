@@ -24,6 +24,7 @@ Other docs:
 - `README.md`: deployment and operations.
 - `docs/ROADMAP.md`: the current phase: goal and acceptance scenarios, the must-have list for the release (定版线) and the later list (理想线), what is out of scope, design notes for certificates and the web terminal, and what happens when the client resumes.
 - `docs/PHASES.md`: the 定版线 split into stages S0–S5, each with its code changes, migrations, config keys, API additions and acceptance checks. Work through it stage by stage and tick ROADMAP §4's status column as items land.
+- `docs/FEATURES.md` and `docs/PLAN.md`: feature specs and release order. F1 ships with `v0.2.0`. R1–R4 cover the real-server checklist, candidate tag and two-week trial on `release/0.2`. PLAN.md also defines F2–F4 and the migration order.
 - `docs/DEMO.md`: current scope, API list, config format.
 - `PRODUCT.md`: users and product principles.
 - `web/DESIGN.md`: the web panel's visual system.

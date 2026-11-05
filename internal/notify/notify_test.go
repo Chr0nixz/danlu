@@ -74,6 +74,89 @@ func step(t *testing.T, s *Service, ts int64) {
 	}
 }
 
+func TestQueueSummaryMergesPendingNoticesAcrossRestart(t *testing.T) {
+	st, s, r := fixture(t)
+	ts := time.Now().Unix()
+	previous := int64(1)
+	addEvent(t, st, ts, store.EventJobFinished, &previous, `{"status":"succeeded","name":"旧任务"}`)
+	s.publisher.Config.QueueDrained = true
+	if err := s.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	a, b := int64(2), int64(3)
+	addEvent(t, st, ts+1, store.EventJobFinished, &a, `{"status":"succeeded","name":"试验成功","notify_done":true,"duration":60}`)
+	step(t, s, ts+2)
+	s = New(st, s.publisher.Config, s.hostname, s.baseURL)
+	if err := s.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	addEvent(t, st, ts+5, store.EventJobFinished, &b, `{"status":"failed","name":"试验失败","fail_kind":"cuda_oom","reason":"私有路径"}`)
+	addEvent(t, st, ts+5, store.EventQueueDrained, nil, `{}`)
+	step(t, s, ts+5)
+	step(t, s, ts+40)
+	if len(r.requests) != 1 {
+		t.Fatalf("同批待发的通知应并入一条汇总: %+v", r.requests)
+	}
+	got := r.requests[0]
+	if !strings.Contains(got.title, "队列已跑完") || !strings.Contains(got.body, "2 个任务，1 成功，1 失败") ||
+		!strings.Contains(got.body, "CUDA 显存不足") || strings.Contains(got.body, "私有路径") ||
+		!strings.HasSuffix(got.click, "/jobs?finished_from_event=2&finished_to_event=4") {
+		t.Fatalf("汇总内容或筛选范围错误: %+v", got)
+	}
+}
+
+func TestSingletonBatchesStillCoalesceIndividualNotifications(t *testing.T) {
+	st, s, r := fixture(t)
+	s.publisher.Config.QueueDrained = true
+	if err := s.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Now().Unix()
+	a, b := int64(2), int64(3)
+	addEvent(t, st, ts, store.EventJobFinished, &a, `{"status":"succeeded","name":"成功","notify_done":true}`)
+	addEvent(t, st, ts, store.EventQueueDrained, nil, `{}`)
+	addEvent(t, st, ts+3, store.EventJobFinished, &b, `{"status":"failed","name":"失败","exit_code":2}`)
+	addEvent(t, st, ts+3, store.EventQueueDrained, nil, `{}`)
+	step(t, s, ts+31)
+	if len(r.requests) != 1 || !strings.Contains(r.requests[0].title, "任务结束") ||
+		!strings.Contains(r.requests[0].body, "#2") || !strings.Contains(r.requests[0].body, "#3") {
+		t.Fatalf("单任务结批不应触发汇总，同窗口仍应合并: %+v", r.requests)
+	}
+}
+
+func TestFastPauseAcrossEventPageAndLaterSummary(t *testing.T) {
+	st, s, r := fixture(t)
+	s.publisher.Config.QueueDrained = true
+	if err := s.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Now().Unix()
+	events := make([]*store.Event, 99)
+	for i := range events {
+		events[i] = &store.Event{TS: ts, Kind: store.EventJobStarted}
+	}
+	if err := st.AppendEvents(events...); err != nil {
+		t.Fatal(err)
+	}
+	fast, other := int64(4), int64(5)
+	addEvent(t, st, ts, store.EventJobFinished, &fast, `{"status":"failed","name":"快速失败","exit_code":3}`)
+	addEvent(t, st, ts+1, store.EventQueuePaused, &fast, `{"kind":"fail_fast"}`)
+	step(t, s, ts+40)
+	step(t, s, ts+41)
+	if len(r.requests) != 1 || !strings.Contains(r.requests[0].title, "队列暂停") ||
+		!strings.Contains(r.requests[0].body, "退出码 3") {
+		t.Fatalf("跨页的快速失败应只发暂停: %+v", r.requests)
+	}
+	addEvent(t, st, ts+42, store.EventQueueResumed, nil, `{}`)
+	addEvent(t, st, ts+43, store.EventJobFinished, &other, `{"status":"cancelled","name":"后续任务","notify_done":true}`)
+	addEvent(t, st, ts+43, store.EventQueueDrained, nil, `{}`)
+	step(t, s, ts+43)
+	step(t, s, ts+80)
+	if len(r.requests) != 2 || !strings.Contains(r.requests[1].body, "2 个任务，0 成功，1 失败，1 取消") {
+		t.Fatalf("继续后汇总应包含快速失败和取消: %+v", r.requests)
+	}
+}
+
 func TestFailuresBatchAcrossRestartAndPrivacy(t *testing.T) {
 	st, s, r := fixture(t)
 	ts := time.Now().Unix()

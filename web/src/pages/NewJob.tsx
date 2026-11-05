@@ -49,7 +49,9 @@ export function NewJob() {
   return <JobForm key={`${formMode}-${sourceId ?? ''}`} source={source.data ?? null} formMode={formMode} />
 }
 
-type Field = 'workdir' | 'cmd' | 'gpu' | 'env'
+type Field = 'workdir' | 'cmd' | 'gpu' | 'memo' | 'env'
+
+const notifyPreferenceKey = 'danlu.notify-done'
 
 function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMode }) {
   const nav = useNavigate()
@@ -58,7 +60,7 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
   const recent = useQuery({ queryKey: ['recentWorkdirs'], queryFn: api.recentWorkdirs })
   const formRef = useRef<HTMLFormElement>(null)
   const uid = useId()
-  const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, env: `${uid}-env` }
+  const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, memo: `${uid}-memo`, env: `${uid}-env` }
 
   const rerun = formMode === 'rerun'
   const canRestore = !!source?.snapshot_ok && !source.pruned_at && (source.pid > 0 || source.ended_at !== null)
@@ -66,6 +68,14 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
   const [useSnapshot, setUseSnapshot] = useState(() => rerun && canRestore && sameCodeKinds.includes(source?.fail_kind ?? ''))
   const snapshotSelected = rerun && useSnapshot
   const [name, setName] = useState(source && rerun ? rerunName(source.name) : source?.name ?? '')
+  const [memo, setMemo] = useState('')
+  const [notifyDone, setNotifyDone] = useState(() => {
+    try {
+      return localStorage.getItem(notifyPreferenceKey) === '1'
+    } catch {
+      return false
+    }
+  })
   const [workdir, setWorkdir] = useState(source?.workdir ?? '')
   const activeWorkdir = snapshotSelected ? source!.workdir : workdir
   const [condaEnv, setCondaEnv] = useState(source?.conda_env ?? '')
@@ -96,7 +106,14 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
 
   const submit = useMutation({
     mutationFn: api.submit,
-    onSuccess: (j) => nav(`/jobs/${j.id}`),
+    onSuccess: (j, request) => {
+      try {
+        localStorage.setItem(notifyPreferenceKey, request.notify_done ? '1' : '0')
+      } catch {
+        // 存储不可用时仍进入已提交的任务。
+      }
+      nav(`/jobs/${j.id}`)
+    },
   })
 
   const gpuList = gpus.data?.gpus ?? []
@@ -110,6 +127,7 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
     if (!activeWorkdir.trim()) errs.workdir = '请填写工作目录'
     if (!cmd.trim()) errs.cmd = '请填写要运行的命令'
     if (mode === 'pinned' && !pinned.length) errs.gpu = '请至少选择一张卡'
+    if (Array.from(memo).length > 500) errs.memo = '备注最多 500 字'
     let env: Record<string, string> = {}
     try {
       env = parseEnv(envText)
@@ -118,13 +136,15 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
     }
     setErrors(errs)
     // 焦点移到第一个出错的字段，读屏会读出它的错误说明
-    const first = (['workdir', 'cmd', 'gpu', 'env'] as Field[]).find((f) => errs[f])
+    const first = (['workdir', 'cmd', 'gpu', 'memo', 'env'] as Field[]).find((f) => errs[f])
     if (first) {
       document.getElementById(ids[first])?.focus()
       return
     }
     submit.mutate({
       name: name.trim(),
+      memo,
+      notify_done: notifyDone,
       workdir: activeWorkdir.trim().replace(/\/+$/, '') || '/',
       conda_env: condaEnv,
       cmd,
@@ -273,6 +293,19 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
 
         <FormRow label="任务名" hint="留空则用目录名加时间。" htmlFor={ids.name}>
           <Input id={ids.name} aria-describedby={`${ids.name}-hint`} value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 vit-lr3e-4" maxLength={100} />
+        </FormRow>
+
+        <FormRow label="备注" hint="可选，最多 500 字。" htmlFor={ids.memo}>
+          <Textarea id={ids.memo} rows={2} aria-describedby={describe('memo')} aria-invalid={!!errors.memo || undefined}
+            value={memo} onChange={(e) => edit('memo', setMemo)(e.target.value)} />
+          <FieldError id={`${ids.memo}-err`}>{errors.memo}</FieldError>
+        </FormRow>
+
+        <FormRow label="手机推送" hint="失败仍会按服务器的推送设置提醒。">
+          <label className="inline-flex min-h-9 items-center gap-2 text-ui max-sm:min-h-11">
+            <input type="checkbox" className="size-4 accent-inv" checked={notifyDone} onChange={(e) => setNotifyDone(e.target.checked)} />
+            结束时推送
+          </label>
         </FormRow>
 
         <FormRow label="环境变量" hint="可选，每行一个 KEY=VALUE。" htmlFor={ids.env}>

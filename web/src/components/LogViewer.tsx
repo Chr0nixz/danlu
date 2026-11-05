@@ -1,17 +1,67 @@
 import { LogRenderer, useJobLog } from '@danlu/core'
-import { ArrowDown, ArrowUp, Download, WrapText } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useMutation } from '@tanstack/react-query'
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Download, Search, WrapText } from 'lucide-react'
+import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { api } from '../lib/api'
+import { LogSearchDialog } from './LogSearchDialog'
 import { cx, ErrorBox, Spinner } from './ui'
 
+const toolbarButton =
+  'relative inline-flex h-7 shrink-0 items-center gap-1.5 rounded px-2 text-xs text-[#a1a1a1] transition-colors duration-150 before:absolute before:inset-x-0 before:-inset-y-1.5 hover:bg-white/10 hover:text-white disabled:opacity-50 [&_svg]:size-3.5'
+
+export function LogViewer({ jobId, offset, onJump }: { jobId: number; offset?: number; onJump(offset?: number): void }) {
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [keyword, setKeyword] = useState('')
+  const box = useRef<HTMLDivElement>(null)
+  const search = useMutation({ mutationFn: (term: string) => api.searchLog(jobId, term) })
+  const matches = search.data?.matches ?? []
+  const selected = matches.findIndex((match) => match.offset === offset)
+  const jump = (index: number) => {
+    const match = matches[index]
+    if (match) {
+      if (match.offset === offset && box.current) box.current.scrollTop = 0
+      onJump(match.offset)
+      setSearchOpen(false)
+    }
+  }
+  return (
+    <>
+      <LogOutput key={offset ?? 'tail'} jobId={jobId} offset={offset} box={box} onTail={() => onJump()} tools={
+        <>
+          <button type="button" className={toolbarButton} aria-label="搜索日志" title="搜索日志" onClick={() => setSearchOpen(true)}>
+            <Search aria-hidden />
+            <span className="hidden sm:inline">搜索</span>
+          </button>
+          {selected >= 0 && (
+            <div className="flex items-center" aria-label={`第 ${selected + 1} 条命中，共 ${matches.length} 条`}>
+              <button type="button" className={toolbarButton} aria-label="上一个命中" title="上一个命中" disabled={selected === 0}
+                onClick={() => jump(selected - 1)}><ChevronLeft aria-hidden /></button>
+              <button type="button" className={toolbarButton} aria-label="下一个命中" title="下一个命中" disabled={selected + 1 >= matches.length}
+                onClick={() => jump(selected + 1)}><ChevronRight aria-hidden /></button>
+            </div>
+          )}
+        </>
+      } />
+      {searchOpen && (
+        <LogSearchDialog keyword={keyword} onChange={setKeyword} term={search.variables} result={search.data}
+          loading={search.isPending} error={search.error} onSearch={(term) => search.mutate(term)} onJump={jump} onClose={() => setSearchOpen(false)} />
+      )}
+    </>
+  )
+}
+
 /** 先读日志末尾 256KB，再用 SSE 接收增量（见 @danlu/core 的 useJobLog） */
-export function LogViewer({ jobId, offset }: { jobId: number; offset?: number }) {
-  const { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart } = useJobLog(api, jobId, { offset })
+function LogOutput({ jobId, offset, box, onTail, tools }: {
+  jobId: number
+  offset?: number
+  box: RefObject<HTMLDivElement | null>
+  onTail(): void
+  tools: ReactNode
+}) {
+  const { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart, windowLimited } = useJobLog(api, jobId, { offset })
   const [follow, setFollow] = useState(offset === undefined)
   const [wrap, setWrap] = useState(true)
-  const box = useRef<HTMLDivElement>(null)
   const pre = useRef<HTMLPreElement>(null)
-  useEffect(() => setFollow(offset === undefined), [offset])
 
   // 从文件中间开始读时，第一行是半截的，丢掉
   const text = useMemo(() => (start !== 0 && !exactStart ? raw.slice(raw.indexOf('\n') + 1) : raw), [raw, start, exactStart])
@@ -62,19 +112,18 @@ export function LogViewer({ jobId, offset }: { jobId: number; offset?: number })
 
   const onScroll = () => {
     const el = box.current
-    if (!el) return
+    if (!el || offset !== undefined) return
     setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
   }
 
   // 按钮 28px 高，点击区上下撑满 40px 高的工具栏（手机上只剩图标，又窄又矮）
-  const tb =
-    'relative inline-flex h-7 items-center gap-1.5 rounded px-2 text-xs text-[#a1a1a1] transition-colors duration-150 before:absolute before:inset-x-0 before:-inset-y-1.5 hover:bg-white/10 hover:text-white disabled:opacity-50 [&_svg]:size-3.5'
+  const tb = toolbarButton
 
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-[#0b0b0b]">
       <div className="flex h-10 items-center gap-1 border-b border-white/10 px-2 text-xs text-[#8f8f8f]">
-        <span className="flex items-center gap-1.5 px-1.5">
-          {!ended ? (
+        <span className="flex shrink-0 items-center gap-1.5 px-1.5">
+          {offset !== undefined ? '定位浏览' : !ended ? (
             <>
               <span className="size-1.5 animate-pulse rounded-full bg-[#3dd68c]" aria-hidden />
               实时
@@ -87,11 +136,13 @@ export function LogViewer({ jobId, offset }: { jobId: number; offset?: number })
           )}
         </span>
         {start === -1 && <span className="truncate px-1.5">只保留了最近的部分，完整日志请下载</span>}
+        {windowLimited && <span className="truncate px-1.5">定位窗口已读满</span>}
         <span className="ml-auto" />
-        {start > 0 && (
-          <button type="button" className={tb} disabled={loadingOlder} onClick={loadOlder}>
+        {tools}
+        {start > 0 && !windowLimited && (
+          <button type="button" className={tb} aria-label="加载更早" title="加载更早" disabled={loadingOlder} onClick={loadOlder}>
             {loadingOlder ? <Spinner className="size-3.5" /> : <ArrowUp />}
-            加载更早
+            <span className="hidden sm:inline">加载更早</span>
           </button>
         )}
         <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title="自动换行" onClick={() => setWrap((w) => !w)}>
@@ -123,11 +174,11 @@ export function LogViewer({ jobId, offset }: { jobId: number; offset?: number })
         {!follow && (
           <button
             type="button"
-            onClick={() => setFollow(true)}
+            onClick={() => offset !== undefined ? onTail() : setFollow(true)}
             className="absolute bottom-3 right-4 inline-flex h-8 items-center gap-1 rounded-md bg-white px-3 text-xs font-medium text-black shadow-[0_4px_12px_rgb(0_0_0/0.4)] hover:bg-[#e6e6e6]"
           >
             <ArrowDown className="size-3.5" />
-            回到底部
+            {offset !== undefined ? '回到日志末尾' : '回到底部'}
           </button>
         )}
       </div>

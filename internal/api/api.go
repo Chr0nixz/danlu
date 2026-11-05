@@ -87,7 +87,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/star", s.starJob)
 	mux.HandleFunc("POST /api/jobs/{id}/rename", s.renameJob)
+	mux.HandleFunc("POST /api/jobs/{id}/memo", s.setJobMemo)
+	mux.HandleFunc("POST /api/jobs/{id}/notify", s.setJobNotify)
 	mux.HandleFunc("GET /api/jobs/{id}/log", s.jobLog)
+	mux.HandleFunc("GET /api/jobs/{id}/log/search", s.jobLogSearch)
 	mux.HandleFunc("GET /api/jobs/{id}/log/stream", s.jobLogStream)
 	mux.HandleFunc("GET /api/jobs/{id}/log/download", s.jobLogDownload)
 	mux.HandleFunc("GET /api/jobs/{id}/snapshot", s.snapshotMeta)
@@ -452,6 +455,18 @@ type jobView struct {
 	TracebackOffset *int64 `json:"traceback_offset,omitempty"`
 	QueuePos        int    `json:"queue_pos,omitempty"`
 	WaitReason      string `json:"wait_reason,omitempty"`
+	SilentSince     int64  `json:"silent_since,omitempty"`
+}
+
+func (s *Server) withProfile(j *store.Job) *store.Job {
+	if s.Mgr != nil && j.Status == store.StatusRunning {
+		if profile := s.Mgr.RuntimeView(j.ID).Profile; profile != nil {
+			job := *j
+			job.Profile = profile
+			return &job
+		}
+	}
+	return j
 }
 
 func (s *Server) views(jobs []*store.Job) []jobView {
@@ -468,7 +483,10 @@ func (s *Server) views(jobs []*store.Job) []jobView {
 	}
 	out := make([]jobView, len(jobs))
 	for i, j := range jobs {
-		v := jobView{Job: j, QueuePos: pos[j.ID], TracebackOffset: j.TracebackOffset, WaitReason: waitReasons[j.ID]}
+		v := jobView{Job: s.withProfile(j), QueuePos: pos[j.ID], TracebackOffset: j.TracebackOffset, WaitReason: waitReasons[j.ID]}
+		if s.Mgr != nil && j.Status == store.StatusRunning {
+			v.SilentSince = s.Mgr.RuntimeView(j.ID).SilentSince
+		}
 		// 结束的任务也显示最后一行，通常是最终的指标
 		if j.StartedAt != nil {
 			v.LastLine = logs.LastLine(s.Runner.LogPath(j.ID))
@@ -489,6 +507,15 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		f.Statuses = strings.Split(st, ",")
 	}
 	f.EndedAfter, _ = strconv.ParseInt(q.Get("ended_after"), 10, 64)
+	if q.Has("finished_from_event") || q.Has("finished_to_event") {
+		from, fromErr := strconv.ParseInt(q.Get("finished_from_event"), 10, 64)
+		to, toErr := strconv.ParseInt(q.Get("finished_to_event"), 10, 64)
+		if fromErr != nil || toErr != nil || from <= 0 || to < from {
+			writeErr(w, 400, "结束事件范围无效")
+			return
+		}
+		f.FinishedFromEvent, f.FinishedToEvent = from, to
+	}
 	// order=ended：只要已结束的，按结束时间倒序，用 before / before_id 游标翻页
 	f.ByEnded = q.Get("order") == "ended"
 	f.Before, _ = strconv.ParseInt(q.Get("before"), 10, 64)
@@ -622,6 +649,62 @@ func (s *Server) renameJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Store.Audit(auth.ClientIP(r), "job_rename", fmt.Sprintf("#%d %s → %s", j.ID, j.Name, updated.Name))
+	writeJSON(w, 200, s.views([]*store.Job{updated})[0])
+}
+
+func (s *Server) setJobMemo(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Memo *string `json:"memo"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.Memo == nil {
+		writeErr(w, 400, "请提供备注")
+		return
+	}
+	if err := scheduler.ValidateMemo(*body.Memo); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	updated, err := s.Store.SetMemo(j.ID, *body.Memo)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.Store.Audit(auth.ClientIP(r), "job_memo", fmt.Sprintf("#%d", j.ID))
+	writeJSON(w, 200, s.views([]*store.Job{updated})[0])
+}
+
+func (s *Server) setJobNotify(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		On *bool `json:"on"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.On == nil {
+		writeErr(w, 400, "请提供结束提醒开关")
+		return
+	}
+	updated, err := s.Mgr.SetNotifyDone(j.ID, *body.On)
+	if errors.Is(err, scheduler.ErrNotifyFinished) {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.Store.Audit(auth.ClientIP(r), "job_notify", fmt.Sprintf("#%d on=%t", j.ID, *body.On))
 	writeJSON(w, 200, s.views([]*store.Job{updated})[0])
 }
 

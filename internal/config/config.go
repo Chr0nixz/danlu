@@ -73,6 +73,7 @@ type Runtime struct {
 	OutputRoot         string   `toml:"output_root"`
 	KillGrace          Duration `toml:"kill_grace"`
 	FailFast           Duration `toml:"fail_fast"`
+	SilenceAlert       Duration `toml:"silence_alert"`
 	DiskWarnGB         int64    `toml:"disk_warn_gb"`
 	DiskMinGB          int64    `toml:"disk_min_gb"`
 	SnapshotMaxFileMB  int      `toml:"snapshot_max_file_mb"`
@@ -104,6 +105,7 @@ func Default() *Config {
 			OutputRoot:         DefaultOutputRoot,
 			KillGrace:          Duration{30 * time.Second},
 			FailFast:           Duration{2 * time.Minute},
+			SilenceAlert:       Duration{30 * time.Minute},
 			DiskWarnGB:         20,
 			DiskMinGB:          2,
 			SnapshotMaxFileMB:  1,
@@ -111,6 +113,7 @@ func Default() *Config {
 		},
 		Retention: Retention{KeepDays: 90, MaxTotalGB: 50},
 		Terminal:  Terminal{Enabled: true},
+		Notify:    Notify{QueueDrained: true},
 	}
 }
 
@@ -253,6 +256,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Runtime.FailFast.Duration < 0 {
 		return errors.New("runtime.fail_fast 不能为负数；设为 0s 可关闭快速失败暂停")
+	}
+	if c.Runtime.SilenceAlert.Duration < 0 {
+		return errors.New("runtime.silence_alert 不能为负数，设为 0s 可关闭日志静默提醒")
 	}
 	for name, value := range map[string]int64{
 		"runtime.disk_warn_gb": c.Runtime.DiskWarnGB, "runtime.disk_min_gb": c.Runtime.DiskMinGB,

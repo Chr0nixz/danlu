@@ -15,6 +15,7 @@ const (
 	EventJobRequeued  = "job_requeued"
 	EventQueuePaused  = "queue_paused"
 	EventQueueResumed = "queue_resumed"
+	EventQueueDrained = "queue_drained"
 	EventAlertRaised  = "alert_raised"
 	EventAlertCleared = "alert_cleared"
 )
@@ -59,9 +60,38 @@ func (s *Store) transition(j *Job, key, value string, events ...*Event) error {
 			return err
 		}
 	}
+	finished := false
 	for _, e := range events {
-		if e == nil || e.Kind == "" || e.JobID == nil || *e.JobID != j.ID {
+		if e == nil || e.Kind == "" {
 			return fmt.Errorf("任务 #%d 的事件不合法", j.ID)
+		}
+		if e.Kind == EventQueueDrained {
+			if !finished || e.JobID != nil {
+				return fmt.Errorf("任务 #%d 的队列排空事件不合法", j.ID)
+			}
+			// 仍有待重试的收尾时，库里还有活动任务，等最后一次收尾成功再记排空。
+			var active bool
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued','running'))`).Scan(&active); err != nil {
+				return err
+			}
+			if active {
+				continue
+			}
+		} else if e.JobID == nil || *e.JobID != j.ID {
+			return fmt.Errorf("任务 #%d 的事件不合法", j.ID)
+		}
+		if e.Kind == EventJobFinished {
+			// 启动中的任务也可能被取消。读事务中的值，避免占位时读出的开关过期。
+			data := string(e.Data)
+			if data == "" {
+				data = "{}"
+			}
+			if err := tx.QueryRow(`SELECT json_set(?, '$.notify_done',
+				json(CASE WHEN notify_done THEN 'true' ELSE 'false' END)) FROM jobs WHERE id=?`, data, j.ID).Scan(&data); err != nil {
+				return err
+			}
+			e.Data = json.RawMessage(data)
+			finished = true
 		}
 		if err := insertEvent(tx, e); err != nil {
 			return err

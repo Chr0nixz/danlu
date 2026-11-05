@@ -18,7 +18,6 @@ import (
 	"unicode/utf8"
 
 	"danlu/internal/config"
-	"danlu/internal/logs"
 	"danlu/internal/store"
 )
 
@@ -32,39 +31,31 @@ type StateStore interface {
 }
 
 type Status struct {
-	Enabled    bool   `json:"enabled"`
-	LastSentAt *int64 `json:"last_sent_at"`
-	LastError  string `json:"last_error"`
-}
-
-type failure struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Reason string `json:"reason"`
-}
-
-type batch struct {
-	At      int64     `json:"at"`
-	FirstID int64     `json:"first_id"`
-	Count   int       `json:"count"`
-	Items   []failure `json:"items"`
+	Enabled      bool   `json:"enabled"`
+	QueueDrained bool   `json:"queue_drained"`
+	LastSentAt   *int64 `json:"last_sent_at"`
+	LastError    string `json:"last_error"`
 }
 
 type state struct {
-	Target   string    `json:"target"`
-	Instance string    `json:"instance"`
-	Cursor   int64     `json:"cursor"`
-	Batch    *batch    `json:"batch,omitempty"`
-	Outbox   []Message `json:"outbox,omitempty"`
-	InFlight *Message  `json:"in_flight,omitempty"`
+	Target     string        `json:"target"`
+	Instance   string        `json:"instance"`
+	Cursor     int64         `json:"cursor"`
+	Batch      *batch        `json:"batch,omitempty"`
+	QueueBatch *batch        `json:"queue_batch,omitempty"`
+	QueueSince *int64        `json:"queue_since,omitempty"`
+	Summary    *queueSummary `json:"summary,omitempty"`
+	Outbox     []Message     `json:"outbox,omitempty"`
+	InFlight   *Message      `json:"in_flight,omitempty"`
 }
 
 func (s state) clone() state {
 	s.Outbox = slices.Clone(s.Outbox)
-	if s.Batch != nil {
-		b := *s.Batch
-		b.Items = slices.Clone(b.Items)
-		s.Batch = &b
+	s.Batch, s.QueueBatch = s.Batch.clone(), s.QueueBatch.clone()
+	if s.Summary != nil {
+		summary := *s.Summary
+		summary.Failures = slices.Clone(summary.Failures)
+		s.Summary = &summary
 	}
 	return s
 }
@@ -118,6 +109,16 @@ func (s *Service) Initialize() error {
 		// HTTP 和本地事务无法原子提交。结果未知时不重发，避免重启重复响铃。
 		loaded.InFlight = nil
 		values["ntfy.last_error"] = "上次推送在发送中被中断，送达结果未知，已跳过重发"
+	}
+	if target == "" || !s.publisher.Config.QueueDrained {
+		loaded.Batch = mergeBatches(loaded.Batch, loaded.QueueBatch)
+		loaded.QueueBatch, loaded.QueueSince, loaded.Summary = nil, nil, nil
+	} else if loaded.QueueSince == nil {
+		cursor, err := s.st.LastEventID()
+		if err != nil {
+			return err
+		}
+		loaded.QueueSince = &cursor
 	}
 	if err := s.save(loaded, values); err != nil {
 		return err
@@ -183,21 +184,32 @@ func (s *Service) step(ctx context.Context, now time.Time) error {
 	dirty, caughtUp := false, false
 	// 有界读取；发送端落后时让事件留在 SQLite，避免无界内存队列。
 	if len(next.Outbox) < 100 {
-		events, err := s.st.EventsAfter(next.Cursor, 100)
+		// 多读一条，快速失败的结束与暂停在同一事务里，可跨分页一起消费。
+		events, err := s.st.EventsAfter(next.Cursor, 101)
 		if err != nil {
 			return err
 		}
-		dirty, caughtUp = len(events) > 0, len(events) < 100
-		for _, event := range events {
-			// 快速失败暂停紧跟在那次失败之后写入；即使跨过窗口边界，也先和批次里的这次失败合并。
-			if next.Batch != nil && event.TS >= next.Batch.At+int64(s.window.Seconds()) && !pausesBatched(next.Batch, event) {
+		dirty, caughtUp = len(events) > 0, len(events) <= 100
+		for i := 0; i < min(len(events), 100); i++ {
+			event := events[i]
+			if b := next.firstBatch(); b != nil && event.TS >= b.At+int64(s.window.Seconds()) && !next.pausesBatched(event) {
 				s.flushBatch(&next)
 			}
-			s.consume(&next, event)
+			if event.Kind == store.EventJobFinished {
+				paired := i+1 < len(events) && fastPauseFor(events[i+1], event.JobID)
+				item := consumeFinished(&next, event, paired)
+				if paired {
+					i++
+					event = events[i]
+					s.consume(&next, event, item)
+				}
+			} else {
+				s.consume(&next, event, nil)
+			}
 			next.Cursor = event.ID
 		}
 	}
-	if caughtUp && next.Batch != nil && now.Unix() >= next.Batch.At+int64(s.window.Seconds()) {
+	if b := next.firstBatch(); caughtUp && b != nil && now.Unix() >= b.At+int64(s.window.Seconds()) {
 		s.flushBatch(&next)
 		dirty = true
 	}
@@ -244,7 +256,7 @@ func (s *Service) finish(err error) error {
 }
 
 func (s *Service) Status() (Status, error) {
-	status := Status{Enabled: s.publisher.Config.NTFY != ""}
+	status := Status{Enabled: s.publisher.Config.NTFY != "", QueueDrained: s.publisher.Config.QueueDrained}
 	last, err := s.st.GetSetting("ntfy.last_sent_at")
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return status, err
@@ -282,37 +294,15 @@ func (s *Service) Test(ctx context.Context) error {
 	return err
 }
 
-func (s *Service) consume(next *state, e store.Event) {
-	if e.Kind == store.EventJobFinished {
-		var data struct {
-			Status   string `json:"status"`
-			Name     string `json:"name"`
-			FailKind string `json:"fail_kind"`
-			ExitCode *int   `json:"exit_code"`
-			Reason   string `json:"reason"`
-		}
-		if json.Unmarshal(e.Data, &data) != nil || data.Status != store.StatusFailed || e.JobID == nil {
-			return
-		}
-		if next.Batch == nil {
-			next.Batch = &batch{At: e.TS, FirstID: e.ID}
-		}
-		next.Batch.Count++
-		if len(next.Batch.Items) < 8 {
-			reason := failureReason(data.FailKind, data.ExitCode)
-			// 原因文字只用来和固定文案比较，不转发：只凭退出码推测的内存不足要说"可能"。
-			if data.FailKind == "host_oom" && data.Reason == logs.ReasonMaybeHostOOM {
-				reason = "可能是主机内存不足"
-			}
-			next.Batch.Items = append(next.Batch.Items, failure{ID: *e.JobID, Name: oneLine(data.Name, 200), Reason: reason})
-		}
-		return
-	}
+func (s *Service) consume(next *state, e store.Event, fastFailure *completion) {
 	message := Message{ID: "danlu-" + next.Instance + "-" + strconv.FormatInt(e.ID, 10), Priority: 3, Click: s.baseURL + "/"}
 	if e.JobID != nil {
 		message.Click = fmt.Sprintf("%s/jobs/%d", s.baseURL, *e.JobID)
 	}
 	switch e.Kind {
+	case store.EventQueueDrained:
+		s.drain(next, e)
+		return
 	case store.EventQueuePaused:
 		var data struct {
 			Kind string `json:"kind"`
@@ -325,11 +315,16 @@ func (s *Service) consume(next *state, e store.Event) {
 			message.Body = "数据分区空间不足，已暂停启动新任务。"
 		} else if e.JobID == nil {
 			return
-		} else if item, ok := takeFailure(next, *e.JobID); ok {
-			// 失败原因随暂停一起发出，这次失败不再进入合并批次，手机只响一次。
-			message.Body = fmt.Sprintf("#%d %s：%s。任务启动后很快失败，已暂停启动后续任务，请检查后继续队列。", item.ID, item.Name, item.Reason)
 		} else {
-			message.Body = fmt.Sprintf("任务 #%d 快速失败，已暂停启动后续任务，请检查后继续队列。", *e.JobID)
+			if fastFailure == nil {
+				// 兼容升级前游标恰好停在结束与暂停之间的待发批次。
+				fastFailure = next.takeFailure(*e.JobID)
+			}
+			if fastFailure != nil {
+				message.Body = fmt.Sprintf("%s。任务启动后很快失败，已暂停启动后续任务，请检查后继续队列。", fastFailure.line())
+			} else {
+				message.Body = fmt.Sprintf("任务 #%d 快速失败，已暂停启动后续任务，请检查后继续队列。", *e.JobID)
+			}
 		}
 	case store.EventAlertRaised, store.EventAlertCleared:
 		var data store.AlertData
@@ -358,6 +353,18 @@ func (s *Service) consume(next *state, e store.Event) {
 					return
 				}
 				message.Title, message.Body = s.hostname+" · 队首等待外部进程", fmt.Sprintf("任务 #%d 正在等待外部进程释放 GPU。", *e.JobID)
+			case "silent":
+				if e.JobID == nil || data.Since <= 0 {
+					return
+				}
+				message.Title = s.hostname + " · 任务无新输出"
+				message.Body = fmt.Sprintf("#%d %s 已 %s没有新输出。", *e.JobID, oneLine(data.Name, 200), humanDuration(e.TS-data.Since))
+				if data.Util != nil {
+					message.Body += fmt.Sprintf("GPU 平均利用率 %d%%。", *data.Util)
+				}
+				if data.DState != nil && *data.DState > 0 {
+					message.Body += fmt.Sprintf("有 %d 个进程处于 D 状态，可能在等待存储。", *data.DState)
+				}
 			default:
 				return
 			}
@@ -366,57 +373,6 @@ func (s *Service) consume(next *state, e store.Event) {
 		return
 	}
 	next.Outbox = append(next.Outbox, message)
-}
-
-// pausesBatched 判断事件是否为批次中某次失败触发的快速失败暂停。
-func pausesBatched(b *batch, e store.Event) bool {
-	if e.Kind != store.EventQueuePaused || e.JobID == nil {
-		return false
-	}
-	var data struct {
-		Kind string `json:"kind"`
-	}
-	if json.Unmarshal(e.Data, &data) != nil || data.Kind != "fail_fast" {
-		return false
-	}
-	return slices.ContainsFunc(b.Items, func(f failure) bool { return f.ID == *e.JobID })
-}
-
-// takeFailure 把任务从待发的失败批次中取出；批次空了就不再发送。
-func takeFailure(next *state, id int64) (failure, bool) {
-	b := next.Batch
-	if b == nil {
-		return failure{}, false
-	}
-	i := slices.IndexFunc(b.Items, func(f failure) bool { return f.ID == id })
-	if i < 0 {
-		return failure{}, false
-	}
-	item := b.Items[i]
-	b.Items = slices.Delete(b.Items, i, i+1)
-	b.Count--
-	if b.Count == 0 {
-		next.Batch = nil
-	}
-	return item, true
-}
-
-func (s *Service) flushBatch(next *state) {
-	b := next.Batch
-	var lines []string
-	for _, item := range b.Items {
-		lines = append(lines, fmt.Sprintf("#%d %s：%s", item.ID, item.Name, item.Reason))
-	}
-	if b.Count > len(b.Items) {
-		lines = append(lines, fmt.Sprintf("另有 %d 个任务失败，请打开面板查看。", b.Count-len(b.Items)))
-	}
-	click := s.baseURL + "/jobs?status=failed"
-	if b.Count == 1 {
-		click = fmt.Sprintf("%s/jobs/%d", s.baseURL, b.Items[0].ID)
-	}
-	next.Outbox = append(next.Outbox, Message{ID: "danlu-" + next.Instance + "-" + strconv.FormatInt(b.FirstID, 10),
-		Title: s.hostname + " · 任务失败", Body: strings.Join(lines, "\n"), Click: click, Priority: 3})
-	next.Batch = nil
 }
 
 func failureReason(kind string, exit *int) string {
@@ -428,6 +384,18 @@ func failureReason(kind string, exit *int) string {
 		return fmt.Sprintf("退出码 %d", *exit)
 	}
 	return "任务异常结束"
+}
+
+func humanDuration(seconds int64) string {
+	seconds = max(0, seconds)
+	switch {
+	case seconds >= 3600:
+		return fmt.Sprintf("%d 小时 %d 分钟", seconds/3600, seconds%3600/60)
+	case seconds >= 60:
+		return fmt.Sprintf("%d 分钟", seconds/60)
+	default:
+		return fmt.Sprintf("%d 秒", seconds)
+	}
 }
 
 func oneLine(value string, maxBytes int) string {

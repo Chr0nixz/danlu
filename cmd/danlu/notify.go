@@ -73,7 +73,7 @@ func cmdNotifySetup(args []string) error {
 		return err
 	}
 	if *disable {
-		c.Notify = config.Notify{}
+		c.Notify.NTFY, c.Notify.Token = "", ""
 	} else {
 		if *server != "" || *topic != "" || *newTopic || c.Notify.NTFY == "" {
 			endpoint, err := notifyTopicURL(c.Notify.NTFY, *server, *topic, *newTopic)

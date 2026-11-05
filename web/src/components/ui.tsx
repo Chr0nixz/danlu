@@ -276,7 +276,7 @@ export function ErrorBox({ error, className }: { error: unknown; className?: str
  * 手机上贴着底部，拇指够得到。挂载即打开，关闭时调用 onClose，由调用方卸载。
  * 挂到 body 下，免得悬停在框上时触发列表行的 hover 样式。
  */
-export function Dialog({ title, children, footer, onClose }: { title: ReactNode; children: ReactNode; footer: ReactNode; onClose: () => void }) {
+export function Dialog({ title, children, footer, onClose, className, wide = false }: { title: ReactNode; children: ReactNode; footer: ReactNode; onClose: () => void; className?: string; wide?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null)
   const titleId = useId()
   useEffect(() => {
@@ -289,15 +289,16 @@ export function Dialog({ title, children, footer, onClose }: { title: ReactNode;
       aria-labelledby={titleId}
       onClose={onClose}
       onClick={(e) => e.target === e.currentTarget && e.currentTarget.close()}
-      className="m-auto w-[calc(100%-2rem)] max-w-[420px] rounded-lg border border-line bg-surface p-0 text-fg shadow-[0_8px_24px_rgb(0_0_0/0.12)] backdrop:bg-black/40 max-sm:mb-[calc(1rem+env(safe-area-inset-bottom))]"
+      className={cx('m-auto w-[calc(100%-2rem)] rounded-lg border border-line bg-surface p-0 text-fg shadow-[0_8px_24px_rgb(0_0_0/0.12)] backdrop:bg-black/40 max-sm:mb-[calc(1rem+env(safe-area-inset-bottom))]',
+        wide ? 'max-w-xl' : 'max-w-[420px]', className)}
     >
-      <div className="px-4 pt-4 pb-4 sm:px-5">
+      <div className={cx('px-4 pt-4 pb-4 sm:px-5', wide && 'min-h-0 flex-1 overflow-y-auto')}>
         <h2 id={titleId} className="text-sm font-semibold">
           {title}
         </h2>
         <div className="mt-1.5 space-y-2 text-ui leading-relaxed text-fg-2">{children}</div>
       </div>
-      <div className="flex gap-2 rounded-b-lg border-t border-line bg-subtle px-4 py-3 sm:justify-end sm:px-5 [&>*]:flex-1 max-sm:[&>*]:h-11 sm:[&>*]:flex-none">{footer}</div>
+      <div className="flex shrink-0 gap-2 rounded-b-lg border-t border-line bg-subtle px-4 py-3 sm:justify-end sm:px-5 [&>*]:flex-1 max-sm:[&>*]:h-11 sm:[&>*]:flex-none">{footer}</div>
     </dialog>,
     document.body,
   )

@@ -20,6 +20,10 @@ func (m *Manager) transition(j *store.Job, to, reason string) error {
 	switch to {
 	case store.StatusRunning:
 		if j.PID > 0 {
+			if m.runStats[j.ID] == nil {
+				now := time.Now()
+				m.runStats[j.ID] = &runStat{profile: j.Profile.Clone(), lastSave: now, gpuAt: now}
+			}
 			events = append(events, startedEvent(j))
 		}
 	case store.StatusQueued:
@@ -27,8 +31,14 @@ func (m *Manager) transition(j *store.Job, to, reason string) error {
 		j.EndedAt, j.ExitCode, j.CancelRequested, j.FailReason = nil, nil, false, ""
 		j.FailKind, j.ExtSeen, j.OOMBase, j.TracebackOffset = "", false, -1, nil
 		j.Recipe = nil
+		j.Profile = nil
+		delete(m.runStats, j.ID)
 		events = append(events, jobEvent(j, store.EventJobRequeued, map[string]any{"reason": reason}))
 	case store.StatusSucceeded, store.StatusFailed, store.StatusCancelled:
+		if stat := m.runStats[j.ID]; stat != nil {
+			j.Profile = stat.profile.Clone()
+			delete(m.runStats, j.ID)
+		}
 		now := time.Now().Unix()
 		j.EndedAt, j.FailReason = &now, ""
 		if to == store.StatusFailed {
@@ -99,9 +109,8 @@ func (m *Manager) persist(j *store.Job, transition bool, events ...*store.Event)
 	events = append(m.pendingEvents[j.ID], events...)
 	var err error
 	var pause *QueueState
-	if j.Status == store.StatusFailed && slices.ContainsFunc(events, func(e *store.Event) bool {
-		return e.Kind == store.EventJobFinished
-	}) {
+	finish := slices.IndexFunc(events, func(e *store.Event) bool { return e.Kind == store.EventJobFinished })
+	if j.Status == store.StatusFailed && finish >= 0 {
 		var event *store.Event
 		pause, event, err = m.failFastPauseLocked(j)
 		if event != nil {
@@ -118,7 +127,14 @@ func (m *Manager) persist(j *store.Job, transition bool, events ...*store.Event)
 				err = m.st.TransitionWithSetting(j, queueStateKey, string(data), events...)
 			}
 		} else if transition || len(events) > 0 {
-			err = m.st.Transition(j, events...)
+			toCommit := events
+			if finish >= 0 && len(m.starting) == 0 {
+				if queue, queueErr := m.queueStateLocked(); queueErr == nil && !queue.Paused {
+					toCommit = append(toCommit, &store.Event{Kind: store.EventQueueDrained, TS: events[finish].TS,
+						DedupeKey: fmt.Sprintf("queue_drained:%d", j.ID)})
+				}
+			}
+			err = m.st.Transition(j, toCommit...)
 		} else {
 			err = m.st.SaveJob(j)
 		}

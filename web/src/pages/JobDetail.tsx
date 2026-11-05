@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Check, ChevronLeft, Copy, GitCompareArrows, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Bell, BellOff, Check, ChevronLeft, Copy, GitCompareArrows, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { CancelDialog } from '../components/JobRow'
 import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
+import { ProfileSummary } from '../components/ResourceProfile'
 import { StarButton, StarError, StarMenuItem } from '../components/StarButton'
-import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, GpuChips, hitArea, Input, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs } from '../components/ui'
+import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, hitArea, Input, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
 import { ApiError, compactProgress, duration, fmtTime, isActive, jobDuration, now, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 
@@ -15,6 +16,16 @@ const tabs: Tab[] = ['log', 'info', 'code']
 
 export function JobDetail() {
   const id = Number(useParams().id)
+  const qc = useQueryClient()
+  const notifyToggle = useMutation({
+    mutationFn: ({ id, on }: { id: number; on: boolean }) => api.setNotifyDone(id, on),
+    onSuccess: (updated) => {
+      qc.setQueryData(['job', updated.id], updated)
+      void qc.invalidateQueries({ queryKey: ['jobs'] })
+      announce(updated.notify_done ? '已开启结束提醒' : '已关闭结束提醒')
+    },
+    onError: (_error, { id }) => void qc.invalidateQueries({ queryKey: ['job', id] }),
+  })
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 })
   const q = useQuery({
     queryKey: ['job', id],
@@ -92,6 +103,9 @@ export function JobDetail() {
   const terminal = settings.data?.terminal_enabled === true
   // 每种状态只有一个主操作：在跑或排队的是取消，结束了的是重跑（失败的写明"改参数"）
   const canCancel = isActive(j) && !j.cancel_requested
+  const notifyLabel = j.notify_done ? '关闭结束时推送' : '开启结束时推送'
+  const NotifyIcon = j.notify_done ? Bell : BellOff
+  const toggleNotify = () => notifyToggle.mutate({ id: j.id, on: !j.notify_done })
   const rerunLabel = j.status === 'failed' ? '改参数重跑' : '重跑'
   const rerunTitle = '用同样的设置再跑一次，可以先改参数'
   const tracker = (cls: string) =>
@@ -152,6 +166,12 @@ export function JobDetail() {
             {/* 电脑：操作都露在外面，主操作放最右 */}
             <div className="hidden flex-wrap justify-end gap-2 sm:flex">
               <StarButton job={j} label />
+              {isActive(j) && (
+                <Button size="icon-sm" loading={notifyToggle.isPending} aria-label="结束时推送" aria-pressed={!!j.notify_done}
+                  title={notifyLabel} onClick={toggleNotify}>
+                  <NotifyIcon aria-hidden />
+                </Button>
+              )}
               {terminal && (
                 <Link to={`/terminal?job_id=${j.id}`} className={buttonClass('secondary', 'sm')} title="在这个任务的目录和 conda 环境中打开终端">
                   <TerminalIcon aria-hidden />
@@ -178,6 +198,12 @@ export function JobDetail() {
               {tracker(cx(buttonClass('secondary', 'sm'), 'h-11 px-3.5 text-sm'))}
               <Menu label="更多操作" className="ml-auto" buttonClassName="size-11">
                 <StarMenuItem job={j} />
+                {isActive(j) && (
+                  <button type="button" role="menuitem" className={menuItemClass} disabled={notifyToggle.isPending} onClick={toggleNotify}>
+                    <NotifyIcon aria-hidden />
+                    {notifyLabel}
+                  </button>
+                )}
                 <button type="button" role="menuitem" className={menuItemClass} onClick={() => setRenaming(true)}>
                   <Pencil aria-hidden />
                   改名
@@ -204,12 +230,26 @@ export function JobDetail() {
         )}
       </div>
 
+      <JobMemo key={j.id} job={j} />
       <MetaStrip j={j} />
       <StarError />
+      {notifyToggle.variables?.id === j.id && <ErrorBox error={notifyToggle.error} />}
 
       {j.status === 'failed' && <FailBox j={j} onShowLog={showLog} />}
       {j.status !== 'failed' && j.fail_reason && <Alert>{j.fail_reason}</Alert>}
-      {j.notes && <Alert>备注：{j.notes}</Alert>}
+      {j.notes && <Alert>运行说明：{j.notes}</Alert>}
+      {j.status === 'running' && j.silent_since && (
+        <Alert tone="warn">
+          <div className="flex flex-wrap items-center gap-x-4">
+            <span className="max-sm:basis-full">已 {duration(now() - j.silent_since)}没有新输出</span>
+            <Button variant="ghost" size="sm" className="px-1 max-sm:h-11" onClick={() => showLog()}>看日志末尾</Button>
+            {terminal && (
+              <Link to={`/terminal?job_id=${j.id}`} className={cx(buttonClass('ghost', 'sm'), 'px-1 max-sm:h-11')}>打开终端</Link>
+            )}
+            {canCancel && <Button variant="ghost" size="sm" className="px-1 max-sm:h-11" onClick={() => setConfirming(true)}>取消任务</Button>}
+          </div>
+        </Alert>
+      )}
       {j.cancel_requested && j.status === 'running' && <Alert tone="warn">已发送结束信号，正在等进程退出；超时会强制结束。</Alert>}
 
       <div ref={panel} className="scroll-mt-16">
@@ -231,7 +271,7 @@ export function JobDetail() {
                 {j.wait_reason && <p className="mt-2 px-2 break-words text-fg-2">{j.wait_reason}</p>}
               </Card>
             ) : (
-              <LogViewer key={`${j.id}:${logOffset ?? 'tail'}`} jobId={j.id} offset={logOffset} />
+              <LogViewer key={j.id} jobId={j.id} offset={logOffset} onJump={showLog} />
             ))}
           {tab === 'info' && <Overview j={j} />}
           {tab === 'code' && (j.pruned_at ? <PrunedFiles job={j} /> : <CodeBrowser jobId={j.id} />)}
@@ -248,6 +288,68 @@ function PrunedFiles({ job }: { job: Job }) {
       <p className="font-medium">日志和代码快照已按保留策略清理</p>
       <p className="text-fg-3">清理于 {fmtTime(job.pruned_at)}。任务记录、环境信息和训练产物仍保留，可在“详情”中查看。</p>
     </Card>
+  )
+}
+
+function JobMemo({ job }: { job: Job }) {
+  const qc = useQueryClient()
+  const button = useRef<HTMLButtonElement>(null)
+  const errorId = useId()
+  const [draft, setDraft] = useState<string | null>(null)
+  const tooLong = draft !== null && Array.from(draft).length > 500
+  const close = () => {
+    setDraft(null)
+    requestAnimationFrame(() => button.current?.focus())
+  }
+  const save = useMutation({
+    mutationFn: (memo: string) => api.setMemo(job.id, memo),
+    onSuccess: (updated) => {
+      qc.setQueryData(['job', job.id], updated)
+      void qc.invalidateQueries({ queryKey: ['jobs'] })
+      void qc.invalidateQueries({ queryKey: ['compare'] })
+      void qc.invalidateQueries({ queryKey: ['trace'] })
+      announce('备注已保存')
+      close()
+    },
+  })
+  if (draft === null) {
+    return (
+      <button ref={button} type="button" aria-label={job.memo ? '编辑备注' : '写备注'} title={job.memo || undefined}
+        className="inline-flex max-w-full items-center gap-2 rounded px-1 text-left text-ui text-fg-3 hover:bg-hover hover:text-fg max-sm:min-h-11"
+        onClick={() => { save.reset(); setDraft(job.memo ?? '') }}>
+        <Pencil className="size-3.5 shrink-0" aria-hidden />
+        <span className="line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{job.memo || '写备注…'}</span>
+      </button>
+    )
+  }
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!tooLong && !save.isPending) save.mutate(draft)
+  }
+  return (
+    <form onSubmit={submit} className="space-y-1">
+      <div className="flex items-start gap-2">
+        <Textarea aria-label="任务备注" autoFocus rows={2} value={draft}
+          className="min-w-0 flex-1 max-sm:text-base" readOnly={save.isPending}
+          aria-invalid={tooLong || undefined} aria-describedby={tooLong ? errorId : undefined}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return
+            if (e.key === 'Escape' && !save.isPending) {
+              e.preventDefault()
+              close()
+            }
+            if (e.key === 'Enter' && !e.shiftKey && matchMedia('(min-width: 640px) and (pointer: fine)').matches) {
+              e.preventDefault()
+              e.currentTarget.form?.requestSubmit()
+            }
+          }} />
+        <Button type="submit" variant="primary" size="sm" loading={save.isPending} disabled={tooLong} className="max-sm:h-11">保存</Button>
+        <Button size="sm" disabled={save.isPending} onClick={close} className="max-sm:h-11">取消</Button>
+      </div>
+      {tooLong && <FieldError id={errorId}>备注最多 500 字</FieldError>}
+      <ErrorBox error={save.error} />
+    </form>
   )
 }
 
@@ -554,6 +656,7 @@ function Overview({ j }: { j: Job }) {
           申请 {j.gpus_pinned.length ? `指定卡 ${j.gpus_pinned.join(', ')}` : `${j.gpus_req} 张`}
           {j.gpus_assigned.length > 0 && <>，分到 GPU {j.gpus_assigned.join(', ')}</>}
         </Row>
+        <Row label="资源"><ProfileSummary job={j} showHint /></Row>
         {j.master_port > 0 && (
           <Row label="端口">
             {j.master_port} <span className="text-fg-3">（已注入 PET_MASTER_PORT）</span>

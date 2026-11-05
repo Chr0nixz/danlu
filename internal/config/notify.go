@@ -8,8 +8,9 @@ import (
 )
 
 type Notify struct {
-	NTFY  string `toml:"ntfy"`
-	Token string `toml:"token,omitempty"`
+	NTFY         string `toml:"ntfy"`
+	Token        string `toml:"token,omitempty"`
+	QueueDrained bool   `toml:"queue_drained"`
 }
 
 var topicPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)

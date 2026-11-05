@@ -9,6 +9,7 @@ import type {
   JobsQuery,
   JobStatus,
   LogChunk,
+  LogSearchResult,
   Me,
   QueueState,
   Settings,
@@ -127,8 +128,12 @@ export function createApi(t: Transport, opt: ApiOptions) {
     cancel: (id: number) => post<Job>(`/api/jobs/${id}/cancel`),
     star: (id: number, starred: boolean) => post<Job>(`/api/jobs/${id}/star`, { starred }),
     rename: (id: number, name: string) => post<Job>(`/api/jobs/${id}/rename`, { name }),
+    setMemo: (id: number, memo: string) => post<Job>(`/api/jobs/${id}/memo`, { memo }),
+    setNotifyDone: (id: number, on: boolean) => post<Job>(`/api/jobs/${id}/notify`, { on }),
     log: (id: number, p: { tail?: number; offset?: number; limit?: number }) =>
       get<LogChunk>(`/api/jobs/${id}/log${qs(p)}`),
+    searchLog: (id: number, q: string, limit = 200) =>
+      get<LogSearchResult>(`/api/jobs/${id}/log/search${qs({ q, limit })}`),
     /** 从 offset 开始接收日志增量，任务结束且读完后收到 onEnd。返回关闭函数 */
     logStream: (id: number, offset: number, h: LogStreamHandlers) =>
       t.stream(`/api/jobs/${id}/log/stream${qs({ offset })}`, {

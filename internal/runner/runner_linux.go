@@ -3,6 +3,8 @@ package runner
 import (
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"danlu/internal/procfs"
@@ -57,3 +59,40 @@ func (r *Runner) Terminate(jobID int64, pgid int) { r.signal(jobID, pgid, syscal
 
 // KillAll 强制结束任务的所有进程，返回清理掉的进程数。
 func (r *Runner) KillAll(jobID int64, pgid int) int { return r.signal(jobID, pgid, syscall.SIGKILL) }
+
+// ProcStats 只在后台调用，读取 /proc 期间不持有调度锁。
+func (r *Runner) ProcStats(jobID int64) ProcessStats {
+	var stats ProcessStats
+	runDir := r.RunDir(jobID)
+	for _, pid := range procfs.FindByEnv(JobMarker, runDir) {
+		st, err := procfs.ReadStat(pid)
+		marker, _ := procfs.EnvVar(pid, JobMarker)
+		if err != nil || marker != runDir || st.State == 'Z' || st.State == 'X' {
+			continue
+		}
+		status, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+		if !procfs.Alive(pid, st.StartTime) {
+			continue
+		}
+		stats.Count++
+		if st.State == 'D' {
+			stats.DState++
+		}
+		if err != nil {
+			continue
+		}
+		for line := range strings.SplitSeq(string(status), "\n") {
+			if rss, ok := strings.CutPrefix(line, "VmRSS:"); ok {
+				fields := strings.Fields(rss)
+				if len(fields) == 2 && fields[1] == "kB" {
+					if kb, err := strconv.ParseInt(fields[0], 10, 64); err == nil && kb >= 0 {
+						stats.RSSBytes += kb * 1024
+						stats.RSSKnown = true
+					}
+				}
+				break
+			}
+		}
+	}
+	return stats
+}

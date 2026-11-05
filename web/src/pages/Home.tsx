@@ -97,6 +97,7 @@ export function Home() {
 
   const all = active.data?.jobs ?? []
   const running = all.filter((j) => j.status === 'running').sort((a, b) => a.id - b.id)
+  const silent = running.filter((j) => j.silent_since).length
   const queued = all.filter((j) => j.status === 'queued').sort((a, b) => (a.queue_pos ?? 0) - (b.queue_pos ?? 0))
   const done: Job[] = recent.data?.jobs ?? []
 
@@ -114,7 +115,8 @@ export function Home() {
           <SkeletonRows rows={3} />
         ) : (
           <>
-            <Group icon={<StatusIcon status="running" decorative />} title="运行中" count={running.length}>
+            <Group icon={<StatusIcon status="running" decorative />} title="运行中" count={running.length}
+              extra={silent > 0 && <span className="text-xs text-warn">{silent} 个无新输出</span>}>
               <JobList jobs={running} showCopy empty={<GroupEmpty>炉子空着，没有正在运行的任务</GroupEmpty>} />
             </Group>
             <Group icon={<StatusIcon status="queued" decorative />} title="排队" count={queued.length} extra={<QueuePauseButton />}>

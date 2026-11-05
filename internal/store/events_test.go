@@ -99,6 +99,52 @@ func TestTransitionRejectsMissingJob(t *testing.T) {
 	}
 }
 
+func TestJobMetadataAndBatchRange(t *testing.T) {
+	s := openTest(t)
+	at := int64(100)
+	first := &Job{Name: "j", Workdir: "/w", Cmd: "x", Status: StatusQueued}
+	if err := s.InsertJob(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetMemo(first.ID, "基线\n第二行"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetNotifyDone(first.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveJob(first); err != nil {
+		t.Fatal(err)
+	}
+	first.Status, first.EndedAt = StatusSucceeded, &at
+	finish := &Event{Kind: EventJobFinished, JobID: &first.ID, TS: at}
+	drain := &Event{Kind: EventQueueDrained, TS: at}
+	if err := s.Transition(first, finish, drain); err != nil {
+		t.Fatal(err)
+	}
+	second := &Job{Name: "next", Workdir: "/w", Cmd: "x", Status: StatusQueued}
+	if err := s.InsertJob(second); err != nil {
+		t.Fatal(err)
+	}
+	second.Status, second.EndedAt = StatusCancelled, &at
+	if err := s.Transition(second, &Event{Kind: EventJobFinished, JobID: &second.ID, TS: at}, &Event{Kind: EventQueueDrained, TS: at}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, total, err := s.ListJobs(JobFilter{Query: "基线"})
+	if err != nil || total != 1 || jobs[0].Memo != "基线\n第二行" || !jobs[0].NotifyDone {
+		t.Fatalf("任务的可编辑字段丢失: %v, %v", jobs, err)
+	}
+	jobs, total, err = s.ListJobs(JobFilter{FinishedFromEvent: finish.ID, FinishedToEvent: drain.ID})
+	if err != nil || total != 1 || jobs[0].ID != first.ID {
+		t.Fatalf("同一秒结束的下一批混入查询结果: %v, %v", jobs, err)
+	}
+	var data struct {
+		On bool `json:"notify_done"`
+	}
+	if err := json.Unmarshal(finish.Data, &data); err != nil || !data.On {
+		t.Fatalf("结束事件未使用事务中的开关: %s, %v", finish.Data, err)
+	}
+}
+
 func TestTransitionWithSettingAtomic(t *testing.T) {
 	s := openTest(t)
 	j := &Job{Name: "j", Workdir: "/w", Cmd: "x", Status: StatusRunning}

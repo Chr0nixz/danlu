@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { ProfileSummary } from '../components/ResourceProfile'
 import { diffArrays, structuredPatch } from 'diff'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useMemo, useState, type ReactNode } from 'react'
@@ -93,6 +94,7 @@ function JobHeading({ job, label }: { job: Job; label: string }) {
         <span className="mr-2 text-fg-3">#{job.id}</span>{job.name}
       </Link>
       <div className="mt-0.5 break-all font-mono text-xs text-fg-3">{job.workdir}</div>
+      {job.memo && <div className="mt-1 whitespace-pre-wrap text-ui text-fg-2 [overflow-wrap:anywhere]">{job.memo}</div>}
     </div>
   )
 }
@@ -158,6 +160,16 @@ function Comparison({ data }: { data: JobComparison }) {
           { name: '驱动', a: a.recipe?.machine?.driver_version || '无记录', b: b.recipe?.machine?.driver_version || '无记录' },
           { name: 'CUDA', a: a.recipe?.machine?.cuda_version || '无记录', b: b.recipe?.machine?.cuda_version || '无记录' },
         ]} />
+      </Section>
+      <Section title="资源">
+        <div className="grid divide-y divide-line sm:grid-cols-2 sm:divide-x sm:divide-y-0">
+          {[a, b].map((job) => (
+            <div key={job.id} className="min-w-0 space-y-1 px-3 py-2.5 sm:px-4">
+              <div className="text-xs text-fg-3">#{job.id}</div>
+              <ProfileSummary job={job} />
+            </div>
+          ))}
+        </div>
       </Section>
     </>
   )

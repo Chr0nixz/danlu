@@ -535,6 +535,8 @@ check "运行任务继续运行且保留日志" [ "$(job "$PR" "d['status']")" =
 check "清理不改训练输出或任务清单" [ "$(sha256sum "$OUTDIR/danlu.json")" = "$MANIFEST_SUM" ]
 check "checkpoint 仍保留" grep -q 'trained checkpoint' "$OUTDIR/checkpoint.pt"
 check "清理后的日志接口明确返回 410" [ "$(code "$BASE/api/jobs/$D/log?tail=100")" = 410 ]
+check "清理后的日志搜索同样返回 410" [ "$(code "$BASE/api/jobs/$D/log/search?q=error")" = 410 ]
+check "清理后仍可写任务备注" [ "$(api -X POST "$BASE/api/jobs/$D/memo" -d '{"memo":"已归档"}' | json "d.get('memo') == '已归档'")" = True ]
 check "清理后的快照接口明确返回 410" [ "$(code "$BASE/api/jobs/$D/snapshot")" = 410 ]
 check "源快照清理后，重跑任务仍保有旧代码" [ "$(api "$BASE/api/jobs/$S4C/snapshot/file?path=train.py" | json "d['content'].strip()")" = 'print("snapshot-v1")' ]
 check "对比已清理的任务仍能查看参数，代码区注明原因" [ "$(api "$BASE/api/compare?a=$S4A&b=$S4C" | json "'快照已清理' in d['code']['error'] and '3e-4' in d['command_a']")" = True ]
@@ -665,7 +667,7 @@ echo "== ntfy 手机推送（本地记录服务）=="
 export DANLU_HOME=$T/home-notify
 NOTIFY_PORT=$((PORT + 4))
 "$BIN" init --yes --tls off --port "$NOTIFY_PORT" --password testpass123 --public-ip 127.0.0.1 >/dev/null
-sed -i 's/fail_fast = .*/fail_fast = "0s"/; s/disk_warn_gb = .*/disk_warn_gb = 0/' "$DANLU_HOME/config.toml"
+sed -i 's/fail_fast = .*/fail_fast = "0s"/; s/disk_warn_gb = .*/disk_warn_gb = 0/; s/queue_drained = .*/queue_drained = false/' "$DANLU_HOME/config.toml"
 cat >"$T/ntfy.py" <<'PY'
 import http.server, json, sys
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -739,10 +741,10 @@ api -X POST "$BASE/api/jobs/$NB/cancel" -d '{}' >/dev/null
 kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
 # 快速失败：失败原因随队列暂停一起推送，手机只响一次（ROADMAP.md 场景 3）。
 # 不留外部占卡，免得排队任务同时触发"队首等待外部进程"的推送。
-sed -i 's/fail_fast = .*/fail_fast = "2m"/' "$DANLU_HOME/config.toml"
+sed -i 's/fail_fast = .*/fail_fast = "2m"/; s/queue_drained = .*/queue_drained = true/; s/silence_alert = .*/silence_alert = "20s"/' "$DANLU_HOME/config.toml"
 start_server -u DANLU_FAKE_BUSY
 NFF=$(submit "{\"name\":\"notify-fast-fail\",\"workdir\":\"$W\",\"cmd\":\"sleep 1; exit 3\",\"gpus\":4}")
-NFQ=$(submit "{\"name\":\"notify-after-fast-fail\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
+NFQ=$(submit "{\"name\":\"notify-after-fast-fail\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1,\"notify_done\":true}")
 fast_fail_sent() { [ "$(ntfy_count 'notify-fast-fail')" -ge 1 ]; }
 check "快速失败后推送队列暂停" wait_until 15 fast_fail_sent
 python3 - "$T/ntfy.jsonl" "$DANLU_HOME/danlu.db" "$NFF" <<'PY' && ok "快速失败只推一条，带上失败原因，不再进入失败批次" || bad "快速失败推送不正确"
@@ -759,6 +761,47 @@ PY
 check "快速失败后的任务保持排队" [ "$(job "$NFQ" "d['status']")" = queued ]
 api -X POST "$BASE/api/queue/resume" -d '{}' >/dev/null
 check "继续队列后排队任务完成" wait_status "$NFQ" succeeded 15
+summary_sent() { [ "$(ntfy_count '2 个任务，1 成功，1 失败')" = 1 ]; }
+check "继续后只发一条整批汇总" wait_until 10 summary_sent
+SUMMARY_URL=$(python3 -c 'import json,sys; print(next(m["headers"]["Click"] for m in map(json.loads, open(sys.argv[1])) if "2 个任务，1 成功，1 失败" in m["body"]))' "$T/ntfy.jsonl")
+check "设置页显示跑完汇总开启" [ "$(api "$BASE/api/settings" | json "d['notify']['queue_drained']")" = True ]
+
+echo "== F1 备注、资源画像、静默提醒和日志搜索 =="
+QUIET_CMD="printf 'ERROR-OVERWRITTEN\rval_acc=0.6\n'; for _ in \$(seq 1 300); do [ -e '$T/f1-output' ] && break; sleep 0.2; done; echo 恢复输出; for _ in \$(seq 1 300); do [ -e '$T/f1-finish' ] && break; sleep 0.2; done"
+F1_REQ=$(python3 -c 'import json,sys; print(json.dumps(dict(name="f1-quiet",workdir=sys.argv[1],cmd=sys.argv[2],gpus=1,memo="基线",notify_done=True)))' "$W" "$QUIET_CMD")
+F1_JOB=$(submit "$F1_REQ")
+check "新任务保存提交时的备注与结束提醒" [ "$(job "$F1_JOB" "d.get('memo') == '基线' and d.get('notify_done')")" = True ]
+check "运行中可关闭结束提醒" [ "$(api -X POST "$BASE/api/jobs/$F1_JOB/notify" -d '{"on":false}' | json "d.get('notify_done') is False")" = True ]
+check "可编辑多行中文备注" [ "$(api -X POST "$BASE/api/jobs/$F1_JOB/memo" -d '{"memo":"#实验记录\n第二行"}' | json "d.get('memo') == '#实验记录\n第二行'")" = True ]
+silent_visible() { [ "$(job "$F1_JOB" "bool(d.get('silent_since'))")" = True ]; }
+silent_sent() { [ "$(ntfy_count 'f1-quiet 已')" = 1 ]; }
+check "日志停止输出后任务显示静默" wait_until 42 silent_visible
+check "日志静默推送一次" wait_until 10 silent_sent
+F1_PID=$(job "$F1_JOB" "d['pid']")
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+start_server -u DANLU_FAKE_BUSY
+check "重启后任务仍运行且备注保留" [ "$(job "$F1_JOB" "d['pid']==$F1_PID and d['status']=='running' and '#实验记录' in d.get('memo','')")" = True ]
+check "重启后沿用已有静默告警" wait_until 12 silent_visible
+touch "$T/f1-output"
+silent_cleared() { [ "$(job "$F1_JOB" "'恢复输出' in d.get('last_line','') and not d.get('silent_since')")" = True ]; }
+check "恢复输出后清除静默标记" wait_until 20 silent_cleared
+profile_visible() { [ "$(job "$F1_JOB" "d['profile']['gpu']['samples'] > 0 and d['profile']['host']['samples'] > 0")" = True ]; }
+check "接管后能继续采集 GPU 与主机画像" wait_until 12 profile_visible
+touch "$T/f1-finish"
+check "静默任务恢复后正常完成" wait_status "$F1_JOB" succeeded 15
+check "收尾保留 GPU 与主机画像" [ "$(job "$F1_JOB" "d['profile']['gpu']['samples'] > 0 and d['profile']['host']['samples'] > 0")" = True ]
+check "结束的任务拒绝修改结束提醒" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"on":true}' "$BASE/api/jobs/$F1_JOB/notify")" = 409 ]
+check "任务列表关键词能搜到备注" [ "$(api --get --data-urlencode 'q=#实验记录' "$BASE/api/jobs" | json "[j['id'] for j in d['jobs']] == [$F1_JOB]")" = True ]
+SEARCH=$(api --get --data-urlencode 'q=VAL_ACC' "$BASE/api/jobs/$F1_JOB/log/search")
+check "日志搜索匹配最终可见行且忽略大小写" [ "$(printf '%s' "$SEARCH" | json "[m['text'] for m in d['matches']] == ['val_acc=0.6'] and not d['truncated']")" = True ]
+check "日志搜索跳过回车覆盖掉的内容" [ "$(api "$BASE/api/jobs/$F1_JOB/log/search?q=ERROR-OVERWRITTEN" | json "not d['matches']")" = True ]
+MATCH_OFFSET=$(printf '%s' "$SEARCH" | json "d['matches'][0]['offset']")
+api -N --max-time 5 "$BASE/api/jobs/$F1_JOB/log/stream?offset=$MATCH_OFFSET" >"$T/f1-sse.txt"
+check "用匹配偏移连接 SSE 能读到这一行" grep -q 'val_acc=0.6' "$T/f1-sse.txt"
+check "旧汇总链接仍只筛出原批次" [ "$(api "$BASE/api/jobs?${SUMMARY_URL#*\?}" | json "sorted(j['id'] for j in d['jobs']) == [$NFF,$NFQ]")" = True ]
+check "重启和恢复输出均不重复推送" [ "$(ntfy_count 'f1-quiet 已')" = 1 ]
+check "整批汇总替代最后一条成功提醒" [ "$(ntfy_count 'notify-after-fast-fail')" = 0 ]
+check "单任务结批后未发新的汇总" python3 -c 'import json,sys; assert sum("finished_from_event=" in m["headers"].get("Click","") for m in map(json.loads, open(sys.argv[1]))) == 1' "$T/ntfy.jsonl"
 kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
 "$BIN" notify setup --server "$NTFY_URL" --topic broken-topic --json >/dev/null
 start_server

@@ -131,6 +131,9 @@ var migrations = []string{
 	CREATE INDEX jobs_snapshot_users ON jobs(code_from)
 		WHERE code_from IS NOT NULL AND snapshot_ok=0 AND status IN ('queued','running');`,
 	`CREATE TABLE totp_used_steps (step INTEGER PRIMARY KEY);`,
+	`ALTER TABLE jobs ADD COLUMN memo TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE jobs ADD COLUMN profile_json TEXT NOT NULL DEFAULT 'null';`,
+	`ALTER TABLE jobs ADD COLUMN notify_done INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // keepBackups 是升级前备份最多保留的份数。
@@ -299,10 +302,13 @@ type Job struct {
 	FailReason      string            `json:"fail_reason"`
 	FailKind        string            `json:"fail_kind"`
 	Notes           string            `json:"notes"`
+	Memo            string            `json:"memo,omitempty"`
+	NotifyDone      bool              `json:"notify_done"`
 	ExtSeen         bool              `json:"ext_seen"`
 	OOMBase         int64             `json:"-"`
 	TracebackOffset *int64            `json:"-"`
 	Recipe          *Recipe           `json:"recipe,omitempty"`
+	Profile         *ResourceProfile  `json:"profile,omitempty"`
 	OutputDir       string            `json:"output_dir,omitempty"`
 	Starred         bool              `json:"starred"`
 	PrunedAt        *int64            `json:"pruned_at"`
@@ -349,7 +355,7 @@ func (j *Job) Finished() bool {
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
 	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
-	inherit_bashrc, boot_id, notes, fail_kind, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from`
+	inherit_bashrc, boot_id, notes, fail_kind, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, memo, profile_json, notify_done`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -361,11 +367,12 @@ func scanJob(r scanner) (*Job, error) {
 		rerun, started, ended, traceback             sql.NullInt64
 		pidStart                                     int64
 		pruned, codeFrom                             sql.NullInt64
+		profileJSON                                  string
 	)
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
 		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
-		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom)
+		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom, &j.Memo, &profileJSON, &j.NotifyDone)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -406,6 +413,10 @@ func scanJob(r scanner) (*Job, error) {
 		j.Recipe = &recipe
 	}
 	j.OutputDir = outputDir
+	var profile *ResourceProfile
+	if json.Unmarshal([]byte(profileJSON), &profile) == nil {
+		j.Profile = profile
+	}
 	if pruned.Valid {
 		j.PrunedAt = &pruned.Int64
 	}
@@ -421,13 +432,13 @@ func (s *Store) InsertJob(j *Job) error {
 	env, _ := json.Marshal(j.Env)
 	// 在同一条写语句里核对源快照和登记引用，与清理器的认领互斥。
 	res, err := s.db.Exec(`INSERT INTO jobs (name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned,
-		status, rerun_of, created_at, inherit_bashrc, code_from)
-		SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR EXISTS (
+		status, rerun_of, created_at, inherit_bashrc, code_from, memo, notify_done)
+		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR EXISTS (
 			SELECT 1 FROM jobs WHERE id=? AND snapshot_ok=1 AND pruned_at IS NULL AND pruning=0
 				AND (pid>0 OR ended_at IS NOT NULL)
 		)`,
 		j.Name, j.Workdir, j.CondaEnv, j.Cmd, string(env), j.GPUsReq, JoinInts(j.GPUsPinned),
-		j.Status, j.RerunOf, j.CreatedAt, j.InheritBashrc, j.CodeFrom, j.CodeFrom, j.CodeFrom)
+		j.Status, j.RerunOf, j.CreatedAt, j.InheritBashrc, j.CodeFrom, j.Memo, j.NotifyDone, j.CodeFrom, j.CodeFrom)
 	if err != nil {
 		return err
 	}
@@ -443,6 +454,22 @@ func (s *Store) InsertJob(j *Job) error {
 // SaveJob 写回运行期会变化的字段。
 func (s *Store) SaveJob(j *Job) error {
 	return saveJob(s.db, j)
+}
+
+// SetMemo 只写用户备注，调度器手中的旧任务记录不会覆盖它。
+func (s *Store) SetMemo(id int64, memo string) (*Job, error) {
+	if _, err := s.db.Exec("UPDATE jobs SET memo=? WHERE id=?", memo, id); err != nil {
+		return nil, err
+	}
+	return s.GetJob(id)
+}
+
+// SetNotifyDone 与收尾串行，由调度器验证任务仍在排队或运行。
+func (s *Store) SetNotifyDone(id int64, on bool) (*Job, error) {
+	if _, err := s.db.Exec("UPDATE jobs SET notify_done=? WHERE id=?", on, id); err != nil {
+		return nil, err
+	}
+	return s.GetJob(id)
 }
 
 // RenameJob 只改任务名。SaveJob 不写名字，调度器手里的旧副本落库时不会把新名字改回去。
@@ -478,14 +505,18 @@ func saveJob(w jobWriter, j *Job) error {
 		}
 		recipeJSON = string(b)
 	}
+	profileJSON, err := json.Marshal(j.Profile)
+	if err != nil {
+		return err
+	}
 	res, err := w.Exec(`UPDATE jobs SET gpus_assigned=?, status=?, master_port=?, pid=?, pid_starttime=?,
 		exit_code=?, fail_reason=?, cancel_requested=?, tracker_url=?, git_commit=?, git_branch=?, git_dirty=?,
 		snapshot_ok=?, snapshot_note=?, started_at=?, ended_at=?, boot_id=?, notes=?, fail_kind=?, ext_seen=?,
-		oom_base=?, traceback_offset=?, recipe_json=?, output_dir=? WHERE id=?`,
+		oom_base=?, traceback_offset=?, recipe_json=?, output_dir=?, profile_json=? WHERE id=?`,
 		JoinInts(j.GPUsAssigned), j.Status, j.MasterPort, j.PID, int64(j.PIDStart),
 		exit, j.FailReason, j.CancelRequested, j.TrackerURL, j.GitCommit, j.GitBranch, j.GitDirty,
 		j.SnapshotOK, j.SnapshotNote, j.StartedAt, j.EndedAt, j.BootID, j.Notes, j.FailKind, j.ExtSeen,
-		j.OOMBase, j.TracebackOffset, recipeJSON, j.OutputDir, j.ID)
+		j.OOMBase, j.TracebackOffset, recipeJSON, j.OutputDir, string(profileJSON), j.ID)
 	if err != nil {
 		return err
 	}
@@ -523,11 +554,12 @@ func (s *Store) JobsWithPendingRecipe() ([]*Job, error) {
 }
 
 type JobFilter struct {
-	Statuses   []string
-	Workdir    string
-	Query      string
-	EndedAfter int64 // 只要这个时间（unix 秒）之后结束的任务；0 表示不限
-	Starred    bool
+	Statuses                           []string
+	Workdir                            string
+	Query                              string
+	EndedAfter                         int64 // 只要这个时间（unix 秒）之后结束的任务；0 表示不限
+	FinishedFromEvent, FinishedToEvent int64 // 包含两个端点，只匹配任务结束事件
+	Starred                            bool
 	// ByEnded 为 true 时只要已结束的任务，按结束时间从新到旧排；否则按 id 从新到旧。
 	// 多台服务器的历史要按结束时间合并，所以这种排序配合 Before 游标翻页，不用页码。
 	ByEnded bool
@@ -556,13 +588,17 @@ func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
 		}
 	}
 	if f.Query != "" {
-		where = append(where, "(name LIKE ? OR cmd LIKE ? OR workdir LIKE ?)")
+		where = append(where, "(name LIKE ? OR cmd LIKE ? OR workdir LIKE ? OR memo LIKE ?)")
 		q := "%" + f.Query + "%"
-		args = append(args, q, q, q)
+		args = append(args, q, q, q, q)
 	}
 	if f.EndedAfter > 0 {
 		where = append(where, "ended_at >= ?")
 		args = append(args, f.EndedAfter)
+	}
+	if f.FinishedFromEvent > 0 {
+		where = append(where, "id IN (SELECT job_id FROM events WHERE kind=? AND id BETWEEN ? AND ?)")
+		args = append(args, EventJobFinished, f.FinishedFromEvent, f.FinishedToEvent)
 	}
 	order := " ORDER BY id DESC"
 	if f.ByEnded {

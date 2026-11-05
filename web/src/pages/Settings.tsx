@@ -18,6 +18,8 @@ const actionLabel: Record<string, string> = {
   token_create: '创建设备令牌',
   token_revoke: '吊销设备令牌',
   notify_test: '测试手机推送',
+  job_memo: '修改任务备注',
+  job_notify: '修改结束提醒',
 }
 
 type CaPlatform = 'android' | 'ios' | 'macos' | 'windows' | 'other'
@@ -279,7 +281,7 @@ function NotifySection({ status }: { status: NotifyStatus }) {
     <Section
       title="手机推送"
       desc={status.enabled
-        ? '通过 ntfy 提醒任务失败、队列暂停和资源告警。30 秒内的任务失败会合并发送。'
+        ? '通过 ntfy 发送任务失败、已勾选的结束提醒、队列暂停和资源告警。30 秒窗口内的结束提醒会合并。'
         : <>在服务器上运行 <code className="font-mono text-[12px]">danlu notify setup</code>，扫描终端中的二维码订阅，重启服务后生效。</>}
       footer={
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
@@ -294,6 +296,7 @@ function NotifySection({ status }: { status: NotifyStatus }) {
     >
       <dl className="-my-2 divide-y divide-line">
         <KV k="推送状态" v={status.enabled ? '已开启' : '未开启'} />
+        {status.queue_drained !== undefined && <KV k="跑完汇总" v={status.queue_drained ? '已开启 · 至少两个任务' : '已关闭'} />}
         <KV k="最近发送" v={status.last_sent_at ? fmtTime(status.last_sent_at) : '尚未发送'} />
         <KV k="最近错误" v={status.last_error || '无'} />
       </dl>

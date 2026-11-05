@@ -23,6 +23,16 @@ export interface RecipeGPU {
   name?: string
 }
 
+export interface ResourceProfile {
+  gpu?: {
+    avg_util: number
+    samples: number
+    covered_seconds: number
+    cards: { index: number; peak_mem_mb: number; total_mem_mb: number }[]
+  }
+  host?: { peak_rss_bytes: number; samples: number; covered_seconds: number }
+}
+
 export interface Job {
   id: number
   name: string
@@ -43,6 +53,10 @@ export interface Job {
   fail_kind?: string
   /** 运行备注（如残留进程清理）；旧版服务器没有这个字段 */
   notes?: string
+  memo?: string
+  notify_done?: boolean
+  profile?: ResourceProfile
+  silent_since?: number
   /** 任务运行期间是否观察到卡上有其他进程 */
   ext_seen?: boolean
   recipe?: Recipe
@@ -215,6 +229,7 @@ export interface TerminalSession {
 
 export interface NotifyStatus {
   enabled: boolean
+  queue_drained?: boolean
   last_sent_at: number | null
   last_error: string
 }
@@ -237,6 +252,8 @@ export interface AuditEntry {
 
 export interface SubmitReq {
   name: string
+  memo?: string
+  notify_done?: boolean
   workdir: string
   conda_env: string
   cmd: string
@@ -257,6 +274,8 @@ export interface JobsQuery {
   size?: number
   /** unix 秒，只要这之后结束的 */
   ended_after?: number
+  finished_from_event?: number
+  finished_to_event?: number
   /** 'ended'：只要已结束的，按结束时间倒序，配合 before / before_id 翻页 */
   order?: 'ended'
   /** 上一页最后一条的结束时间和 id */
@@ -269,4 +288,11 @@ export interface LogChunk {
   start: number
   next: number
   size: number
+}
+
+export interface LogSearchResult {
+  matches: { offset: number; text: string }[]
+  scanned: number
+  size: number
+  truncated: boolean
 }

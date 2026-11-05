@@ -39,6 +39,14 @@ type Spec struct {
 // JobMarker 是任务进程的身份标记，值是 RunDir(id)，见 procfs.JobMarker。
 const JobMarker = procfs.JobMarker
 
+// ProcessStats 汇总同一运行目录下的进程。读不到 RSS 时仍可报告进程状态。
+type ProcessStats struct {
+	RSSBytes int64
+	RSSKnown bool
+	Count    int
+	DState   int
+}
+
 func (r *Runner) RunDir(id int64) string  { return filepath.Join(r.RunRoot, strconv.FormatInt(id, 10)) }
 func (r *Runner) LogPath(id int64) string { return filepath.Join(r.LogRoot, fmt.Sprintf("%d.log", id)) }
 

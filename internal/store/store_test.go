@@ -200,7 +200,11 @@ func TestBackupBeforeUpgrade(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "t.db")
 	full := migrations
-	withMigrations(t, full[:len(full)-1])
+	base := slices.IndexFunc(full, func(m string) bool { return strings.Contains(m, "ADD COLUMN memo ") })
+	if base < 1 {
+		t.Fatal("缺少 F1 之前的迁移基线")
+	}
+	withMigrations(t, full[:base])
 	s := openAt(t, path)
 	if _, err := s.db.Exec("INSERT INTO jobs(id,name,workdir,cmd,status,created_at) VALUES (1,'old','/w','x','queued',0)"); err != nil {
 		t.Fatal(err)
@@ -217,11 +221,11 @@ func TestBackupBeforeUpgrade(t *testing.T) {
 		t.Fatalf("升级后 user_version = %d", v)
 	}
 	backups, _ = filepath.Glob(filepath.Join(dir, "backup", "*.db"))
-	if len(backups) != 1 || !strings.HasSuffix(backups[0], fmt.Sprintf("-v%d.db", len(full)-1)) {
+	if len(backups) != 1 || !strings.HasSuffix(backups[0], fmt.Sprintf("-v%d.db", base)) {
 		t.Fatalf("升级前应该备份一份旧版本的库: %v", backups)
 	}
 	old := openAt(t, backups[0])
-	if got, err := old.GetJob(1); err != nil || got.Name != "old" || got.CodeFrom != nil {
+	if got, err := old.GetJob(1); err != nil || got.Name != "old" || got.CodeFrom != nil || got.Memo != "" || got.NotifyDone || got.Profile != nil {
 		t.Fatalf("备份里读不到旧数据: %v %v", got, err)
 	}
 

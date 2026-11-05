@@ -187,6 +187,8 @@ func (f *fakeExec) LogPath(id int64) string {
 }
 func (f *fakeExec) BootID() string { return f.boot }
 
+func (f *fakeExec) ProcStats(int64) runner.ProcessStats { return runner.ProcessStats{} }
+
 // finish 模拟任务进程以 code 退出
 func (f *fakeExec) finish(id int64, code int) {
 	f.mu.Lock()

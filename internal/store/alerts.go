@@ -7,4 +7,8 @@ type AlertData struct {
 	PID            int    `json:"pid,omitempty"`
 	AvailableBytes uint64 `json:"available_bytes,omitempty"`
 	DataDisk       bool   `json:"data_disk,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Since          int64  `json:"since,omitempty"`
+	Util           *int   `json:"util,omitempty"`
+	DState         *int   `json:"d_state,omitempty"`
 }

@@ -70,6 +70,9 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 		b, _ := json.Marshal(data)
 		desired[key] = &store.Event{Key: key, JobID: jobID, Data: b}
 	}
+	if m.opt.SilenceAlert > 0 {
+		m.silentAlerts(now, running, gpus, gpuErr == nil && !gpuAt.IsZero(), desired)
+	}
 	if gpuErr != nil {
 		if m.gpuErrorSince.IsZero() {
 			m.gpuErrorSince = now
