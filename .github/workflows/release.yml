@@ -1,0 +1,86 @@
+# 发布：推送 v* tag 时构建 Linux 二进制并创建 GitHub Release。
+# 也可以在 Actions 页面手动指定一个已有 tag 重新发布。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（必须已经存在于仓库）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: 检查、构建并发布
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: 安装 Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Go 单元测试
+        run: go test ./cmd/... ./internal/...
+
+      - name: go vet
+        run: go vet ./cmd/... ./internal/...
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          cache: true
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 前端检查
+        run: |
+          pnpm -C packages/core typecheck
+          pnpm -C packages/core test
+          pnpm -C web typecheck
+          pnpm -C desktop typecheck
+
+      - name: 构建 amd64
+        run: VERSION="$TAG" bash scripts/build.sh amd64
+
+      - name: 构建 arm64
+        run: VERSION="$TAG" bash scripts/build.sh arm64
+
+      - name: 端到端测试
+        run: bash scripts/e2e.sh dist/danlu-linux-amd64
+
+      - name: 生成校验和
+        run: cd dist && sha256sum danlu-linux-amd64 danlu-linux-arm64 > SHA256SUMS
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/danlu-linux-amd64 dist/danlu-linux-arm64 dist/SHA256SUMS --clobber
+          else
+            args=(--title "Danlu $TAG" --generate-notes --verify-tag)
+            case "$TAG" in *-rc.*) args+=(--prerelease);; esac
+            gh release create "$TAG" dist/danlu-linux-amd64 dist/danlu-linux-arm64 dist/SHA256SUMS "${args[@]}"
+          fi
