@@ -222,7 +222,7 @@ function FileView({ jobId, path }: { jobId: number; path: string }) {
         {q.isLoading ? (
           <Spinner />
         ) : q.error ? (
-          <ErrorBox error={q.error} />
+          <ErrorBox error={q.error} term />
         ) : q.data?.binary ? (
           <span className="text-[#8f8f8f]">二进制文件，不显示内容（{bytes(q.data.size)}）</span>
         ) : (
@@ -244,7 +244,7 @@ function DiffView({ jobId }: { jobId: number }) {
   const html = useMemo(() => (q.data ? highlight(q.data.diff, 'diff') : ''), [q.data])
   return (
     <div className="term max-h-[70vh] overflow-auto rounded-lg border border-line p-3">
-      {q.isLoading ? <Spinner /> : q.error ? <ErrorBox error={q.error} /> : <pre><code className="hljs" dangerouslySetInnerHTML={{ __html: html }} /></pre>}
+      {q.isLoading ? <Spinner /> : q.error ? <ErrorBox error={q.error} term /> : <pre><code className="hljs" dangerouslySetInnerHTML={{ __html: html }} /></pre>}
     </div>
   )
 }

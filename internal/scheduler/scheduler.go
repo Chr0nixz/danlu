@@ -665,6 +665,10 @@ func (m *Manager) schedule() {
 	var all []int
 	for _, g := range gpus {
 		all = append(all, g.Index)
+		if g.UnknownMemMB > 0 {
+			// 可见进程无法解释的显存占用也算忙碌，避免容器或 PID namespace 隔离导致误分卡。
+			busy[g.Index] = true
+		}
 		for _, p := range g.Procs {
 			// 外部进程、已结束任务的残留进程、跑错卡的任务进程，都让这张卡不可分配
 			if own, ok := assigned[p.JobID]; !ok || p.JobID == 0 || !slices.Contains(own, g.Index) {

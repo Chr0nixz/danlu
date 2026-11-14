@@ -18,11 +18,13 @@ const variants: Record<Variant, string> = {
   danger: 'border border-line-strong bg-surface text-fail hover:border-fail/40 hover:bg-fail/8 active:bg-fail/12',
 }
 
+// 手机（<640px）上按钮一律 44px 高、图标按钮 44px 见方，拇指点得准；只改高度，内边距和字号不动。
+// 放在不能撑高的地方（分组标题、提示框）时，调用方用负的上下外边距把多出来的高度收回去
 const sizes: Record<Size, string> = {
-  sm: 'h-8 gap-1.5 px-2.5 text-ui',
-  md: 'h-9 gap-1.5 px-3.5 text-sm',
-  icon: 'size-9',
-  'icon-sm': 'size-8',
+  sm: 'h-8 gap-1.5 px-2.5 text-ui max-sm:h-11',
+  md: 'h-9 gap-1.5 px-3.5 text-sm max-sm:h-11',
+  icon: 'size-9 max-sm:size-11',
+  'icon-sm': 'size-8 max-sm:size-11',
 }
 
 export const buttonClass = (variant: Variant = 'secondary', size: Size = 'md') =>
@@ -52,11 +54,12 @@ export function Card({ className, children }: { className?: string; children: Re
   return <div className={cx('rounded-lg border border-line bg-surface', className)}>{children}</div>
 }
 
+// 边线用 field-line（和背景 3:1 以上）；悬停和聚焦都再深一级，聚焦另有运行蓝光晕
 const field =
-  'w-full min-w-0 rounded-md border border-line-strong bg-surface px-3 text-sm text-fg outline-none transition-[border-color,box-shadow] duration-150 hover:border-fg-4 focus:border-fg-3 focus:ring-3 focus:ring-run/15 focus-visible:outline-none disabled:opacity-50 aria-invalid:border-fail/60 aria-invalid:focus:ring-fail/15'
+  'w-full min-w-0 rounded-md border border-field-line bg-surface px-3 text-sm text-fg outline-none transition-[border-color,box-shadow] duration-150 hover:border-fg-3 focus:border-fg-3 focus:ring-3 focus:ring-run/15 focus-visible:outline-none disabled:opacity-50 aria-invalid:border-fail/60 aria-invalid:focus:ring-fail/15'
 
 export function Input({ className, ...rest }: ComponentProps<'input'>) {
-  return <input className={cx(field, 'h-9', className)} {...rest} />
+  return <input className={cx(field, 'h-9 max-sm:h-11', className)} {...rest} />
 }
 
 export function Textarea({ className, ...rest }: ComponentProps<'textarea'>) {
@@ -65,7 +68,7 @@ export function Textarea({ className, ...rest }: ComponentProps<'textarea'>) {
 
 export function Select({ className, children, ...rest }: ComponentProps<'select'>) {
   return (
-    <select className={cx(field, 'h-9 pr-8', className)} {...rest}>
+    <select className={cx(field, 'h-9 pr-8 max-sm:h-11', className)} {...rest}>
       {children}
     </select>
   )
@@ -248,6 +251,8 @@ const alertStyle = {
   fail: { box: 'border-fail/30 bg-fail/6 text-fail', icon: CircleAlert },
   warn: { box: 'border-warn/30 bg-warn/6 text-warn', icon: TriangleAlert },
   info: { box: 'border-line bg-subtle text-fg-2', icon: Info },
+  // 日志和代码面板里：两种主题下都是深色终端底，浅色主题的失败红在上面只有 3.6:1，改用终端的亮红（ANSI red，约 7:1）
+  term: { box: 'border-[#ff7b72]/30 bg-[#ff7b72]/8 text-[#ff7b72]', icon: CircleAlert },
 }
 
 export function Alert({ tone = 'info', role, children, className }: { tone?: keyof typeof alertStyle; role?: AriaRole; children: ReactNode; className?: string }) {
@@ -260,12 +265,12 @@ export function Alert({ tone = 'info', role, children, className }: { tone?: key
   )
 }
 
-/** 操作或加载出错时的提示；role=alert，出现时读屏会立刻读出来 */
-export function ErrorBox({ error, className }: { error: unknown; className?: string }) {
+/** 操作或加载出错时的提示；role=alert，出现时读屏会立刻读出来。放在日志、代码这类深色终端面板里时传 term */
+export function ErrorBox({ error, className, term = false }: { error: unknown; className?: string; term?: boolean }) {
   if (!error) return null
   const msg = error instanceof Error ? error.message : String(error)
   return (
-    <Alert tone="fail" role="alert" className={className}>
+    <Alert tone={term ? 'term' : 'fail'} role="alert" className={className}>
       {msg}
     </Alert>
   )
@@ -445,7 +450,7 @@ export function Segmented<T extends string>({
       role="radiogroup"
       aria-label={label}
       onKeyDown={(e) => arrowSelect(e, options.map((o) => o.value), value, onChange)}
-      className={cx('inline-flex h-8 gap-0.5 rounded-md border border-line bg-subtle p-0.5', className)}
+      className={cx('inline-flex h-8 gap-0.5 rounded-md border border-line bg-subtle p-0.5 max-sm:h-11', className)}
     >
       {options.map((o) => (
         <button
@@ -457,7 +462,8 @@ export function Segmented<T extends string>({
           key={o.value}
           onClick={() => onChange(o.value)}
           className={cx(
-            'flex flex-1 items-center justify-center gap-1.5 rounded-[4px] px-2.5 text-ui font-medium whitespace-nowrap transition-colors duration-150 [&_svg]:size-3.5',
+            // 手机上轨道 44px 高，每一格的点击区上下撑满轨道
+            'relative flex flex-1 items-center justify-center gap-1.5 rounded-[4px] px-2.5 text-ui font-medium whitespace-nowrap transition-colors duration-150 max-sm:before:absolute max-sm:before:inset-x-0 max-sm:before:-inset-y-[3px] [&_svg]:size-3.5',
             value === o.value ? 'bg-raised text-fg shadow-[0_1px_2px_rgb(0_0_0/0.08)] ring-1 ring-line' : 'text-fg-3 hover:text-fg',
           )}
         >
@@ -503,7 +509,8 @@ export function Tabs<T extends string>({
           key={t.value}
           onClick={() => onChange(t.value)}
           className={cx(
-            'flex h-10 shrink-0 items-center gap-1.5 border-b-2 px-2.5 text-sm whitespace-nowrap transition-colors duration-150 [&_svg]:size-4',
+            // 轨道可以横向滚动，会把外扩的焦点环上下裁掉，所以焦点环画在标签里面
+            'flex h-10 shrink-0 items-center gap-1.5 border-b-2 px-2.5 text-sm whitespace-nowrap transition-colors duration-150 focus-visible:-outline-offset-2 max-sm:h-11 [&_svg]:size-4',
             value === t.value ? 'border-fg font-medium text-fg' : 'border-transparent text-fg-3 hover:text-fg',
           )}
         >
@@ -526,6 +533,14 @@ export function Meter({ value, className }: { value: number; className?: string 
   )
 }
 
-export function Kbd({ children }: { children: ReactNode }) {
-  return <kbd className="hidden h-5 min-w-5 items-center justify-center rounded border border-current/25 px-1 font-sans text-[11px] leading-none opacity-70 lg:inline-flex">{children}</kbd>
+/**
+ * 快捷键提示。有鼠标或触控板的设备才显示（多半也有键盘），和窗口宽度无关：和 IDE 并排开着时窗口很窄。
+ * 快捷键一览里传 always，一直显示。
+ */
+export function Kbd({ children, always = false }: { children: ReactNode; always?: boolean }) {
+  return (
+    <kbd className={cx('h-5 min-w-5 items-center justify-center rounded border border-current/25 px-1 font-sans text-[11px] leading-none', always ? 'inline-flex' : 'hidden pointer-fine:inline-flex')}>
+      {children}
+    </kbd>
+  )
 }

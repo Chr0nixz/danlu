@@ -6,7 +6,7 @@ import { Minus, Plus, Send, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Navigate, useSearchParams } from 'react-router'
 import { type TerminalSession } from '@danlu/core'
-import { Button, Card, cx, ErrorBox, Spinner, Textarea } from '../components/ui'
+import { Button, Card, cx, Dialog, ErrorBox, Spinner, Textarea } from '../components/ui'
 import { api } from '../lib/api'
 import { connectTerminal, TERMINAL_REPLACED, TERMINAL_UNAUTHORIZED, type TerminalSocket } from '../lib/terminal'
 
@@ -14,9 +14,15 @@ const fontSizeKey = 'danlu.terminal.fontSize'
 const encoder = new TextEncoder()
 const emptySessions: TerminalSession[] = []
 
+/** 字号只是偏好：浏览器禁用了站点存储（隐私模式、屏蔽 Cookie）时读写会抛错，用默认值，不能让终端页打不开 */
 function storedFontSize() {
-  const value = Number(localStorage.getItem(fontSizeKey))
-  return Number.isInteger(value) && value >= 11 && value <= 20 ? value : 13
+  try {
+    const value = Number(localStorage.getItem(fontSizeKey))
+    if (Number.isInteger(value) && value >= 11 && value <= 20) return value
+  } catch {
+    // 用默认字号
+  }
+  return 13
 }
 
 export function Terminal() {
@@ -32,6 +38,8 @@ export function Terminal() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [fontSize, setFontSize] = useState(storedFontSize)
   const [openError, setOpenError] = useState<unknown>(null)
+  // 关闭终端会结束里面的进程，先确认
+  const [closing, setClosing] = useState<TerminalSession | null>(null)
   const open = useMutation({
     mutationFn: (jobId?: number) => api.openTerminal(jobId),
     onSuccess: (session) => {
@@ -50,6 +58,7 @@ export function Terminal() {
         sessions: (old?.sessions ?? []).filter((s) => s.id !== id),
       }))
       setSelectedId((current) => current === id ? null : current)
+      setClosing(null)
     },
   })
   const jobParam = params.get('job_id')
@@ -72,7 +81,11 @@ export function Terminal() {
     else if (selectedId && !items.some((s) => s.id === selectedId)) setSelectedId(items[0]?.id ?? null)
   }, [items, selectedId])
   useEffect(() => {
-    localStorage.setItem(fontSizeKey, String(fontSize))
+    try {
+      localStorage.setItem(fontSizeKey, String(fontSize))
+    } catch {
+      // 存不下时只是下次打开回到默认字号
+    }
   }, [fontSize])
 
   const maxed = items.length >= 3
@@ -96,11 +109,24 @@ export function Terminal() {
       </div>
 
       {openError !== null && <ErrorBox error={openError} />}
-      {close.error && <ErrorBox error={close.error} />}
       {sessions.error && <ErrorBox error={sessions.error} />}
 
       {items.length > 0 && (
-        <div className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-line" role="tablist" aria-label="终端会话">
+        // 和页内标签页同一套键盘约定：只有选中的会话能 Tab 到，左右方向键和 Home / End 切换
+        <div
+          className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-line"
+          role="tablist"
+          aria-label="终端会话"
+          onKeyDown={(e) => {
+            const i = items.findIndex((s) => s.id === selectedId)
+            const to = ({ ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: items.length - 1 } as Record<string, number>)[e.key]
+            if (to === undefined) return
+            e.preventDefault()
+            const next = items[(to + items.length) % items.length]
+            setSelectedId(next.id)
+            document.getElementById(`terminal-tab-${next.id}`)?.focus()
+          }}
+        >
           {items.map((session) => {
             const active = selectedId === session.id
             const label = session.workdir.split('/').filter(Boolean).at(-1) || '/'
@@ -109,10 +135,13 @@ export function Terminal() {
                 key={session.id}
                 type="button"
                 role="tab"
+                id={`terminal-tab-${session.id}`}
                 aria-selected={active}
+                aria-controls={active ? 'terminal-panel' : undefined}
+                tabIndex={active ? 0 : -1}
                 title={session.workdir}
                 onClick={() => setSelectedId(session.id)}
-                className={cx('flex h-10 max-w-56 shrink-0 items-center gap-2 border-b-2 px-3 text-ui', active ? 'border-fg text-fg' : 'border-transparent text-fg-3 hover:text-fg')}
+                className={cx('flex h-10 max-w-56 shrink-0 items-center gap-2 border-b-2 px-3 text-ui focus-visible:-outline-offset-2 max-sm:h-11', active ? 'border-fg text-fg' : 'border-transparent text-fg-3 hover:text-fg')}
               >
                 <TerminalIcon className="size-4 shrink-0" aria-hidden />
                 <span className="truncate">{label}</span>
@@ -126,14 +155,19 @@ export function Terminal() {
       {sessions.isLoading || settings.isLoading ? (
         <div className="grid min-h-64 place-items-center"><Spinner /></div>
       ) : selected ? (
-        <TerminalSessionPanel
-          key={selected.id}
-          session={selected}
-          fontSize={fontSize}
-          onFontSize={setFontSize}
-          onClose={() => close.mutate(selected.id)}
-          closing={close.isPending}
-        />
+        <div role="tabpanel" id="terminal-panel" aria-labelledby={`terminal-tab-${selected.id}`}>
+          <TerminalSessionPanel
+            key={selected.id}
+            session={selected}
+            fontSize={fontSize}
+            onFontSize={setFontSize}
+            onClose={() => {
+              close.reset()
+              setClosing(selected)
+            }}
+            closing={close.isPending}
+          />
+        </div>
       ) : (
         <Card className="flex min-h-64 flex-col items-center justify-center gap-3 border-dashed px-5 py-10 text-center">
           <TerminalIcon className="size-5 text-fg-3" aria-hidden />
@@ -143,6 +177,24 @@ export function Terminal() {
             打开终端
           </Button>
         </Card>
+      )}
+      {closing && (
+        <Dialog
+          title="关闭这个终端？"
+          onClose={() => setClosing(null)}
+          footer={
+            <>
+              <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>保留终端</Button>
+              <Button variant="danger" loading={close.isPending} onClick={() => close.mutate(closing.id)}>
+                关闭终端
+              </Button>
+            </>
+          }
+        >
+          <p className="break-all font-mono text-[12.5px] text-fg">{closing.workdir}</p>
+          <p>终端里正在运行的进程会被结束，不能恢复。丹炉启动的训练任务不受影响。</p>
+          <ErrorBox error={close.error} />
+        </Dialog>
       )}
     </div>
   )
@@ -375,10 +427,12 @@ function TerminalSessionPanel({
         )}
         <span className="min-w-0 truncate font-mono" title={session.workdir}>{session.workdir}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
-          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40" title="缩小字号" aria-label="缩小字号" disabled={fontSize <= 11} onClick={() => onFontSize(Math.max(11, fontSize - 1))}><Minus className="size-4" /></button>
-          <span className="w-8 text-center font-mono text-[11px]">{fontSize}</span>
-          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40" title="放大字号" aria-label="放大字号" disabled={fontSize >= 20} onClick={() => onFontSize(Math.min(20, fontSize + 1))}><Plus className="size-4" /></button>
-          <Button size="icon-sm" variant="ghost" title="关闭终端并结束其中的进程" aria-label="关闭终端" disabled={closing} loading={closing} onClick={onClose}><X /></Button>
+          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40 max-sm:size-11" title="缩小字号" aria-label="缩小字号" disabled={fontSize <= 11} onClick={() => onFontSize(Math.max(11, fontSize - 1))}><Minus className="size-4" /></button>
+          <span className="w-6 text-center font-mono text-[11px] sm:w-8" title="终端字号">{fontSize}</span>
+          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40 max-sm:size-11" title="放大字号" aria-label="放大字号" disabled={fontSize >= 20} onClick={() => onFontSize(Math.min(20, fontSize + 1))}><Plus className="size-4" /></button>
+          {/* 关闭和调字号是两类操作，用分隔线隔开，免得想放大字号时点到关闭 */}
+          <span className="mx-1 h-4 w-px shrink-0 bg-line-strong" aria-hidden />
+          <Button size="icon-sm" variant="ghost" title="关闭终端（会先确认）" aria-label="关闭终端" disabled={closing} loading={closing} onClick={onClose}><X /></Button>
         </span>
       </div>
 
@@ -405,7 +459,7 @@ function TerminalSessionPanel({
             rows={1}
             aria-label="输入终端命令"
             placeholder="输入命令，回车发送"
-            className="max-h-28 min-h-10 flex-1 resize-y py-2 font-mono text-[13px]"
+            className="max-h-28 min-h-11 flex-1 resize-y py-2.5 font-mono text-[13px]"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onDraftKey}
           />
@@ -425,7 +479,8 @@ function KeyButton({ label, title, pressed, onClick }: { label: string; title: s
       aria-label={title}
       aria-pressed={pressed}
       onClick={onClick}
-      className={cx('h-8 min-w-9 shrink-0 rounded border px-2 font-mono text-xs transition-colors', pressed ? 'border-line-strong bg-inv text-inv-fg' : 'border-line bg-surface text-fg-2 hover:bg-hover')}
+      // 这一条只在手机上显示，每个键 44px
+      className={cx('h-11 min-w-11 shrink-0 rounded border px-2 font-mono text-ui transition-colors', pressed ? 'border-line-strong bg-inv text-inv-fg' : 'border-line bg-surface text-fg-2 hover:bg-hover')}
     >
       {label}
     </button>

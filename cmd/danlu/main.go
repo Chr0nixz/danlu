@@ -315,7 +315,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	mon := gpu.NewMonitor(gpu.NewSource(p.Run))
+	mon := gpu.NewMonitor(gpu.NewSource(p.Run, c.Runtime.UnknownGPUMemoryMB))
 	go mon.Run(ctx)
 	host := system.NewMonitor(system.NewSource())
 	go host.Run(ctx)
@@ -940,6 +940,8 @@ Environment=%s
 Environment=%s
 Restart=on-failure
 RestartSec=3
+# 训练任务和 danlu 共用 cgroup；任务被内核 OOM kill 时不要停止服务本身
+OOMPolicy=continue
 # 关键：停止或重启 danlu 时只结束 danlu 自己，不要连带杀掉正在跑的训练进程
 KillMode=process
 

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Bell, BellOff, Check, ChevronLeft, Copy, GitCompareArrows, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Bell, BellOff, Check, ChevronLeft, Copy, GitCompareArrows, NotebookPen, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { CancelDialog } from '../components/JobRow'
@@ -7,8 +7,8 @@ import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
 import { ProfileSummary } from '../components/ResourceProfile'
 import { StarButton, StarError, StarMenuItem } from '../components/StarButton'
-import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, hitArea, Input, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
-import { ApiError, compactProgress, duration, fmtTime, isActive, jobDuration, now, type Job } from '@danlu/core'
+import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, Input, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
+import { ApiError, compactProgress, duration, fmtTime, isActive, jobDuration, now, sameCodeFailKinds, stripProgressTiming, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 
 type Tab = 'log' | 'info' | 'code'
@@ -55,6 +55,7 @@ export function JobDetail() {
     )
   const [confirming, setConfirming] = useState(false)
   const [renaming, setRenaming] = useState(false)
+  const [memoEditing, setMemoEditing] = useState(false)
   const renameButton = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
 
@@ -106,8 +107,12 @@ export function JobDetail() {
   const notifyLabel = j.notify_done ? '关闭结束时推送' : '开启结束时推送'
   const NotifyIcon = j.notify_done ? Bell : BellOff
   const toggleNotify = () => notifyToggle.mutate({ id: j.id, on: !j.notify_done })
-  const rerunLabel = j.status === 'failed' ? '改参数重跑' : '重跑'
-  const rerunTitle = '用同样的设置再跑一次，可以先改参数'
+  // 和代码无关的失败（服务器重启、被外部终止等）重跑页默认用原任务的快照，按钮和失败说明里的建议说同一件事
+  const sameCode = j.status === 'failed' && sameCodeFailKinds.includes(j.fail_kind ?? '')
+  const rerunLabel = sameCode ? '原样重跑' : j.status === 'failed' ? '改参数重跑' : '重跑'
+  const rerunTitle = sameCode ? '默认用原任务的代码快照再跑一次，提交前可以改参数' : '用同样的设置再跑一次，可以先改参数'
+  // 次要操作用幽灵按钮：一排里只有实验记录链接和主操作带边框，一眼分得出主次
+  const minor = buttonClass('ghost', 'sm')
   const tracker = (cls: string) =>
     j.tracker_url && (
       <a href={j.tracker_url} target="_blank" rel="noreferrer" className={cls}>
@@ -129,7 +134,8 @@ export function JobDetail() {
     )
 
   return (
-    <div className="space-y-4">
+    // 手机上区块间距收到 12px，把高度让给日志
+    <div className="space-y-3 sm:space-y-4">
       <div className="space-y-2">
         <BackLink />
         {renaming ? (
@@ -147,7 +153,7 @@ export function JobDetail() {
                 <StatusIcon status={j.status} cancelling={j.cancel_requested} className="mt-1.5 size-5" />
                 <span className="min-w-0 break-all">
                   {j.name}
-                  <span className="ml-2 font-normal text-fg-3">#{j.id}</span>
+                  <span className="ml-2 font-normal whitespace-nowrap text-fg-3">#{j.id}</span>
                   {j.starred && <Star role="img" aria-label="已标星" className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
                 </span>
               </h1>
@@ -163,41 +169,48 @@ export function JobDetail() {
               </button>
             </div>
 
-            {/* 电脑：操作都露在外面，主操作放最右 */}
-            <div className="hidden flex-wrap justify-end gap-2 sm:flex">
+            {/* 电脑：操作都露在外面，次要的是幽灵按钮，实验记录和主操作带边框，主操作放最右 */}
+            <div className="hidden flex-wrap justify-end gap-1 sm:flex">
               <StarButton job={j} label />
               {isActive(j) && (
-                <Button size="icon-sm" loading={notifyToggle.isPending} aria-label="结束时推送" aria-pressed={!!j.notify_done}
+                <Button size="icon-sm" variant="ghost" loading={notifyToggle.isPending} aria-label="结束时推送" aria-pressed={!!j.notify_done}
                   title={notifyLabel} onClick={toggleNotify}>
                   <NotifyIcon aria-hidden />
                 </Button>
               )}
               {terminal && (
-                <Link to={`/terminal?job_id=${j.id}`} className={buttonClass('secondary', 'sm')} title="在这个任务的目录和 conda 环境中打开终端">
+                <Link to={`/terminal?job_id=${j.id}`} className={minor} title="在这个任务的目录和 conda 环境中打开终端">
                   <TerminalIcon aria-hidden />
                   终端
                 </Link>
               )}
-              {tracker(buttonClass('secondary', 'sm'))}
-              <Link to={`/compare?a=${j.id}`} className={buttonClass('secondary', 'sm')}>
+              <Link to={`/compare?a=${j.id}`} className={minor}>
                 <GitCompareArrows aria-hidden />
                 和…对比
               </Link>
               {canCancel && (
-                <Link to={`/new?from=${j.id}`} className={buttonClass('secondary', 'sm')} title={rerunTitle}>
+                <Link to={`/new?from=${j.id}`} className={minor} title={rerunTitle}>
                   <RotateCw aria-hidden />
                   {rerunLabel}
                 </Link>
               )}
-              {primary('')}
+              {tracker(cx(buttonClass('secondary', 'sm'), 'ml-1'))}
+              {primary('ml-1')}
             </div>
 
             {/* 手机：一行放主操作和实验记录，其余收进"更多"，把首屏留给日志 */}
             <div className="flex items-center gap-2 sm:hidden">
-              {primary('h-11 px-3.5 text-sm')}
-              {tracker(cx(buttonClass('secondary', 'sm'), 'h-11 px-3.5 text-sm'))}
-              <Menu label="更多操作" className="ml-auto" buttonClassName="size-11">
+              {primary('px-3.5 text-sm')}
+              {tracker(cx(buttonClass('secondary', 'sm'), 'px-3.5 text-sm'))}
+              <Menu label="更多操作" className="ml-auto">
                 <StarMenuItem job={j} />
+                {/* 没写过备注时，手机上"写备注"收在这里，不占日志上方的一行 */}
+                {!j.memo && (
+                  <button type="button" role="menuitem" className={menuItemClass} onClick={() => setMemoEditing(true)}>
+                    <NotebookPen aria-hidden />
+                    写备注
+                  </button>
+                )}
                 {isActive(j) && (
                   <button type="button" role="menuitem" className={menuItemClass} disabled={notifyToggle.isPending} onClick={toggleNotify}>
                     <NotifyIcon aria-hidden />
@@ -230,7 +243,7 @@ export function JobDetail() {
         )}
       </div>
 
-      <JobMemo key={j.id} job={j} />
+      <JobMemo key={j.id} job={j} editing={memoEditing} onEditing={setMemoEditing} />
       <MetaStrip j={j} />
       <StarError />
       {notifyToggle.variables?.id === j.id && <ErrorBox error={notifyToggle.error} />}
@@ -239,14 +252,18 @@ export function JobDetail() {
       {j.status !== 'failed' && j.fail_reason && <Alert>{j.fail_reason}</Alert>}
       {j.notes && <Alert>运行说明：{j.notes}</Alert>}
       {j.status === 'running' && j.silent_since && (
+        // 操作写成一行文字链接：不撑高提示框（日志要留在首屏），点击区各自向上下撑到 44px。
+        // 取消任务用失败红并单独靠右，和两个只是去看一眼的操作分开，这时候最容易手抖
         <Alert tone="warn">
-          <div className="flex flex-wrap items-center gap-x-4">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
             <span className="max-sm:basis-full">已 {duration(now() - j.silent_since)}没有新输出</span>
-            <Button variant="ghost" size="sm" className="px-1 max-sm:h-11" onClick={() => showLog()}>看日志末尾</Button>
-            {terminal && (
-              <Link to={`/terminal?job_id=${j.id}`} className={cx(buttonClass('ghost', 'sm'), 'px-1 max-sm:h-11')}>打开终端</Link>
+            <button type="button" className={cx(alertAction, alertActionTone)} onClick={() => showLog()}>看日志末尾</button>
+            {terminal && <Link to={`/terminal?job_id=${j.id}`} className={cx(alertAction, alertActionTone)}>打开终端</Link>}
+            {canCancel && (
+              <button type="button" className={cx(alertAction, 'ml-auto text-fail decoration-fail/40 hover:decoration-fail')} onClick={() => setConfirming(true)}>
+                取消任务
+              </button>
             )}
-            {canCancel && <Button variant="ghost" size="sm" className="px-1 max-sm:h-11" onClick={() => setConfirming(true)}>取消任务</Button>}
           </div>
         </Alert>
       )}
@@ -263,7 +280,7 @@ export function JobDetail() {
             { value: 'code', label: '代码' },
           ]}
         />
-        <div className="pt-4" {...tabPanelProps('job', tab)}>
+        <div className="pt-3 sm:pt-4" {...tabPanelProps('job', tab)}>
           {tab === 'log' &&
             (j.pruned_at ? <PrunedFiles job={j} /> : j.status === 'queued' ? (
               <Card className="px-4 py-12 text-center text-ui text-fg-3">
@@ -282,6 +299,10 @@ export function JobDetail() {
   )
 }
 
+/** 提示框里的文字操作：一行字那么高，点击区向四周撑出去（上下各 12px，共 44px），不改变排版 */
+const alertAction = 'relative shrink-0 font-medium underline underline-offset-2 before:absolute before:-inset-x-2 before:-inset-y-3'
+const alertActionTone = 'text-fg decoration-fg/30 hover:decoration-fg'
+
 function PrunedFiles({ job }: { job: Job }) {
   return (
     <Card className="space-y-2 px-4 py-8 text-center text-ui">
@@ -291,14 +312,17 @@ function PrunedFiles({ job }: { job: Job }) {
   )
 }
 
-function JobMemo({ job }: { job: Job }) {
+/**
+ * 任务备注，就地编辑。编辑状态由详情页持有：手机上没写过备注时，这里不占一行，入口在更多操作里。
+ */
+function JobMemo({ job, editing, onEditing }: { job: Job; editing: boolean; onEditing(editing: boolean): void }) {
   const qc = useQueryClient()
   const button = useRef<HTMLButtonElement>(null)
   const errorId = useId()
-  const [draft, setDraft] = useState<string | null>(null)
-  const tooLong = draft !== null && Array.from(draft).length > 500
+  const [draft, setDraft] = useState(job.memo ?? '')
+  const tooLong = Array.from(draft).length > 500
   const close = () => {
-    setDraft(null)
+    onEditing(false)
     requestAnimationFrame(() => button.current?.focus())
   }
   const save = useMutation({
@@ -312,11 +336,20 @@ function JobMemo({ job }: { job: Job }) {
       close()
     },
   })
-  if (draft === null) {
+  // 每次进入编辑都从已保存的备注开始，上一次的报错不带过来
+  const [wasEditing, setWasEditing] = useState(editing)
+  if (editing !== wasEditing) {
+    setWasEditing(editing)
+    if (editing) {
+      setDraft(job.memo ?? '')
+      save.reset()
+    }
+  }
+  if (!editing) {
     return (
       <button ref={button} type="button" aria-label={job.memo ? '编辑备注' : '写备注'} title={job.memo || undefined}
-        className="inline-flex max-w-full items-center gap-2 rounded px-1 text-left text-ui text-fg-3 hover:bg-hover hover:text-fg max-sm:min-h-11"
-        onClick={() => { save.reset(); setDraft(job.memo ?? '') }}>
+        className={cx('inline-flex max-w-full items-center gap-2 rounded px-1 text-left text-ui text-fg-3 hover:bg-hover hover:text-fg max-sm:min-h-11', !job.memo && 'max-sm:hidden')}
+        onClick={() => onEditing(true)}>
         <Pencil className="size-3.5 shrink-0" aria-hidden />
         <span className="line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{job.memo || '写备注…'}</span>
       </button>
@@ -344,8 +377,8 @@ function JobMemo({ job }: { job: Job }) {
               e.currentTarget.form?.requestSubmit()
             }
           }} />
-        <Button type="submit" variant="primary" size="sm" loading={save.isPending} disabled={tooLong} className="max-sm:h-11">保存</Button>
-        <Button size="sm" disabled={save.isPending} onClick={close} className="max-sm:h-11">取消</Button>
+        <Button type="submit" variant="primary" size="sm" loading={save.isPending} disabled={tooLong}>保存</Button>
+        <Button size="sm" disabled={save.isPending} onClick={close}>取消</Button>
       </div>
       {tooLong && <FieldError id={errorId}>备注最多 500 字</FieldError>}
       <ErrorBox error={save.error} />
@@ -392,12 +425,12 @@ function RenameForm({ job: j, onDone }: { job: Job; onDone: () => void }) {
           onFocus={(e) => e.currentTarget.select()}
           autoFocus
           maxLength={100}
-          className="flex-1 max-sm:h-11"
+          className="flex-1"
         />
-        <Button type="submit" variant="primary" size="sm" loading={rename.isPending} className="max-sm:h-11 max-sm:px-3.5 max-sm:text-sm">
+        <Button type="submit" variant="primary" size="sm" loading={rename.isPending} className="max-sm:px-3.5 max-sm:text-sm">
           保存
         </Button>
-        <Button size="sm" onClick={onDone} className="max-sm:h-11 max-sm:px-3.5 max-sm:text-sm">
+        <Button size="sm" onClick={onDone} className="max-sm:px-3.5 max-sm:text-sm">
           取消
         </Button>
       </div>
@@ -413,7 +446,8 @@ function RenameForm({ job: j, onDone }: { job: Job; onDone: () => void }) {
 
 function BackLink() {
   return (
-    <Link to="/jobs" className="inline-flex items-center gap-0.5 text-ui text-fg-3 hover:text-fg">
+    // 点击区向四周撑到 44px 高，不改变排版
+    <Link to="/jobs" className="relative inline-flex items-center gap-0.5 text-ui text-fg-3 before:absolute before:-inset-x-2 before:-inset-y-3 hover:text-fg">
       <ChevronLeft className="size-4" aria-hidden />
       任务
     </Link>
@@ -424,11 +458,11 @@ function BackLink() {
 const failHint: Partial<Record<string, string>> = {
   cuda_oom: '显存不够：减小 batch size，或多申请一张卡再重跑。',
   host_oom: '主机内存不够：减少 DataLoader 的 num_workers，或等别的任务结束再重跑。',
-  nccl: '多卡通信出错：可以先原样重跑；反复出现时加环境变量 NCCL_DEBUG=INFO 查看原因。',
+  nccl: '多卡通信出错：可以先点"原样重跑"；反复出现时加环境变量 NCCL_DEBUG=INFO 查看原因。',
   exception: '代码报错：按报错行改好代码，再重跑。',
-  reboot: '服务器重启打断了任务。代码没问题的话，用原任务的快照原样重跑。',
-  killed: '进程被丹炉以外的程序结束。确认原因后，可以用原任务的快照原样重跑。',
-  signal: '进程收到信号后退出。不是你发的信号时，看日志末尾找原因。',
+  reboot: '代码没问题的话，点"原样重跑"：默认用原任务的快照。',
+  killed: '进程是被丹炉以外的程序结束的。确认原因后，可以点"原样重跑"：默认用原任务的快照。',
+  signal: '不是你发的信号时，先看日志末尾找原因；要再跑一次，"原样重跑"默认用原任务的快照。',
   start: '任务没能启动：检查工作目录、conda 环境和 ~/.bashrc，再重跑。',
 }
 
@@ -436,17 +470,32 @@ const failHint: Partial<Record<string, string>> = {
  * 失败原因。最醒目的位置放最有用的信息：日志里的报错行（找不到时用最后一行输出），
  * 而不是状态栏里已经有的退出码；退出码以外的原因（被外部终止、启动失败）单独写一行，
  * 然后是按分类给的下一步，重跑按钮就在页面顶部。
+ * 和代码无关的失败（服务器重启、被外部终止、收到信号）反过来：原因本身就是答案，写在第一行；
+ * 日志里本来就没有报错行，最后一行输出只说明任务跑到了哪里，放在后面，不写"没有找到报错行"。
  */
 function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => void }) {
-  const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
+  // 没有报错行时用最后一行输出；它是 tqdm 进度条的话，已用时间和速率对失败的任务没有用，去掉
+  const line = j.error_line || (j.last_line && stripProgressTiming(compactProgress(j.last_line).text))
   const extra = j.fail_reason && !/^退出码 -?\d+$/.test(j.fail_reason) ? j.fail_reason : ''
   const hint = failHint[j.fail_kind ?? '']
+  const reasonFirst = !!extra && !j.error_line && sameCodeFailKinds.includes(j.fail_kind ?? '')
+  const mono = 'font-mono text-[12.5px] leading-relaxed [overflow-wrap:anywhere]'
   return (
     <Alert tone="fail">
-      {line ? (
+      {reasonFirst ? (
+        <>
+          <div className="font-medium">{extra}</div>
+          {line && (
+            <div className="mt-0.5">
+              <span className="text-xs">中断前的最后一行输出：</span>
+              <span className={mono}>{line}</span>
+            </div>
+          )}
+        </>
+      ) : line ? (
         <>
           {!j.error_line && <div className="text-xs">没有找到报错行，最后一行输出是：</div>}
-          <div className="font-mono text-[12.5px] leading-relaxed [overflow-wrap:anywhere]">{line}</div>
+          <div className={mono}>{line}</div>
           {extra && <div className="mt-0.5">{extra}</div>}
         </>
       ) : (
@@ -457,7 +506,7 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
         <button
           type="button"
           onClick={() => onShowLog(j.traceback_offset)}
-          className={cx(hitArea, 'mt-1 inline-flex items-center gap-1 text-xs font-medium underline decoration-fail/40 underline-offset-2 hover:decoration-fail')}
+          className="relative mt-1 inline-flex items-center gap-1 text-xs font-medium underline decoration-fail/40 underline-offset-2 before:absolute before:-inset-x-2 before:-inset-y-3.5 hover:decoration-fail"
         >
           {j.traceback_offset !== undefined ? '跳到报错' : '看日志末尾'}
           <ArrowDown className="size-3.5" aria-hidden />
@@ -482,11 +531,22 @@ function Meta({ label, children, className, live, wrap }: { label: ReactNode; ch
 function MetaStrip({ j }: { j: Job }) {
   const d = jobDuration(j)
   const gpus = j.gpus_assigned.length ? j.gpus_assigned : j.gpus_pinned
+  const exited = j.exit_code !== null && j.status !== 'succeeded'
   return (
     <Card className="grid grid-cols-3 gap-x-3 gap-y-2.5 px-3 py-2.5 sm:gap-x-4 sm:gap-y-3 sm:px-4 sm:py-3 lg:grid-cols-[repeat(6,auto)] lg:justify-between">
-      <Meta label="状态" live wrap>
+      {/* 手机上一格只有 100px 上下，"失败"后面放不下退出码，会多折出一行；写到标签里 */}
+      <Meta
+        label={
+          <>
+            状态
+            {exited && <span className="sm:hidden"> · 退出码 {j.exit_code}</span>}
+          </>
+        }
+        live
+        wrap
+      >
         <StatusLabel job={j} />
-        {j.exit_code !== null && j.status !== 'succeeded' && <span className="text-fg-3">退出码 {j.exit_code}</span>}
+        {exited && <span className="text-fg-3 max-sm:hidden">退出码 {j.exit_code}</span>}
       </Meta>
       <Meta label="GPU" wrap>
         {gpus.length ? <GpuChips ids={gpus} className="flex-wrap" /> : <span className="text-fg-2">{j.gpus_req ? `${j.gpus_req} 张，未分配` : '不用 GPU'}</span>}
@@ -499,9 +559,17 @@ function MetaStrip({ j }: { j: Job }) {
       </Meta>
       <Meta
         label={
+          // 手机上一列只有 100px 上下，写全了会折成两行，把日志框往下挤；写短，琥珀字仍然说明圆点的意思
           <>
-            代码版本
-            {j.git_dirty && <span className="text-warn"> · 有未提交改动</span>}
+            <span className="sm:hidden">代码</span>
+            <span className="max-sm:hidden">代码版本</span>
+            {j.git_dirty && (
+              <span className="text-warn">
+                {' · '}
+                <span className="sm:hidden">有改动</span>
+                <span className="max-sm:hidden">有未提交改动</span>
+              </span>
+            )}
           </>
         }
       >

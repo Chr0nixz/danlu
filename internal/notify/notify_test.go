@@ -216,13 +216,14 @@ func TestQueueAndAlertMessages(t *testing.T) {
 		{store.EventAlertRaised, `{"type":"disk_low","available_bytes":1073741824,"data_disk":true}`},
 		{store.EventAlertCleared, `{"type":"disk_low"}`},
 		{store.EventAlertRaised, `{"type":"blocked"}`},
+		{store.EventAlertRaised, `{"type":"blocked_unknown"}`},
 	} {
 		addEvent(t, st, ts, e.kind, &id, e.data)
 	}
 	for range 10 {
 		step(t, s, ts)
 	}
-	if len(r.requests) != 6 {
+	if len(r.requests) != 7 {
 		t.Fatalf("通知事件缺失或手动暂停/普通恢复被发送: %+v", r.requests)
 	}
 	if r.requests[0].priority != "4" || r.requests[0].click != s.baseURL+"/jobs/7" {
@@ -232,6 +233,9 @@ func TestQueueAndAlertMessages(t *testing.T) {
 		if strings.Contains(req.body, "SECRET") || strings.Contains(req.body, "/path") {
 			t.Fatalf("泄露原始文案: %+v", req)
 		}
+	}
+	if !strings.Contains(r.requests[6].title, "未知显存") || !strings.Contains(r.requests[6].body, "GPU 显存释放") {
+		t.Fatalf("未知显存阻塞通知文案错误: %+v", r.requests[6])
 	}
 }
 

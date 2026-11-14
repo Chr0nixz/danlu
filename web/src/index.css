@@ -13,6 +13,8 @@
   --hover: #efefef;
   --line: #e8e8e8;
   --line-strong: #d6d6d6;
+  /* 输入框边线：用户靠它找到能输入的地方，和面板底、页面底、衬底都要 3:1 以上（WCAG 1.4.11）。按钮和卡片靠文字识别，仍用 line-strong */
+  --field-line: #8a8a8a;
   --fg: #171717;
   --fg-2: #4d4d4d;
   --fg-3: #6b6b6b;
@@ -24,6 +26,8 @@
   --fail: #cd2b31;
   --warn: #a35200;
   --brand: #e5482d;
+  /* 焦点环：浅色主题用实色运行蓝，在页面底、面板和衬底上都在 4.5:1 以上（70% 混合时只有 3:1 上下） */
+  --focus: var(--run);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -36,6 +40,7 @@
     --hover: #1f1f1f;
     --line: #242424;
     --line-strong: #363636;
+    --field-line: #666666;
     --fg: #ededed;
     --fg-2: #b4b4b4;
     --fg-3: #8f8f8f;
@@ -46,6 +51,7 @@
     --ok: #3dd68c;
     --fail: #ff6369;
     --warn: #f1a10d;
+    --focus: color-mix(in oklab, var(--run) 70%, transparent);
   }
 }
 
@@ -58,6 +64,7 @@
   --hover: #1f1f1f;
   --line: #242424;
   --line-strong: #363636;
+  --field-line: #666666;
   --fg: #ededed;
   --fg-2: #b4b4b4;
   --fg-3: #8f8f8f;
@@ -68,6 +75,7 @@
   --ok: #3dd68c;
   --fail: #ff6369;
   --warn: #f1a10d;
+  --focus: color-mix(in oklab, var(--run) 70%, transparent);
 }
 
 @theme inline {
@@ -84,6 +92,7 @@
   --color-hover: var(--hover);
   --color-line: var(--line);
   --color-line-strong: var(--line-strong);
+  --color-field-line: var(--field-line);
   --color-fg: var(--fg);
   --color-fg-2: var(--fg-2);
   --color-fg-3: var(--fg-3);
@@ -95,6 +104,7 @@
   --color-fail: var(--fail);
   --color-warn: var(--warn);
   --color-brand: var(--brand);
+  --color-focus: var(--focus);
 
   --animate-flash: flash 1.2s ease-out;
 }
@@ -130,7 +140,7 @@
   }
 
   :focus-visible {
-    outline: 2px solid color-mix(in oklab, var(--run) 70%, transparent);
+    outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
 
@@ -179,8 +189,9 @@
   background: rgb(82 168 255 / 0.35);
 }
 
+/* 手机上终端页的按钮、按键条和输入框都是 44px 高，终端框让出这些高度 */
 .terminal-fit {
-  height: max(260px, calc(100dvh - 25rem - env(safe-area-inset-bottom)));
+  height: max(240px, calc(100dvh - 26rem - env(safe-area-inset-bottom)));
 }
 
 .terminal-fit .xterm {
@@ -195,15 +206,28 @@
 
 /*
  * 日志框：从框的顶部铺到视口底部，最新几行始终在首屏里。--log-top 由 LogViewer 量出来。
- * 手机上让出底部导航（3.5rem + 安全区）和页面下边距；电脑上只留页面下边距。
+ * 手机上让出底部导航（3.5rem + 安全区）和页面下边距；电脑上只留页面下边距。多减的 1px 是日志面板的下边线，
+ * 不减的话页面会多出 1px 的滚动。
+ *
+ * 手机上有两档，由 LogViewer 决定：
+ * - 首屏里还放得下至少 120px（6 行）：铺到底部导航上方，底边不会落到导航后面；
+ * - 放不下（上面有失败说明等），或者正在定位浏览（跳到报错、搜索命中）：data-tall，
+ *   高度按"滚到日志面板后正好占满标签页以下的屏幕"来算，方便读 traceback。
+ *   14.875rem = 顶栏和间距 64 + 标签页 44 + 间距 12 + 面板边线 1 + 工具栏 44 + 底部导航 56 + 下边距 16 + 边线 1。
  */
 .log-fit {
-  height: max(280px, calc(100dvh - var(--log-top, 22rem) - 3.5rem - env(safe-area-inset-bottom) - 1rem));
+  height: max(120px, calc(100dvh - var(--log-top, 22rem) - 3.5rem - env(safe-area-inset-bottom) - 1rem - 1px));
+}
+
+@media (max-width: 639.98px) {
+  .log-fit[data-tall] {
+    height: max(280px, calc(100dvh - 14.875rem - env(safe-area-inset-bottom)));
+  }
 }
 
 @media (min-width: 640px) {
   .log-fit {
-    height: max(320px, calc(100dvh - var(--log-top, 20rem) - 1.5rem));
+    height: max(320px, calc(100dvh - var(--log-top, 20rem) - 1.5rem - 1px));
   }
 }
 

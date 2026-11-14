@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode, Suspense, lazy } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router'
+import { PageBoundary } from './components/ErrorBoundary'
 import { Layout } from './components/Layout'
 import './index.css'
 import { ApiError } from '@danlu/core'
@@ -32,19 +33,22 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route element={<Layout />}>
-            <Route path="/" element={<Home />} />
-            <Route path="/jobs" element={<Suspense fallback={pageFallback}><Jobs /></Suspense>} />
-            <Route path="/jobs/:id" element={<Suspense fallback={pageFallback}><JobDetail /></Suspense>} />
-            <Route path="/compare" element={<Suspense fallback={<div className="grid min-h-64 place-items-center"><Spinner /></div>}><Compare /></Suspense>} />
-            <Route path="/new" element={<Suspense fallback={pageFallback}><NewJob /></Suspense>} />
-            <Route path="/settings" element={<Suspense fallback={pageFallback}><Settings /></Suspense>} />
-            <Route path="/terminal" element={<Suspense fallback={<div className="grid min-h-64 place-items-center"><Spinner /></div>}><Terminal /></Suspense>} />
-            <Route path="*" element={<Suspense fallback={pageFallback}><NotFound /></Suspense>} />
-          </Route>
-        </Routes>
+        {/* 整页兜底：顶栏或登录页出错时也不白屏。主内容区另有一层，见 Layout */}
+        <PageBoundary full>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route element={<Layout />}>
+              <Route path="/" element={<Home />} />
+              <Route path="/jobs" element={<Suspense fallback={pageFallback}><Jobs /></Suspense>} />
+              <Route path="/jobs/:id" element={<Suspense fallback={pageFallback}><JobDetail /></Suspense>} />
+              <Route path="/compare" element={<Suspense fallback={pageFallback}><Compare /></Suspense>} />
+              <Route path="/new" element={<Suspense fallback={pageFallback}><NewJob /></Suspense>} />
+              <Route path="/settings" element={<Suspense fallback={pageFallback}><Settings /></Suspense>} />
+              <Route path="/terminal" element={<Suspense fallback={pageFallback}><Terminal /></Suspense>} />
+              <Route path="*" element={<Suspense fallback={pageFallback}><NotFound /></Suspense>} />
+            </Route>
+          </Routes>
+        </PageBoundary>
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,

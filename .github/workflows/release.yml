@@ -33,7 +33,8 @@ jobs:
       - name: 安装 Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
+          check-latest: true
 
       - name: Go 单元测试
         run: go test ./cmd/... ./internal/...

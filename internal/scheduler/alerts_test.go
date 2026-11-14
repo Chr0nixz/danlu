@@ -3,6 +3,7 @@ package scheduler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,33 @@ func TestExternalProcessMergedAndBlockingReason(t *testing.T) {
 	h.expect(next, store.StatusRunning)
 	if reason := h.m.WaitReasons()[next]; reason != "" {
 		t.Fatalf("启动后残留等待原因: %q", reason)
+	}
+}
+
+func TestUnknownMemoryBlockingReasonAndAlert(t *testing.T) {
+	h := newHarness(t, 1)
+	id := h.add(1)
+	h.gpus.set(func(f *fakeGPUs) { f.gpus[0].UnknownMemMB = 2048 })
+	h.tick()
+	if h.job(id).Status != store.StatusQueued {
+		t.Fatal("未知显存占用时 GPU 任务应保持排队")
+	}
+	if reason := h.m.WaitReasons()[id]; !strings.Contains(reason, "未知显存占用") {
+		t.Fatalf("队列等待原因应说明未知显存占用: %q", reason)
+	}
+	var found bool
+	for _, event := range alertEvents(t, h.st.Store) {
+		if event.Kind != store.EventAlertRaised || event.Key != fmt.Sprintf("blocked:%d", id) {
+			continue
+		}
+		var data store.AlertData
+		if err := json.Unmarshal(event.Data, &data); err != nil || data.Type != "blocked_unknown" {
+			t.Fatalf("未知显存阻塞告警类型错误: %+v (%v)", data, err)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("未知显存阻塞应记录告警事件")
 	}
 }
 

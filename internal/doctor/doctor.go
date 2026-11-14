@@ -38,7 +38,7 @@ func Run(ctx context.Context, cfg *config.Config, paths config.Paths, version st
 	ctx, cancel := context.WithTimeout(ctx, 24*time.Second)
 	defer cancel()
 	checks := make([]Check, 0, 16)
-	checks = append(checks, gpuCheck(ctx), condaCheck(ctx, cfg.Runtime.CondaBase))
+	checks = append(checks, gpuCheck(ctx, cfg.Runtime.UnknownGPUMemoryMB), condaCheck(ctx, cfg.Runtime.CondaBase))
 	checks = append(checks, platformChecks(ctx, paths)...)
 	outputRoot, err := config.ResolvePath(cfg.Runtime.OutputRoot)
 	if err != nil {
@@ -67,8 +67,19 @@ func releaseVersion(version string) bool {
 	return version != "" && version != "dev" && !strings.HasPrefix(version, "dev-") && !strings.HasSuffix(version, "-dirty")
 }
 
-func gpuCheck(ctx context.Context) Check {
-	src := gpu.NewSource("")
+func oomPolicyCheck(got string) Check {
+	return propertyCheck("service_oom_policy", "训练 OOM 不重启服务", got, "continue", "运行 danlu install-service，确认 OOMPolicy=continue")
+}
+
+func propertyCheck(id, title, got, want, fix string) Check {
+	if got == want {
+		return Check{id, "ok", title, got, ""}
+	}
+	return Check{id, "fail", title, fmt.Sprintf("期望 %s，实际 %s", want, valueOrNA(got)), fix}
+}
+
+func gpuCheck(ctx context.Context, unknownMemoryThresholdMB ...int) Check {
+	src := gpu.NewSource("", unknownMemoryThresholdMB...)
 	info := gpu.MachineInfo{}
 	if machine, ok := src.(gpu.MachineSource); ok {
 		var err error

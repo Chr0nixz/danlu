@@ -140,6 +140,8 @@ export interface GPU {
   util: number
   mem_used_mb: number
   mem_total_mb: number
+  /** 进程列表无法解释的显存，超过服务端阈值时该卡不可分配 */
+  unknown_mem_mb?: number
   temp_c: number
   power_w: number
   job: { id: number; name: string } | null

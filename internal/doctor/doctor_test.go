@@ -13,10 +13,19 @@ import (
 )
 
 func TestParseProperties(t *testing.T) {
-	got := parseProperties("LoadState=loaded\nActiveState=active\nKillMode=process\nRestart=on-failure\n")
-	for key, want := range map[string]string{"LoadState": "loaded", "ActiveState": "active", "KillMode": "process", "Restart": "on-failure"} {
+	got := parseProperties("LoadState=loaded\nActiveState=active\nKillMode=process\nRestart=on-failure\nOOMPolicy=continue\n")
+	for key, want := range map[string]string{"LoadState": "loaded", "ActiveState": "active", "KillMode": "process", "Restart": "on-failure", "OOMPolicy": "continue"} {
 		if got[key] != want {
 			t.Errorf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+}
+
+func TestOOMPolicyCheck(t *testing.T) {
+	for got, want := range map[string]string{"continue": "ok", "stop": "fail", "": "fail"} {
+		check := oomPolicyCheck(got)
+		if check.ID != "service_oom_policy" || check.Level != want {
+			t.Errorf("OOMPolicy=%q 检查结果 = %+v，期望 level=%s", got, check, want)
 		}
 	}
 }
@@ -72,7 +81,7 @@ func TestRunWithoutTLS(t *testing.T) {
 	c, p := testSetup(t)
 	c.TLS.Mode = config.TLSOff
 	checks := byID(t, Run(context.Background(), c, p, "dev-test", 1))
-	for _, id := range []string{"service_unit", "service_active", "service_kill_mode", "service_restart", "linger", "time_sync"} {
+	for _, id := range []string{"service_unit", "service_active", "service_kill_mode", "service_restart", "service_oom_policy", "linger", "time_sync"} {
 		if _, ok := checks[id]; !ok {
 			t.Errorf("缺少平台检查 %s", id)
 		}

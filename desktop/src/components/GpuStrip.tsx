@@ -14,11 +14,12 @@ export function shortAgo(ms: number, now = Date.now()) {
   return `${Math.floor(s / 86400)}d 前`
 }
 
-export const freeCount = (gpus: GPU[]) => gpus.filter((g) => !g.job && g.external.length === 0).length
+const unknownBusy = (g: GPU) => (g.unknown_mem_mb ?? 0) > 0
+export const freeCount = (gpus: GPU[]) => gpus.filter((g) => !g.job && g.external.length === 0 && !unknownBusy(g)).length
 
 /** 热力色：底色按利用率深浅着运行蓝；被外部进程占用的着琥珀色 */
 export function heatStyle(g: GPU): React.CSSProperties {
-  if (g.external.length > 0) return { background: 'color-mix(in srgb, var(--warn) 14%, var(--card))' }
+  if (g.external.length > 0 || unknownBusy(g)) return { background: 'color-mix(in srgb, var(--warn) 14%, var(--card))' }
   return { background: `color-mix(in srgb, var(--run) ${Math.round(4 + g.util * 0.3)}%, var(--card))` }
 }
 
@@ -64,12 +65,14 @@ function ServerRow({ snap: s, onServer }: { snap: ServerSnap; onServer?: (name: 
 
 function GpuCell({ server, gpu: g, points }: { server: string; gpu: GPU; points: [number, number][] }) {
   const external = g.external.length > 0
-  const owner = g.job ? `${server}-${g.job.id}` : external ? g.external.map((p) => p.user || `pid ${p.pid}`).join(', ') : '空闲'
+  const unknown = unknownBusy(g)
+  const owner = g.job ? `${server}-${g.job.id}` : external ? g.external.map((p) => p.user || `pid ${p.pid}`).join(', ') : unknown ? '未知显存占用' : '空闲'
   const title = [
     `GPU ${g.index} · ${g.name}`,
     `利用率 ${g.util}% · 显存 ${mb(g.mem_used_mb)} / ${mb(g.mem_total_mb)} · ${g.temp_c}°C · ${g.power_w}W`,
     g.job ? `任务 ${server}-${g.job.id} ${g.job.name}` : '',
     ...g.external.map((p) => `外部进程 ${p.user || '?'} · pid ${p.pid} · ${mb(p.used_mem_mb)}`),
+    unknown ? `进程列表无法解释 ${mb(g.unknown_mem_mb ?? 0)} 显存，这张卡不会被分配` : '',
   ]
     .filter(Boolean)
     .join('\n')
@@ -79,12 +82,12 @@ function GpuCell({ server, gpu: g, points }: { server: string; gpu: GPU; points:
       style={heatStyle(g)}
       className={cx(
         'relative overflow-hidden rounded-[6px] px-2 pt-1.5 pb-1 transition-[background-color] duration-300',
-        external ? 'shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--warn)_60%,transparent)]' : 'shadow-[inset_0_0_0_1px_var(--line)]',
+        external || unknown ? 'shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--warn)_60%,transparent)]' : 'shadow-[inset_0_0_0_1px_var(--line)]',
       )}
     >
       <div className="flex items-baseline gap-1.5">
         <span className="num text-[11px] text-fg-3">{g.index}</span>
-        <span className={cx('min-w-0 flex-1 truncate text-[11px]', g.job ? 'num text-fg' : external ? 'font-medium text-warn' : 'text-fg-3')}>{owner}</span>
+        <span className={cx('min-w-0 flex-1 truncate text-[11px]', g.job ? 'num text-fg' : external || unknown ? 'font-medium text-warn' : 'text-fg-3')}>{owner}</span>
         <span className="num text-[11.5px] font-medium">{g.util}%</span>
       </div>
       <Sparkline points={points} tone={external ? 'var(--warn)' : 'var(--run)'} />
@@ -125,19 +128,22 @@ function Sparkline({ points, tone }: { points: [number, number][]; tone: string 
 export function MiniCells({ gpus }: { gpus: GPU[] }) {
   return (
     <div className="flex flex-wrap gap-1">
-      {gpus.map((g) => (
-        <div
-          key={g.index}
-          title={`GPU ${g.index} · ${g.util}%${g.job ? ` · 任务 ${g.job.id}` : g.external.length ? ' · 外部进程' : ' · 空闲'}`}
-          style={heatStyle(g)}
-          className={cx(
-            'num grid size-[22px] place-items-center rounded-[5px] text-[10px]',
-            g.external.length ? 'text-warn shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--warn)_60%,transparent)]' : g.job ? 'text-fg' : 'text-fg-3 shadow-[inset_0_0_0_1px_var(--line)]',
-          )}
-        >
-          {g.index}
-        </div>
-      ))}
+      {gpus.map((g) => {
+        const unknown = unknownBusy(g)
+        return (
+          <div
+            key={g.index}
+            title={`GPU ${g.index} · ${g.util}%${g.job ? ` · 任务 ${g.job.id}` : ''}${g.external.length ? ' · 外部进程' : !g.job && !unknown ? ' · 空闲' : ''}${unknown ? ` · 未知显存 ${mb(g.unknown_mem_mb ?? 0)}` : ''}`}
+            style={heatStyle(g)}
+            className={cx(
+              'num grid size-[22px] place-items-center rounded-[5px] text-[10px]',
+              g.external.length || unknown ? 'text-warn shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--warn)_60%,transparent)]' : g.job ? 'text-fg' : 'text-fg-3 shadow-[inset_0_0_0_1px_var(--line)]',
+            )}
+          >
+            {g.index}
+          </div>
+        )
+      })}
     </div>
   )
 }

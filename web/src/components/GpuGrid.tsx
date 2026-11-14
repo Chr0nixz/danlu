@@ -8,7 +8,7 @@ export function useGpus() {
   return useQuery({ queryKey: ['gpus'], queryFn: api.gpus, refetchInterval: 3000 })
 }
 
-export const gpuBusy = (g: GPU) => !!g.job || g.external.length > 0
+export const gpuBusy = (g: GPU) => !!g.job || g.external.length > 0 || (g.unknown_mem_mb ?? 0) > 0
 
 /** "NVIDIA GeForce RTX 4090" → "RTX 4090" */
 export const shortName = (name: string) => name.replace(/^NVIDIA\s+/, '').replace(/^GeForce\s+/, '')
@@ -24,9 +24,9 @@ function errorDuration(since: number) {
   return `${hours} 小时 ${minutes % 60} 分钟`
 }
 
-type State = 'job' | 'external' | 'idle'
-const stateOf = (g: GPU): State => (g.job ? 'job' : g.external.length ? 'external' : 'idle')
-const barColor: Record<State, string> = { job: 'bg-run', external: 'bg-warn', idle: 'bg-fg-4' }
+type State = 'job' | 'external' | 'unknown' | 'idle'
+const stateOf = (g: GPU): State => (g.job ? 'job' : g.external.length ? 'external' : (g.unknown_mem_mb ?? 0) > 0 ? 'unknown' : 'idle')
+const barColor: Record<State, string> = { job: 'bg-run', external: 'bg-warn', unknown: 'bg-warn', idle: 'bg-fg-4' }
 
 export function GpuGrid() {
   const { data, isLoading, error } = useGpus()
@@ -76,8 +76,8 @@ function Occupant({ g }: { g: GPU }) {
   return (
     <div className="min-w-0 space-y-0.5 text-ui">
       {g.job && (
-        // 手机上把点击区撑高到 36px，不改变排版
-        <Link to={`/jobs/${g.job.id}`} title={g.job.name} className="flex min-w-0 items-center gap-1.5 text-fg hover:underline max-sm:-my-2 max-sm:py-2">
+        // 手机上把点击区撑高到 44px，不改变排版
+        <Link to={`/jobs/${g.job.id}`} title={g.job.name} className="flex min-w-0 items-center gap-1.5 text-fg hover:underline max-sm:-my-3 max-sm:py-3">
           <StatusIcon status="running" className="size-3.5" />
           <span className="shrink-0 text-fg-3">#{g.job.id}</span>
           <span className="truncate font-medium">{g.job.name}</span>
@@ -98,7 +98,16 @@ function Occupant({ g }: { g: GPU }) {
           <span className="shrink-0">· {mb(p.used_mem_mb)}</span>
         </div>
       ))}
-      {!g.job && !g.external.length && (
+      {(g.unknown_mem_mb ?? 0) > 0 && (
+        <div
+          className="flex items-center gap-1.5 text-warn"
+          title="进程列表无法解释这部分显存，这张卡不会被分配"
+        >
+          <span className="size-1.5 shrink-0 rounded-full bg-warn" />
+          未知显存占用 · {mb(g.unknown_mem_mb ?? 0)}
+        </div>
+      )}
+      {!g.job && !g.external.length && !(g.unknown_mem_mb ?? 0) && (
         <div className="flex items-center gap-1.5 text-ok">
           <span className="size-1.5 rounded-full bg-ok" />
           空闲
@@ -122,7 +131,8 @@ function GpuPanel({ g, showModel }: { g: GPU; showModel: boolean }) {
           {g.temp_c}°C · {Math.round(g.power_w)}W
         </span>
       </div>
-      <div className="mt-2.5 grid grid-cols-2 gap-3">
+      {/* 显存的数值（20.8 / 24 GB）比利用率长，按 2:3 分宽度：1024px 下每块面板只有 220px 上下，对半分会把"显存"折成两行 */}
+      <div className="mt-2.5 grid grid-cols-[2fr_3fr] gap-3">
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between text-xs">
             <span className="text-fg-3">利用率</span>
@@ -132,7 +142,7 @@ function GpuPanel({ g, showModel }: { g: GPU; showModel: boolean }) {
         </div>
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between gap-1 text-xs">
-            <span className="text-fg-3">显存</span>
+            <span className="shrink-0 text-fg-3">显存</span>
             <span className="truncate font-medium text-fg">{gb(g.mem_used_mb, g.mem_total_mb)}</span>
           </div>
           <Meter value={memPct} className={barColor[s]} />

@@ -27,11 +27,11 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v7
 
-      # 版本取 go.mod 里的 go 指令；setup-go 默认按 go.sum 缓存 module 和构建缓存
       - name: 安装 Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
+          check-latest: true
 
       # 在 Linux 上跑，*_linux.go 和 *_linux_test.go 也会一起编译和测试（Windows 上跑不到）
       - name: Go 单元测试
@@ -39,6 +39,14 @@ jobs:
 
       - name: go vet
         run: go vet ./cmd/... ./internal/...
+
+      - name: 安装 govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Go 依赖漏洞检查
+        run: govulncheck ./...
 
       # React Router 8 要求 Node.js 22.22 以上，使用当前 LTS
       - name: 安装 Node.js

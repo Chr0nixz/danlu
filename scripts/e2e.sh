@@ -95,6 +95,7 @@ check "info 支持关闭二维码输出" [ "$(grep -c '手机扫码打开面板'
 ENTRANCE=$("$BIN" entrance | awk '{print $NF}' | sed 's#.*/##')
 [ -n "$ENTRANCE" ] || { bad "读不到安全入口"; exit 1; }
 check "快速失败阈值默认为 2 分钟" grep -q 'fail_fast = "2m0s"' "$DANLU_HOME/config.toml"
+check "未知显存阈值默认为 1024 MiB" grep -q 'unknown_gpu_memory_mb = 1024' "$DANLU_HOME/config.toml"
 sed -i 's/kill_grace = .*/kill_grace = "3s"/' "$DANLU_HOME/config.toml"
 # 假 conda：activate 时只设置一个环境变量；包清单固定，便于验证哈希去重
 mkdir -p "$T/fakeconda/etc/profile.d" "$T/fakeconda/bin"
@@ -579,15 +580,20 @@ FB=$T/fakebin; mkdir -p "$FB"
 echo ok >"$T/smi.mode"
 cat >"$FB/nvidia-smi" <<EOF
 #!/bin/bash
-# ok：正常；noprocs：查不到卡上的进程；hang：卡住
+# ok：正常；noprocs：查不到卡上的进程；unknown：显存有占用但进程列表为空；hang：卡住
 mode=\$(cat "$T/smi.mode")
 case "\$1" in
   --query-gpu=*)
     [ "\$mode" = hang ] && sleep 300
-    echo "0, GPU-aaaa, Fake A100, 10, 100, 40960, 40, 60.5"
+    if [ "\$mode" = unknown ]; then
+      echo "0, GPU-aaaa, Fake A100, 10, 2048, 40960, 40, 60.5"
+    else
+      echo "0, GPU-aaaa, Fake A100, 10, 100, 40960, 40, 60.5"
+    fi
     echo "1, GPU-bbbb, Fake A100, 0, 0, 40960, 35, 50.0" ;;
   --query-compute-apps=*)
-    [ "\$mode" = noprocs ] && exit 6 ;;
+    [ "\$mode" = noprocs ] && exit 6
+    [ "\$mode" = unknown ] && exit 0 ;;
 esac
 exit 0
 EOF
@@ -617,6 +623,18 @@ echo ok >"$T/smi.mode"
 check "nvidia-smi 恢复后不再报错" wait_until 25 bash -c "! curl -s -b '$JAR' '$BASE/api/gpus' | grep -q '\"error\"'"
 check "GPU 恢复后清除错误持续时间" wait_until 25 gpus_error_cleared
 check "恢复后排队的任务分到卡并成功" wait_status "$GJ" succeeded 15
+echo unknown >"$T/smi.mode"
+unknown_gpu_busy() {
+  [ "$(api "$BASE/api/gpus" | json "d['gpus'][0].get('unknown_mem_mb', 0) > 1024 and len(d['gpus'][0]['external']) == 0")" = True ]
+}
+check "进程列表为空但显存差值超过阈值时标记未知占用" wait_until 10 unknown_gpu_busy
+UG=$(submit "{\"name\":\"unknown-memory\",\"workdir\":\"$W\",\"cmd\":\"true\",\"pinned_gpus\":[0]}")
+unknown_job_waiting() {
+  [ "$(job "$UG" "d['status'] == 'queued' and '未知显存占用' in d.get('wait_reason', '')")" = True ]
+}
+check "指定未知占用 GPU 的任务保持排队并说明原因" wait_until 10 unknown_job_waiting
+echo ok >"$T/smi.mode"
+check "未知显存恢复后指定卡任务启动并成功" wait_status "$UG" succeeded 15
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
 
 echo "== 两个数据目录的同号任务互不影响 =="
@@ -838,7 +856,7 @@ checks = json.load(open(sys.argv[1]))['checks']
 by = {c['id']: c for c in checks}
 assert len(by) == len(checks)
 assert all(c['level'] in ('ok', 'warn', 'fail') and c['title'] and c['detail'] for c in checks)
-for k in ('gpu', 'conda', 'service_unit', 'service_active', 'service_kill_mode', 'service_restart', 'linger',
+for k in ('gpu', 'conda', 'service_unit', 'service_active', 'service_kill_mode', 'service_restart', 'service_oom_policy', 'linger',
           'time_sync', 'data_disk', 'output_disk', 'server_cert', 'port', 'version'):
     assert k in by, k
 assert by['gpu']['level'] == 'ok' and '4 张 GPU' in by['gpu']['detail']

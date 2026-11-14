@@ -16,13 +16,15 @@
       "raised": { "role": "neutral", "displayName": "浮起 Raised", "canonical": "#ffffff", "note": "深色 #2a2a2a" },
       "hover": { "role": "neutral", "displayName": "悬停 Hover", "canonical": "#efefef", "note": "深色 #1f1f1f" },
       "line": { "role": "neutral", "displayName": "边线 Line", "canonical": "#e8e8e8", "note": "深色 #242424" },
-      "line-strong": { "role": "neutral", "displayName": "强边线 Line Strong", "canonical": "#d6d6d6", "note": "深色 #363636" },
+      "line-strong": { "role": "neutral", "displayName": "强边线 Line Strong", "canonical": "#d6d6d6", "note": "深色 #363636。次按钮、单选卡片、卡号小方块、只读输入框" },
+      "field-line": { "role": "neutral", "displayName": "输入框边线 Field Line", "canonical": "#8a8a8a", "note": "深色 #666666。输入框、下拉框、步进器；和面板底、页面底、衬底都在 3:1 以上（WCAG 1.4.11）" },
       "fg": { "role": "neutral", "displayName": "主文字 Ink", "canonical": "#171717", "note": "深色 #ededed" },
       "fg-2": { "role": "neutral", "displayName": "次文字 Ink 2", "canonical": "#4d4d4d", "note": "深色 #b4b4b4" },
       "fg-3": { "role": "neutral", "displayName": "弱文字 Ink 3", "canonical": "#6b6b6b", "note": "深色 #8f8f8f" },
       "fg-4": { "role": "neutral", "displayName": "最弱文字 Ink 4", "canonical": "#a8a8a8", "note": "深色 #5a5a5a" },
       "term-bg": { "role": "neutral", "displayName": "终端底 Terminal", "canonical": "#0b0b0b", "note": "两种主题都用" },
-      "term-fg": { "role": "neutral", "displayName": "终端字 Terminal Ink", "canonical": "#d9d9d9", "note": "两种主题都用" }
+      "term-fg": { "role": "neutral", "displayName": "终端字 Terminal Ink", "canonical": "#d9d9d9", "note": "两种主题都用" },
+      "term-fail": { "role": "neutral", "displayName": "终端红 Terminal Red", "canonical": "#ff7b72", "note": "两种主题都用；终端面板里的报错框（8% 底、30% 边）" }
     },
     "ansiPalette": {
       "fg": { "black": "#7a7a7a", "red": "#ff7b72", "green": "#56d364", "yellow": "#e3b341", "blue": "#79c0ff", "magenta": "#d2a8ff", "cyan": "#56d4dd", "white": "#e6e6e6", "bright-black": "#9e9e9e", "bright-red": "#ffa198", "bright-green": "#7ee787", "bright-yellow": "#f2cc60", "bright-blue": "#a5d6ff", "bright-magenta": "#e2c5ff", "bright-cyan": "#b3f0ff", "bright-white": "#fafafa" },
@@ -45,7 +47,7 @@
       { "name": "tab-rail", "value": "inset 0 -1px 0 var(--line)", "purpose": "下划线标签页的轨道线。" }
     ],
     "focus": [
-      { "name": "focus-ring", "value": "outline: 2px solid color-mix(in oklab, var(--run) 70%, transparent); outline-offset: 2px", "purpose": "全局键盘焦点。" },
+      { "name": "focus-ring", "value": "outline: 2px solid var(--focus); outline-offset: 2px", "purpose": "全局键盘焦点。--focus 在浅色主题是实色运行蓝，深色主题是运行蓝 70% 混合。" },
       { "name": "field-focus", "value": "border-color: var(--fg-3); box-shadow: 0 0 0 3px color-mix(in oklab, var(--run) 15%, transparent)", "purpose": "输入框聚焦。" },
       { "name": "selection", "value": "color-mix(in oklab, var(--run) 28%, transparent)", "purpose": "文字选区。" }
     ],
@@ -76,7 +78,7 @@
       "refersTo": "button-primary-sm",
       "description": "反色实心主按钮，顶栏的“新建任务”，带快捷键提示。",
       "html": "<button class=\"ds-btn ds-btn-primary\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 12h14\"/><path d=\"M12 5v14\"/></svg>新建任务<kbd class=\"ds-kbd\">N</kbd></button>",
-      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 10px; border-radius: 6px; font: 500 13px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; white-space: nowrap; border: 0; cursor: pointer; transition: background-color 150ms, border-color 150ms, color 150ms, opacity 150ms; } .ds-btn svg { width: 16px; height: 16px; } .ds-btn-primary { background: var(--inv, #171717); color: var(--inv-fg, #fafafa); } .ds-btn-primary:hover { opacity: 0.85; } .ds-btn-primary:active { opacity: 0.75; } .ds-btn:focus-visible { outline: 2px solid color-mix(in oklab, var(--run, #0b6bcb) 70%, transparent); outline-offset: 2px; } .ds-kbd { display: inline-flex; align-items: center; justify-content: center; height: 20px; min-width: 20px; padding: 0 4px; border: 1px solid color-mix(in oklab, currentColor 25%, transparent); border-radius: 4px; font: 11px/1 inherit; opacity: 0.7; }"
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 10px; border-radius: 6px; font: 500 13px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; white-space: nowrap; border: 0; cursor: pointer; transition: background-color 150ms, border-color 150ms, color 150ms, opacity 150ms; } .ds-btn svg { width: 16px; height: 16px; } .ds-btn-primary { background: var(--inv, #171717); color: var(--inv-fg, #fafafa); } .ds-btn-primary:hover { opacity: 0.85; } .ds-btn-primary:active { opacity: 0.75; } .ds-btn:focus-visible { outline: 2px solid var(--focus, #0b6bcb); outline-offset: 2px; } .ds-kbd { display: inline-flex; align-items: center; justify-content: center; height: 20px; min-width: 20px; padding: 0 4px; border: 1px solid color-mix(in oklab, currentColor 25%, transparent); border-radius: 4px; font: 11px/1 inherit; }"
     },
     {
       "name": "Secondary Button",
@@ -84,7 +86,7 @@
       "refersTo": "button-secondary",
       "description": "默认按钮：面板底、强边线。",
       "html": "<button class=\"ds-btn2\">返回</button>",
-      "css": ".ds-btn2 { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fg, #171717); font: 500 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; cursor: pointer; transition: background-color 150ms, border-color 150ms, color 150ms; } .ds-btn2:hover { background: var(--hover, #efefef); } .ds-btn2:active { background: var(--line, #e8e8e8); } .ds-btn2:focus-visible { outline: 2px solid color-mix(in oklab, var(--run, #0b6bcb) 70%, transparent); outline-offset: 2px; }"
+      "css": ".ds-btn2 { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fg, #171717); font: 500 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; cursor: pointer; transition: background-color 150ms, border-color 150ms, color 150ms; } .ds-btn2:hover { background: var(--hover, #efefef); } .ds-btn2:active { background: var(--line, #e8e8e8); } .ds-btn2:focus-visible { outline: 2px solid var(--focus, #0b6bcb); outline-offset: 2px; }"
     },
     {
       "name": "Danger Button",
@@ -92,15 +94,15 @@
       "refersTo": "button-danger",
       "description": "取消任务等破坏性动作：次按钮外形，失败红文字。",
       "html": "<button class=\"ds-btn-danger\">取消任务</button>",
-      "css": ".ds-btn-danger { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fail, #cd2b31); font: 500 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; cursor: pointer; transition: background-color 150ms, border-color 150ms; } .ds-btn-danger:hover { border-color: color-mix(in oklab, var(--fail, #cd2b31) 40%, transparent); background: color-mix(in oklab, var(--fail, #cd2b31) 8%, transparent); } .ds-btn-danger:focus-visible { outline: 2px solid color-mix(in oklab, var(--run, #0b6bcb) 70%, transparent); outline-offset: 2px; }"
+      "css": ".ds-btn-danger { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fail, #cd2b31); font: 500 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; cursor: pointer; transition: background-color 150ms, border-color 150ms; } .ds-btn-danger:hover { border-color: color-mix(in oklab, var(--fail, #cd2b31) 40%, transparent); background: color-mix(in oklab, var(--fail, #cd2b31) 8%, transparent); } .ds-btn-danger:focus-visible { outline: 2px solid var(--focus, #0b6bcb); outline-offset: 2px; }"
     },
     {
       "name": "Input",
       "kind": "input",
       "refersTo": "input",
-      "description": "36px 输入框，聚焦时边线加深并带运行蓝 15% 光晕。",
+      "description": "36px 输入框，边线和背景 3:1 以上；悬停和聚焦时边线加深，聚焦另带运行蓝 15% 光晕。",
       "html": "<input class=\"ds-input\" placeholder=\"搜索任务名、命令、目录\" />",
-      "css": ".ds-input { width: 100%; height: 36px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line-strong, #d6d6d6); background: var(--surface, #fff); color: var(--fg, #171717); font: 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; outline: none; transition: border-color 150ms, box-shadow 150ms; } .ds-input::placeholder { color: var(--fg-3, #6b6b6b); } .ds-input:hover { border-color: var(--fg-4, #a8a8a8); } .ds-input:focus { border-color: var(--fg-3, #6b6b6b); box-shadow: 0 0 0 3px color-mix(in oklab, var(--run, #0b6bcb) 15%, transparent); }"
+      "css": ".ds-input { width: 100%; height: 36px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--field-line, #8a8a8a); background: var(--surface, #fff); color: var(--fg, #171717); font: 14px/20px ui-sans-serif, system-ui, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei UI\", sans-serif; outline: none; transition: border-color 150ms, box-shadow 150ms; } .ds-input::placeholder { color: var(--fg-3, #6b6b6b); } .ds-input:hover { border-color: var(--fg-3, #6b6b6b); } .ds-input:focus { border-color: var(--fg-3, #6b6b6b); box-shadow: 0 0 0 3px color-mix(in oklab, var(--run, #0b6bcb) 15%, transparent); }"
     },
     {
       "name": "Top Navigation",

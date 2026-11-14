@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { Flame, LayoutDashboard, ListChecks, Plus, Settings, Terminal as TerminalIcon } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api } from '../lib/api'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
+import { PageBoundary } from './ErrorBoundary'
+import { ShortcutDialog } from './Shortcuts'
 import { Announcer, buttonClass, cx, Kbd } from './ui'
 
 const nav = [
@@ -31,16 +33,28 @@ export function Layout() {
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 })
   const showTerminal = settings.data?.terminal_enabled === true
 
-  // 快捷键：N 新建任务；/ 搜索任务（任务页自己处理，其他页面先跳过去）
+  // 快捷键：N 新建任务；/ 搜索任务（任务页自己处理，其他页面先跳过去）；J / K 在任务行之间移动，
+  // 焦点落在行的链接上，Enter 打开；? 打开快捷键一览。确认框开着时都不响应
+  const [help, setHelp] = useState(false)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target)) return
-      if (e.key === 'n' || e.key === 'N') {
+      if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target) || document.querySelector('dialog[open]')) return
+      const key = e.key.toLowerCase()
+      if (key === 'n') {
         e.preventDefault()
         navigate('/new')
       } else if (e.key === '/' && pathname !== '/jobs') {
         e.preventDefault()
         navigate('/jobs', { state: { focusSearch: true } })
+      } else if (key === 'j' || key === 'k') {
+        const rows = [...document.querySelectorAll<HTMLElement>('[data-job-link]')]
+        if (!rows.length) return
+        e.preventDefault()
+        const i = rows.indexOf(document.activeElement as HTMLElement)
+        rows[key === 'j' ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1)].focus()
+      } else if (e.key === '?') {
+        e.preventDefault()
+        setHelp(true)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -67,7 +81,7 @@ export function Layout() {
       </a>
       <header className="sticky top-0 z-30 border-b border-line bg-surface">
         <div className="mx-auto flex h-12 max-w-[1200px] items-center gap-3 px-4 sm:px-6">
-          <Link to="/" className="flex min-w-0 items-center gap-2">
+          <Link to="/" className="flex h-full min-w-0 items-center gap-2">
             <Brand />
             <span className="text-sm font-semibold tracking-tight">丹炉</span>
           </Link>
@@ -123,9 +137,12 @@ export function Layout() {
       </header>
 
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1200px] px-4 py-4 outline-none sm:px-6 sm:py-6">
-        <Outlet />
+        <PageBoundary>
+          <Outlet />
+        </PageBoundary>
       </main>
       <Announcer />
+      {help && <ShortcutDialog onClose={() => setHelp(false)} />}
 
       {/* 手机底部导航：新建放在正中间，终端和设置在顶栏右侧 */}
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] sm:hidden">

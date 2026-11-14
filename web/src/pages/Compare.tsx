@@ -28,7 +28,7 @@ export function Compare() {
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
-        <Link to="/jobs" className="inline-flex items-center gap-0.5 text-ui text-fg-3 hover:text-fg"><ChevronLeft className="size-4" aria-hidden />任务</Link>
+        <Link to="/jobs" className="relative inline-flex items-center gap-0.5 text-ui text-fg-3 before:absolute before:-inset-x-2 before:-inset-y-3 hover:text-fg"><ChevronLeft className="size-4" aria-hidden />任务</Link>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-lg font-semibold">任务对比</h1>
           {validPair && <Link to={`/compare?a=${a}`} className={buttonClass('secondary', 'sm')}>更换对比任务</Link>}
@@ -90,7 +90,7 @@ function JobHeading({ job, label }: { job: Job; label: string }) {
       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-fg-3">
         {label} <StatusLabel job={job} className="font-normal" />
       </div>
-      <Link to={`/jobs/${job.id}`} className="mt-0.5 block text-sm font-medium hover:underline [overflow-wrap:anywhere]">
+      <Link to={`/jobs/${job.id}`} className="relative mt-0.5 block text-sm font-medium before:absolute before:inset-x-0 before:-inset-y-3 hover:underline [overflow-wrap:anywhere]">
         <span className="mr-2 text-fg-3">#{job.id}</span>{job.name}
       </Link>
       <div className="mt-0.5 break-all font-mono text-xs text-fg-3">{job.workdir}</div>

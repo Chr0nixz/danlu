@@ -93,6 +93,8 @@ func TestClassifyFailure(t *testing.T) {
 		{"reboot", FailureInput{Reboot: true}, "reboot", "服务器重启，任务中断"},
 		{"host oom event", FailureInput{OOMKnown: true, HostOOM: true}, "host_oom", "主机内存不足，被系统杀掉"},
 		{"exit 137 with oom event", FailureInput{ExitCode: &one37, OOMKnown: true, HostOOM: true}, "host_oom", "主机内存不足，被系统杀掉"},
+		{"dataloader worker oom", FailureInput{ExitCode: &one, OOMKnown: true, HostOOM: true, LogTail: "RuntimeError: DataLoader worker (pid 123) is killed by signal: Killed."}, "host_oom", "运行期间本机发生过 OOM kill"},
+		{"dataloader worker without oom event", FailureInput{ExitCode: &one, OOMKnown: true, LogTail: "RuntimeError: DataLoader worker (pid 123) is killed by signal: Killed."}, "exception", "Python 异常"},
 		{"exit 137 fallback", FailureInput{ExitCode: &one37}, "host_oom", "退出码 137，可能是主机内存不足"},
 		{"exit 137 without oom event", FailureInput{ExitCode: &one37, OOMKnown: true}, "signal", "被信号终止（SIGKILL）"},
 		{"exit 137 cuda oom without oom event", FailureInput{ExitCode: &one37, OOMKnown: true, LogTail: "CUDA out of memory"}, "cuda_oom", "CUDA 显存不足"},

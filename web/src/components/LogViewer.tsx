@@ -6,8 +6,9 @@ import { api } from '../lib/api'
 import { LogSearchDialog } from './LogSearchDialog'
 import { cx, ErrorBox, Spinner } from './ui'
 
+// 按钮 28px 高，点击区上下撑满 40px 高的工具栏。手机上工具栏 44px 高，按钮 36px 高、至少 40px 宽，点击区撑满工具栏
 const toolbarButton =
-  'relative inline-flex h-7 shrink-0 items-center gap-1.5 rounded px-2 text-xs text-[#a1a1a1] transition-colors duration-150 before:absolute before:inset-x-0 before:-inset-y-1.5 hover:bg-white/10 hover:text-white disabled:opacity-50 [&_svg]:size-3.5'
+  'relative inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded px-2 text-xs text-[#a1a1a1] transition-colors duration-150 before:absolute before:inset-x-0 before:-inset-y-1.5 hover:bg-white/10 hover:text-white disabled:opacity-50 max-sm:h-9 max-sm:min-w-10 max-sm:before:-inset-y-1 [&_svg]:size-3.5'
 
 export function LogViewer({ jobId, offset, onJump }: { jobId: number; offset?: number; onJump(offset?: number): void }) {
   const [searchOpen, setSearchOpen] = useState(false)
@@ -26,11 +27,11 @@ export function LogViewer({ jobId, offset, onJump }: { jobId: number; offset?: n
   }
   return (
     <>
-      <LogOutput key={offset ?? 'tail'} jobId={jobId} offset={offset} box={box} onTail={() => onJump()} tools={
+      <LogOutput key={offset ?? 'tail'} jobId={jobId} offset={offset} box={box} onTail={() => onJump()} compact={selected >= 0} tools={
         <>
           <button type="button" className={toolbarButton} aria-label="搜索日志" title="搜索日志" onClick={() => setSearchOpen(true)}>
             <Search aria-hidden />
-            <span className="hidden sm:inline">搜索</span>
+            <span className={selected >= 0 ? 'max-sm:hidden' : undefined}>搜索</span>
           </button>
           {selected >= 0 && (
             <div className="flex items-center" aria-label={`第 ${selected + 1} 条命中，共 ${matches.length} 条`}>
@@ -51,12 +52,14 @@ export function LogViewer({ jobId, offset, onJump }: { jobId: number; offset?: n
 }
 
 /** 先读日志末尾 256KB，再用 SSE 接收增量（见 @danlu/core 的 useJobLog） */
-function LogOutput({ jobId, offset, box, onTail, tools }: {
+function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
   jobId: number
   offset?: number
   box: RefObject<HTMLDivElement | null>
   onTail(): void
   tools: ReactNode
+  /** 工具栏里多了"上一个 / 下一个命中"时，手机上放不下文字，只留图标 */
+  compact: boolean
 }) {
   const { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart, windowLimited } = useJobLog(api, jobId, { offset })
   const [follow, setFollow] = useState(offset === undefined)
@@ -94,12 +97,19 @@ function LogOutput({ jobId, offset, box, onTail, tools }: {
     prev.current = { start, height: el.scrollHeight }
   }, [text, follow, start])
 
-  // 日志框从自己的位置铺到视口底部（见 index.css 的 .log-fit），上面的内容变高变矮时重新量
+  // 日志框从自己的位置铺到视口底部（见 index.css 的 .log-fit），上面的内容变高变矮时重新量。
+  // 手机上首屏里剩不下 120px 时换成高的一档（data-tall）：底部导航 56px、页面下边距 16px、面板边线 1px
   const [top, setTop] = useState(0)
+  const [cramped, setCramped] = useState(false)
+  const card = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
     const el = box.current
     if (!el) return
-    const measure = () => setTop(Math.round(el.getBoundingClientRect().top + window.scrollY))
+    const measure = () => {
+      const t = Math.round(el.getBoundingClientRect().top + window.scrollY)
+      setTop(t)
+      setCramped(window.innerWidth < 640 && window.innerHeight - t - 73 < 120)
+    }
     measure()
     const ro = new ResizeObserver(measure)
     ro.observe(document.body)
@@ -110,18 +120,27 @@ function LogOutput({ jobId, offset, box, onTail, tools }: {
     }
   }, [])
 
+  // 手机上定位浏览时日志框是高的一档，滚到让它占满屏幕的位置。放在这里而不是调用方：要等高度生效之后才滚得到
+  useLayoutEffect(() => {
+    if (offset === undefined || !matchMedia('(max-width: 639.98px)').matches) return
+    const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches
+    card.current?.scrollIntoView({ block: 'start', behavior: smooth ? 'smooth' : 'auto' })
+  }, [offset])
+
   const onScroll = () => {
     const el = box.current
     if (!el || offset !== undefined) return
     setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
   }
 
-  // 按钮 28px 高，点击区上下撑满 40px 高的工具栏（手机上只剩图标，又窄又矮）
   const tb = toolbarButton
+  // 手机上搜索、换行、下载都写出文字（触屏上看不到悬停提示）；放不下时只留图标
+  const label = compact ? 'max-sm:hidden' : undefined
 
   return (
-    <div className="overflow-hidden rounded-lg border border-line bg-[#0b0b0b]">
-      <div className="flex h-10 items-center gap-1 border-b border-white/10 px-2 text-xs text-[#8f8f8f]">
+    // scroll-mt：滚到这里时让出顶栏、标签页和间距，和详情页滚到标签页的位置一致
+    <div ref={card} className="overflow-hidden rounded-lg border border-line bg-[#0b0b0b] max-sm:scroll-mt-[7.5rem]">
+      <div className="flex h-10 items-center gap-1 border-b border-white/10 px-2 text-xs text-[#8f8f8f] max-sm:h-11 max-sm:gap-0.5">
         <span className="flex shrink-0 items-center gap-1.5 px-1.5">
           {offset !== undefined ? '定位浏览' : !ended ? (
             <>
@@ -147,11 +166,11 @@ function LogOutput({ jobId, offset, box, onTail, tools }: {
         )}
         <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title="自动换行" onClick={() => setWrap((w) => !w)}>
           <WrapText />
-          <span className="hidden sm:inline">换行</span>
+          <span className={label}>换行</span>
         </button>
         <a href={`/api/jobs/${jobId}/log/download`} className={tb} title="下载完整日志">
           <Download />
-          <span className="hidden sm:inline">下载</span>
+          <span className={label}>下载</span>
         </a>
       </div>
       <div className="relative">
@@ -159,12 +178,13 @@ function LogOutput({ jobId, offset, box, onTail, tools }: {
           ref={box}
           onScroll={onScroll}
           className="term log-fit overflow-auto px-3 py-2.5"
+          data-tall={cramped || offset !== undefined || undefined}
           style={top ? ({ '--log-top': `${top}px` } as CSSProperties) : undefined}
         >
           {loading ? (
             <Spinner />
           ) : error ? (
-            <ErrorBox error={error} />
+            <ErrorBox error={error} term />
           ) : raw === '' ? (
             <span className="text-[#8f8f8f]">{ended ? '没有输出' : '等待输出…'}</span>
           ) : (
@@ -175,7 +195,7 @@ function LogOutput({ jobId, offset, box, onTail, tools }: {
           <button
             type="button"
             onClick={() => offset !== undefined ? onTail() : setFollow(true)}
-            className="absolute bottom-3 right-4 inline-flex h-8 items-center gap-1 rounded-md bg-white px-3 text-xs font-medium text-black shadow-[0_4px_12px_rgb(0_0_0/0.4)] hover:bg-[#e6e6e6]"
+            className="absolute bottom-3 right-4 inline-flex h-8 items-center gap-1 rounded-md bg-white px-3 text-xs font-medium text-black shadow-[0_4px_12px_rgb(0_0_0/0.4)] hover:bg-[#e6e6e6] max-sm:h-11"
           >
             <ArrowDown className="size-3.5" />
             {offset !== undefined ? '回到日志末尾' : '回到底部'}

@@ -348,6 +348,7 @@ fail_fast          = "2m"     # 启动后不足这个时长就失败且仍有任
 silence_alert      = "30m"    # 日志静默提醒下限，0s 关闭
 disk_warn_gb       = 20       # GiB，0 关闭低余量提示
 disk_min_gb        = 2        # GiB，0 关闭调度保护；磁盘暂停在两倍余量时恢复
+unknown_gpu_memory_mb = 1024  # 可见进程无法解释的显存超过此值时，卡视为未知占用并不分配
 snapshot_max_file_mb  = 1
 snapshot_max_total_mb = 50
 

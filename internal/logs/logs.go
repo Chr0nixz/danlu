@@ -158,10 +158,11 @@ type Failure struct {
 	Reason string
 }
 
-// 主机内存不足的两种原因文字；推送按它区分确认和推测，不转发其他原因文字。
+// 主机内存相关原因文字；推送按失败类别生成文案，不转发其他原因文字。
 const (
-	ReasonHostOOM      = "主机内存不足，被系统杀掉"
-	ReasonMaybeHostOOM = "退出码 137，可能是主机内存不足"
+	ReasonHostOOM       = "主机内存不足，被系统杀掉"
+	ReasonMaybeHostOOM  = "退出码 137，可能是主机内存不足"
+	ReasonWorkerHostOOM = "运行期间本机发生过 OOM kill"
 )
 
 // ClassifyFailure 按阶段方案规定的优先级归类失败。日志只需传末尾片段。
@@ -172,6 +173,8 @@ func ClassifyFailure(in FailureInput) Failure {
 		return Failure{Kind: "start", Reason: in.StartError}
 	case in.Reboot && in.ExitCode == nil:
 		return Failure{Kind: "reboot", Reason: "服务器重启，任务中断"}
+	case in.HostOOM && dataLoaderWorkerKilled(in.LogTail):
+		return Failure{Kind: "host_oom", Reason: ReasonWorkerHostOOM}
 	case in.HostOOM && (exit137 || in.ExitCode == nil):
 		return Failure{Kind: "host_oom", Reason: ReasonHostOOM}
 	case exit137 && !in.OOMKnown:
@@ -205,6 +208,11 @@ func ClassifyFailure(in FailureInput) Failure {
 		return Failure{Kind: "exit", Reason: fmt.Sprintf("退出码 %d", *in.ExitCode)}
 	}
 	return Failure{Kind: "killed", Reason: "进程被外部终止（没有留下退出码）"}
+}
+
+func dataLoaderWorkerKilled(logTail string) bool {
+	text := strings.ToLower(StripANSI(logTail))
+	return strings.Contains(text, "dataloader worker") && strings.Contains(text, "killed by signal: killed")
 }
 
 func signalName(n int) string {

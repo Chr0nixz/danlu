@@ -70,7 +70,7 @@ func TestFailFastConfig(t *testing.T) {
 func TestDiskAndRetentionConfig(t *testing.T) {
 	c := Default()
 	c.Server.Port, c.Server.Entrance = 17699, "abcdef"
-	if c.Runtime.DiskWarnGB != 20 || c.Runtime.DiskMinGB != 2 || c.Retention.KeepDays != 90 || c.Retention.MaxTotalGB != 50 {
+	if c.Runtime.DiskWarnGB != 20 || c.Runtime.DiskMinGB != 2 || c.Runtime.UnknownGPUMemoryMB != 1024 || c.Retention.KeepDays != 90 || c.Retention.MaxTotalGB != 50 {
 		t.Fatal("磁盘与清理默认值不正确")
 	}
 	for _, target := range []*int64{&c.Runtime.DiskWarnGB, &c.Runtime.DiskMinGB, &c.Retention.KeepDays, &c.Retention.MaxTotalGB} {
@@ -84,6 +84,17 @@ func TestDiskAndRetentionConfig(t *testing.T) {
 			t.Fatalf("0 应允许关闭对应策略: %v", err)
 		}
 		*target = original
+	}
+}
+
+func TestUnknownGPUMemoryConfig(t *testing.T) {
+	c := Default()
+	c.Server.Port, c.Server.Entrance = 17699, "abcdef"
+	for _, value := range []int{0, -1} {
+		c.Runtime.UnknownGPUMemoryMB = value
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "unknown_gpu_memory_mb") {
+			t.Errorf("unknown_gpu_memory_mb = %d 应被拒绝: %v", value, err)
+		}
 	}
 }
 

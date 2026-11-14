@@ -106,12 +106,32 @@ export function progressRemaining(line: string): string | null {
   return days ? `${Number(days)}天${normalized}` : normalized
 }
 
+/**
+ * 剩余时间已经单独显示时，从 tqdm 的方括号里去掉"已用<剩余"和速率，后面的 loss 等指标留着：
+ * "[02:02<03:51, 1.13it/s, loss=0.3940]" → "[loss=0.3940]"；方括号里只有时间和速率时整个去掉。
+ */
+export function stripProgressTiming(text: string): string {
+  return text
+    .replace(
+      /\s*\[\s*(?:\d+d\s+)?[\d:]+<[^,\]]*(?:,\s*[^,\]]*\/[^,\]]*)?(?:,\s*([^\]]*))?\]/g,
+      (_, rest?: string) => (rest?.trim() ? ` [${rest.trim()}]` : ''),
+    )
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 /** 失败任务的原因：退出码加报错行（找不到报错行时用最后一行输出） */
 export function failText(j: Job): string {
   const why = j.fail_reason || (j.exit_code !== null ? `退出码 ${j.exit_code}` : '失败')
   const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
   return line ? `${why} · ${line}` : why
 }
+
+/**
+ * 和代码无关的失败分类：服务器重启、被外部终止、收到信号、多卡通信出错。
+ * 这类失败默认用原任务的快照原样重跑，界面上的重跑按钮也写"原样重跑"。
+ */
+export const sameCodeFailKinds = ['reboot', 'killed', 'signal', 'nccl']
 
 /** 项目名就是工作目录的最后一级：~/code/vit → vit */
 export function projectOf(workdir: string): string {

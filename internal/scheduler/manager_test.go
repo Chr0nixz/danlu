@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"danlu/internal/gpu"
+	"danlu/internal/logs"
 	"danlu/internal/runner"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
@@ -600,6 +601,19 @@ func TestUntrustedGPUData(t *testing.T) {
 	}
 }
 
+func TestUnknownGPUVideoMemoryKeepsCardBusy(t *testing.T) {
+	h := newHarness(t, 1)
+	h.gpus.set(func(f *fakeGPUs) {
+		f.gpus[0].MemUsedMB, f.gpus[0].MemTotalMB, f.gpus[0].UnknownMemMB = 4096, 24576, 2048
+	})
+	id := h.add(1)
+	h.tick()
+	h.expect(id, store.StatusQueued)
+	h.gpus.set(func(f *fakeGPUs) { f.gpus[0].UnknownMemMB = 0 })
+	h.tick()
+	h.expect(id, store.StatusRunning, 0)
+}
+
 // ---------- 启动 ----------
 
 func TestStartFailure(t *testing.T) {
@@ -662,6 +676,23 @@ func TestHostOOMClassification(t *testing.T) {
 	h.tick()
 	if j := h.job(a); j.FailKind != "host_oom" || j.FailReason != "主机内存不足，被系统杀掉" {
 		t.Fatalf("主机 OOM 归类错误: %+v", j)
+	}
+}
+
+func TestDataLoaderWorkerOOMClassification(t *testing.T) {
+	h := newHarness(t, 1)
+	a := h.add(0)
+	h.tick()
+	h.ex.mu.Lock()
+	h.ex.oomCount = 1
+	h.ex.mu.Unlock()
+	if err := os.WriteFile(h.ex.LogPath(a), []byte("RuntimeError: DataLoader worker (pid 123) is killed by signal: Killed.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.ex.finish(a, 1)
+	h.tick()
+	if j := h.job(a); j.FailKind != "host_oom" || j.FailReason != logs.ReasonWorkerHostOOM {
+		t.Fatalf("DataLoader worker OOM 归类错误: %+v", j)
 	}
 }
 

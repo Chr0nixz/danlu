@@ -22,5 +22,6 @@ export function useRecentFailures() {
 
 /** 队列状态，暂停或恢复后其他页面也立即看到 */
 export function useQueueState() {
-  return useQuery({ queryKey: ['queue'], queryFn: api.queue, refetchInterval: 3000 })
+  // staleTime：首页的横幅和"暂停队列"按钮先后挂载，不设的话后挂载的那个会再请求一次
+  return useQuery({ queryKey: ['queue'], queryFn: api.queue, refetchInterval: 3000, staleTime: 2000 })
 }

@@ -25,7 +25,7 @@ export function QueueBanner() {
       <Alert tone={queue.data.kind === 'manual' ? 'info' : 'warn'} role="status">
         <div className="flex flex-wrap items-center gap-3">
           <span className="min-w-0 flex-1">队列已暂停：{reason || '暂不启动排队任务'}</span>
-          <Button size="sm" className="max-sm:h-10" loading={resume.isPending} onClick={() => resume.mutate()}>
+          <Button size="sm" loading={resume.isPending} onClick={() => resume.mutate()}>
             <Play aria-hidden />
             继续队列
           </Button>
@@ -52,7 +52,8 @@ export function QueuePauseButton() {
       variant="ghost"
       size="sm"
       title="暂停队列，运行中的任务继续"
-      className="-mr-2 text-xs text-fg-3 max-sm:-my-1 max-sm:h-11"
+      // 手机上按钮比 36px 的分组标题高，上下各伸出 4px；z-10 让伸出去的部分也点得到，不被相邻的任务行盖住
+      className="relative z-10 -mr-2 text-xs text-fg-3 max-sm:-my-1"
       loading={pause.isPending}
       onClick={() => pause.mutate()}
     >

@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, GitCompareArrows, Search, Star, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
-import { JobList, JobListHeader, JobRow } from '../components/JobRow'
+import { JobList, JobListHeader, JobRow, type RowSelect } from '../components/JobRow'
 import { QueueBanner } from '../components/QueueControls'
 import { StarError } from '../components/StarButton'
 import { Button, buttonClass, Card, ErrorBox, Input, Kbd, Segmented, SkeletonRows, StatusIcon, Empty } from '../components/ui'
@@ -35,22 +35,16 @@ export function Jobs() {
   const q = params.get('q') ?? ''
   const searchRef = useRef<HTMLInputElement>(null)
   const location = useLocation()
+  // 对比选择模式：整行变成勾选的点击区（见 JobRow），点到行不会跳走；翻页、筛选和搜索都不丢已选的任务
   const [selection, setSelection] = useState<number[] | null>(null)
-  const selectJob = (job: Job) => {
+  const selectJob = (job: Job): RowSelect | undefined => {
     if (!selection) return undefined
     const checked = selection.includes(job.id)
-    return (
-      <label className="relative z-10 -ml-2 grid size-10 shrink-0 place-items-center sm:ml-0 sm:size-8">
-        <input
-          type="checkbox"
-          className="size-4 disabled:opacity-40"
-          aria-label={`选择任务 #${job.id} ${job.name}`}
-          checked={checked}
-          disabled={!checked && selection.length === 2}
-          onChange={() => setSelection((ids) => ids && (checked ? ids.filter((id) => id !== job.id) : [...ids, job.id]))}
-        />
-      </label>
-    )
+    return {
+      checked,
+      disabled: !checked && selection.length === 2,
+      onToggle: () => setSelection((ids) => ids && (checked ? ids.filter((id) => id !== job.id) : [...ids, job.id])),
+    }
   }
 
   // 从其他页面按 / 跳过来时直接聚焦搜索框
@@ -99,6 +93,12 @@ export function Jobs() {
     enabled: pathSearch,
     retry: false,
   })
+  // 手机上"只看标星"和"对比"一起放在标题行：六个状态的筛选条占满一整行，放在它旁边会多折出一行
+  const starToggle = (className: string) => (
+    <Button size="sm" variant={starred ? 'secondary' : 'ghost'} className={className} aria-pressed={starred} onClick={() => set({ starred: starred ? '' : '1', page: '' })}>
+      <Star aria-hidden className={starred ? 'fill-current' : ''} />只看标星
+    </Button>
+  )
   const total = pathSearch ? trace.data?.matches.length ?? 0 : res.data?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / SIZE))
   const from = total ? (page - 1) * SIZE + 1 : 0
@@ -127,6 +127,7 @@ export function Jobs() {
           ) : (
             <Button size="sm" variant="ghost" onClick={() => setSelection([])}><GitCompareArrows aria-hidden />对比</Button>
           )}
+          {!pathSearch && starToggle('sm:hidden')}
         </div>
         <div className="relative sm:ml-auto sm:w-80">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-3" aria-hidden />
@@ -147,7 +148,7 @@ export function Jobs() {
                 setText('')
                 searchRef.current?.focus()
               }}
-              className="absolute right-1 top-1/2 grid size-7 -translate-y-1/2 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg"
+              className="absolute right-1 top-1/2 grid size-7 -translate-y-1/2 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg max-sm:size-9"
               aria-label="清空搜索"
             >
               <X className="size-4" aria-hidden />
@@ -161,25 +162,25 @@ export function Jobs() {
       </div>
 
       {!pathSearch && <div className="flex flex-wrap items-center gap-2">
-        <div className="-mx-4 max-w-[calc(100%+2rem)] overflow-x-auto px-4 sm:mx-0 sm:max-w-full sm:px-0">
+        {/* 手机上六个状态铺满一整行，只写文字不带图标，"已取消"才不会滑出屏幕；更窄的屏幕上仍然可以横滑 */}
+        <div className="-mx-4 max-w-[calc(100%+2rem)] overflow-x-auto px-4 max-sm:w-[calc(100%+2rem)] sm:mx-0 sm:max-w-full sm:px-0">
           <Segmented
             label="按状态筛选"
             value={status}
             onChange={(v) => set({ status: v, page: '' })}
+            className="max-sm:flex max-sm:w-full"
             options={filters.map((f) => ({
               value: f.value,
               label: (
                 <>
-                  {f.value && <StatusIcon status={f.value} className="size-3.5" decorative />}
+                  {f.value && <StatusIcon status={f.value} className="size-3.5 max-sm:hidden" decorative />}
                   {f.label}
                 </>
               ),
             }))}
           />
         </div>
-        <Button size="sm" variant={starred ? 'secondary' : 'ghost'} aria-pressed={starred} onClick={() => set({ starred: starred ? '' : '1', page: '' })}>
-          <Star aria-hidden className={starred ? 'fill-current' : ''} />只看标星
-        </Button>
+        {starToggle('max-sm:hidden')}
         {recent && (
           <button
             type="button"
@@ -210,7 +211,7 @@ export function Jobs() {
                   <div className="px-3 pt-2 text-xs text-fg-3 sm:px-4">
                     来源：{match.source === 'output_dir' ? '输出目录' : match.source === 'run_code' ? '快照重跑目录' : match.source === 'danlu_json' ? 'danlu.json' : '可能是'}
                   </div>
-                  <JobRow job={match.job} selection={selectJob(match.job)} />
+                  <JobRow job={match.job} select={selectJob(match.job)} />
                 </div>
               ))}
             </div>
@@ -220,7 +221,7 @@ export function Jobs() {
         ) : (
           <JobList
             header={<JobListHeader selecting={selection !== null} />}
-            selection={selection ? selectJob : undefined}
+            select={selection ? (job) => selectJob(job)! : undefined}
             jobs={res.data?.jobs ?? []}
             empty={
               q || status || recent || starred || batch ? (

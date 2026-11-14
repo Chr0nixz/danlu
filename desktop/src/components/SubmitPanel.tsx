@@ -189,7 +189,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
                   onChange={(e) => set({ gpus: Math.max(0, Number(e.target.value) || 0) })}
                 />
                 <span className="text-fg-3">
-                  张卡，空闲 {gpus.filter((g) => !g.job && !g.external.length).length} / {gpus.length}；不够时排队
+                  张卡，空闲 {gpus.filter((g) => !g.job && !g.external.length && !(g.unknown_mem_mb ?? 0)).length} / {gpus.length}；不够时排队
                 </span>
               </div>
             ) : (
@@ -360,7 +360,8 @@ function PinnedPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[];
     <div className="flex flex-wrap gap-1.5">
       {gpus.map((g) => {
         const on = value.includes(g.index)
-        const note = g.job ? `任务 ${g.job.id}` : g.external.length ? '外部进程' : '空闲'
+        const unknown = (g.unknown_mem_mb ?? 0) > 0
+        const note = g.job ? `任务 ${g.job.id}` : g.external.length ? '外部进程' : unknown ? '未知显存占用' : '空闲'
         return (
           <button
             key={g.index}
@@ -374,7 +375,7 @@ function PinnedPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[];
             )}
           >
             <span className="num text-[11.5px] font-medium">GPU {g.index}</span>
-            <span className={cx('text-[11px]', g.external.length ? 'text-warn' : 'text-fg-3')}>{note}</span>
+            <span className={cx('text-[11px]', g.external.length || unknown ? 'text-warn' : 'text-fg-3')}>{note}</span>
           </button>
         )
       })}

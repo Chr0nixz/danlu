@@ -4,7 +4,6 @@ package doctor
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -23,12 +22,13 @@ func platformChecks(ctx context.Context, paths config.Paths) []Check {
 		return append(systemdUnavailable(ctx, "systemd 用户服务文件不存在: "+unit), timeSyncCheck(ctx))
 	}
 	checks := []Check{{"service_unit", "ok", "systemd 服务单元", unit, ""}}
-	out, err := output(ctx, "systemctl", "--user", "show", "danlu.service", "-p", "LoadState", "-p", "ActiveState", "-p", "KillMode", "-p", "Restart")
+	out, err := output(ctx, "systemctl", "--user", "show", "danlu.service", "-p", "LoadState", "-p", "ActiveState", "-p", "KillMode", "-p", "Restart", "-p", "OOMPolicy")
 	if err != nil {
 		checks = append(checks,
 			Check{"service_active", "fail", "danlu 服务", "systemctl 查询失败: " + err.Error(), "运行 danlu install-service 并检查 systemctl --user status danlu"},
 			Check{"service_kill_mode", "warn", "训练进程隔离", "无法确认 KillMode=process", "确认服务单元使用 KillMode=process"},
 			Check{"service_restart", "warn", "服务自动重启", "无法确认 Restart=on-failure", "确认服务单元使用 Restart=on-failure"},
+			Check{"service_oom_policy", "warn", "训练 OOM 不重启服务", "无法确认 OOMPolicy=continue", "确认服务单元使用 OOMPolicy=continue"},
 			Check{"service_load", "warn", "systemd 服务加载", "无法确认 LoadState=loaded", "运行 systemctl --user daemon-reload"},
 		)
 	} else {
@@ -37,6 +37,7 @@ func platformChecks(ctx context.Context, paths config.Paths) []Check {
 			propertyCheck("service_active", "danlu 服务", props["ActiveState"], "active", "检查 systemctl --user status danlu"),
 			propertyCheck("service_kill_mode", "训练进程隔离", props["KillMode"], "process", "运行 danlu install-service，确认 KillMode=process"),
 			propertyCheck("service_restart", "服务自动重启", props["Restart"], "on-failure", "运行 danlu install-service，确认 Restart=on-failure"),
+			oomPolicyCheck(props["OOMPolicy"]),
 		)
 		if props["LoadState"] != "loaded" {
 			checks = append(checks, Check{"service_load", "fail", "systemd 服务单元", "LoadState=" + props["LoadState"], "运行 systemctl --user daemon-reload"})
@@ -52,15 +53,9 @@ func systemdUnavailable(ctx context.Context, detail string) []Check {
 		{"service_active", "fail", "danlu 服务", "无法确认服务处于运行状态", "检查 systemctl --user status danlu"},
 		{"service_kill_mode", "warn", "训练进程隔离", "无法确认 KillMode=process", "确认服务单元使用 KillMode=process"},
 		{"service_restart", "warn", "服务自动重启", "无法确认 Restart=on-failure", "确认服务单元使用 Restart=on-failure"},
+		{"service_oom_policy", "warn", "训练 OOM 不重启服务", "无法确认 OOMPolicy=continue", "确认服务单元使用 OOMPolicy=continue"},
 		lingerCheck(ctx),
 	}
-}
-
-func propertyCheck(id, title, got, want, fix string) Check {
-	if got == want {
-		return Check{id, "ok", title, got, ""}
-	}
-	return Check{id, "fail", title, fmt.Sprintf("期望 %s，实际 %s", want, valueOrNA(got)), fix}
 }
 
 func lingerCheck(ctx context.Context) Check {

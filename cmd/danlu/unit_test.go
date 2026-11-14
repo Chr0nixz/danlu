@@ -16,6 +16,7 @@ func TestRenderServiceUnitQuotes(t *testing.T) {
 		`Environment="DANLU_HOME=/home/u/.danlu"`,
 		`Environment="PATH=/usr/bin:/opt/CUDA 12/bin:/x%%y"`,
 		"KillMode=process",
+		"OOMPolicy=continue",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("unit 里缺少 %q：\n%s", want, got)

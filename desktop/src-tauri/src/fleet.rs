@@ -155,6 +155,8 @@ struct GpuLite {
     job: Option<JobRefLite>,
     #[serde(default)]
     external: Vec<ProcLite>,
+    #[serde(default)]
+    unknown_mem_mb: i64,
 }
 
 #[derive(Deserialize)]
@@ -403,12 +405,16 @@ fn evaluate(
             }
         }
 
-        // 外部进程挡住了排在最前面的任务：没有外部进程的话本来能跑
+        // 外部进程或未知显存占用挡住队首：没有这些占用时本来能跑
         if let Some(head) = jobs.iter().filter(|j| j.status == "queued").min_by_key(|j| j.queue_pos.unwrap_or(i64::MAX))
         {
-            let busy_external: HashSet<i64> =
-                gpus.iter().filter(|g| g.job.is_none() && !g.external.is_empty()).map(|g| g.index).collect();
-            let free = gpus.iter().filter(|g| g.job.is_none() && g.external.is_empty()).count() as i64;
+            let busy_external: HashSet<i64> = gpus
+                .iter()
+                .filter(|g| g.job.is_none() && (!g.external.is_empty() || g.unknown_mem_mb > 0))
+                .map(|g| g.index)
+                .collect();
+            let free = gpus.iter().filter(|g| g.job.is_none() && g.external.is_empty() && g.unknown_mem_mb <= 0).count()
+                as i64;
             let blocked = if head.gpus_pinned.is_empty() {
                 head.gpus_req > free && head.gpus_req <= free + busy_external.len() as i64
             } else {
@@ -417,18 +423,26 @@ fn evaluate(
             if blocked {
                 let key = format!("blocked:{name}:{}", head.id);
                 seen_blocked.insert(key.clone());
-                let text = format!("{} {} 在排队，被外部进程占着的卡挡住了", job_key(name, head.id), head.name);
+                let unknown = if head.gpus_pinned.is_empty() {
+                    busy_external.iter().any(|index| gpus.iter().any(|g| g.index == *index && g.unknown_mem_mb > 0))
+                } else {
+                    head.gpus_pinned.iter().any(|index| gpus.iter().any(|g| g.index == *index && g.unknown_mem_mb > 0))
+                };
+                let text = if unknown {
+                    format!("{} {} 在排队，被未知显存占用的卡挡住了", job_key(name, head.id), head.name)
+                } else {
+                    format!("{} {} 在排队，被外部进程占着的卡挡住了", job_key(name, head.id), head.name)
+                };
                 if !read.contains(&key) {
                     alerts.push(Alert { key: key.clone(), server: name.into(), kind: "blocked", text: text.clone() });
                 }
                 if fleet.track.lock().unwrap().blocked_notified.insert(key) {
-                    notify(
-                        app,
-                        fleet,
-                        "排队的任务被外部进程挡住",
-                        &text,
-                        Focus { kind: "job", key: job_key(name, head.id) },
-                    );
+                    let title = if unknown {
+                        "排队的任务被未知显存占用挡住"
+                    } else {
+                        "排队的任务被外部进程挡住"
+                    };
+                    notify(app, fleet, title, &text, Focus { kind: "job", key: job_key(name, head.id) });
                 }
             }
         }

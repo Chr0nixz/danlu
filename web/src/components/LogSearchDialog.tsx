@@ -20,13 +20,15 @@ export function LogSearchDialog({ keyword, onChange, term, result, loading, erro
     <Dialog title="搜索日志" onClose={onClose} wide className="max-sm:h-[50dvh] max-sm:open:flex max-sm:flex-col"
       footer={<Button size="sm" onClick={onClose}>关闭</Button>}>
       <form className="mt-2 flex gap-2" onSubmit={(e) => { e.preventDefault(); if (valid && !loading) onSearch(keyword.trim()) }}>
-        <Input type="search" className="min-w-0 flex-1 max-sm:h-11 max-sm:text-base" aria-label="日志关键词" autoFocus
+        {/* 不用浏览器自带的蓝色清除图标 */}
+        <Input type="search" className="min-w-0 flex-1 max-sm:text-base [&::-webkit-search-cancel-button]:appearance-none" aria-label="日志关键词" autoFocus
           placeholder="输入关键词" value={keyword} onChange={(e) => onChange(e.target.value)} />
-        <Button type="submit" variant="primary" className="max-sm:h-11" disabled={!valid} loading={loading}>搜索</Button>
+        <Button type="submit" variant="primary" disabled={!valid} loading={loading}>搜索</Button>
       </form>
       <div className="flex flex-wrap gap-1.5" aria-label="快捷关键词">
         {shortcuts.map((word) => (
-          <Button size="sm" key={word} disabled={loading} onClick={() => { onChange(word); onSearch(word) }}>{word}</Button>
+          // 半屏面板里高度紧，快捷词在手机上是 36px，和最近用过的工作目录小标签一样
+          <Button size="sm" key={word} className="max-sm:h-9!" disabled={loading} onClick={() => { onChange(word); onSearch(word) }}>{word}</Button>
         ))}
       </div>
       <ErrorBox error={error} />

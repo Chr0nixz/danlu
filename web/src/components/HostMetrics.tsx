@@ -109,7 +109,8 @@ function Metric({ title, icon, value, percent, detail, samples, getValue, emptyL
         <h3 className="text-ui font-medium">{title}</h3>
         <span className="ml-auto font-mono text-base font-semibold tabular-nums sm:text-lg">{value}</span>
       </div>
-      {detail && <div className="mb-1 truncate text-right text-xs text-fg-3" title={detail}>{detail}</div>}
+      {/* 只有内存有这行说明；CPU 也留出同样的高度，两栏的细条和曲线才在同一条线上 */}
+      <div className="mb-1 h-4 truncate text-right text-xs text-fg-3" title={detail}>{detail}</div>
       {percent == null ? <div className="mt-2 text-xs text-fg-3">{emptyLabel}</div> : <Meter value={percent} className="mt-2 bg-fg-3" />}
       <div className="mt-2 grid grid-cols-[2rem_minmax(0,1fr)] gap-1.5">
         <div className="flex h-[56px] flex-col justify-between text-[11px] leading-none text-fg-3" aria-hidden>

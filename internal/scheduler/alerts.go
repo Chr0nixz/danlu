@@ -147,11 +147,15 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 		case (head.GPUsReq > 0 || len(head.GPUsPinned) > 0) && (gpuErr != nil || len(gpus) == 0):
 			reason = "GPU 数据不可用"
 		default:
-			var blocked bool
-			reason, blocked = allocationWait(gpus, running, head)
+			var blocked, unknownBlock bool
+			reason, blocked, unknownBlock = allocationWait(gpus, running, head)
 			if blocked {
 				id := head.ID
-				raise(fmt.Sprintf("blocked:%d", id), &id, store.AlertData{Type: "blocked"})
+				kind := "blocked"
+				if unknownBlock {
+					kind = "blocked_unknown"
+				}
+				raise(fmt.Sprintf("blocked:%d", id), &id, store.AlertData{Type: kind})
 			}
 		}
 		waitReasons[head.ID] = reason
@@ -191,7 +195,7 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 	return nil
 }
 
-func allocationWait(gpus []gpu.GPU, running []*store.Job, head *store.Job) (string, bool) {
+func allocationWait(gpus []gpu.GPU, running []*store.Job, head *store.Job) (string, bool, bool) {
 	all := []int{}
 	owned := map[int]bool{}
 	assigned := map[int64][]int{}
@@ -202,20 +206,28 @@ func allocationWait(gpus []gpu.GPU, running []*store.Job, head *store.Job) (stri
 		}
 	}
 	busy := maps.Clone(owned)
-	var external string
+	var blocker string
+	unknownBlock := false
 	for _, g := range gpus {
 		all = append(all, g.Index)
+		if g.UnknownMemMB > 0 {
+			busy[g.Index] = true
+			if blocker == "" && (len(head.GPUsPinned) == 0 || slices.Contains(head.GPUsPinned, g.Index)) {
+				blocker = fmt.Sprintf("GPU %d 有未知显存占用（%d MiB）", g.Index, g.UnknownMemMB)
+				unknownBlock = true
+			}
+		}
 		for _, p := range g.Procs {
 			if p.JobID == 0 || !slices.Contains(assigned[p.JobID], g.Index) {
 				busy[g.Index] = true
-				if external == "" && (len(head.GPUsPinned) == 0 || slices.Contains(head.GPUsPinned, g.Index)) {
-					external = fmt.Sprintf("GPU %d 有外部进程（PID %d）", g.Index, p.PID)
+				if blocker == "" && (len(head.GPUsPinned) == 0 || slices.Contains(head.GPUsPinned, g.Index)) {
+					blocker = fmt.Sprintf("GPU %d 有外部进程（PID %d）", g.Index, p.PID)
 				}
 			}
 		}
 	}
 	if _, fits := Allocate(all, busy, head.GPUsReq, head.GPUsPinned); fits {
-		return "等待调度", false
+		return "等待调度", false, false
 	}
 	free := 0
 	for _, index := range all {
@@ -227,9 +239,9 @@ func allocationWait(gpus []gpu.GPU, running []*store.Job, head *store.Job) (stri
 	if len(head.GPUsPinned) > 0 {
 		reason = fmt.Sprintf("等待指定 GPU %v", head.GPUsPinned)
 	}
-	if external != "" {
-		reason += "；" + external
+	if blocker != "" {
+		reason += "；" + blocker
 	}
 	_, fitsWithoutExternal := Allocate(all, owned, head.GPUsReq, head.GPUsPinned)
-	return reason, external != "" && fitsWithoutExternal
+	return reason, blocker != "" && fitsWithoutExternal, unknownBlock
 }

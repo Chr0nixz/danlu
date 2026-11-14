@@ -52,8 +52,8 @@ function Summary({ running, queued }: { running: number; queued: number }) {
         <span className="text-fg-2">排队</span>
       </span>
       {failed > 0 && (
-        // 手机上把点击区撑到 40px 高，不改变排版
-        <Link to="/jobs?status=failed&recent=24h" className="inline-flex items-center gap-1.5 hover:underline max-sm:-my-2.5 max-sm:py-2.5" title="最近 24 小时内失败的任务">
+        // 手机上把点击区撑到 44px 高，不改变排版
+        <Link to="/jobs?status=failed&recent=24h" className="inline-flex items-center gap-1.5 hover:underline max-sm:-my-3 max-sm:py-3" title="最近 24 小时内失败的任务">
           <StatusIcon status="failed" decorative />
           <b className="font-semibold text-fail">{failed}</b>
           {/* 手机上写短的 24h，和"失败"之间不留整个间距，摘要才放得下一行 */}
@@ -129,7 +129,7 @@ export function Home() {
           icon={<StatusIcon status="succeeded" className="text-fg-3" decorative />}
           title="最近完成"
           extra={
-            <Link to="/jobs" className="-mr-2 inline-flex h-9 items-center gap-1 px-2 text-xs text-fg-3 hover:text-fg">
+            <Link to="/jobs" className="relative z-10 -mr-2 inline-flex h-9 items-center gap-1 px-2 text-xs text-fg-3 hover:text-fg max-sm:-my-1 max-sm:h-11">
               全部任务
               <ArrowRight className="size-3.5" aria-hidden />
             </Link>

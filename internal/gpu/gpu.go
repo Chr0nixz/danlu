@@ -26,15 +26,16 @@ type Proc struct {
 }
 
 type GPU struct {
-	Index      int     `json:"index"`
-	UUID       string  `json:"uuid"`
-	Name       string  `json:"name"`
-	Util       int     `json:"util"`
-	MemUsedMB  int     `json:"mem_used_mb"`
-	MemTotalMB int     `json:"mem_total_mb"`
-	TempC      int     `json:"temp_c"`
-	PowerW     float64 `json:"power_w"`
-	Procs      []Proc  `json:"procs"`
+	Index        int     `json:"index"`
+	UUID         string  `json:"uuid"`
+	Name         string  `json:"name"`
+	Util         int     `json:"util"`
+	MemUsedMB    int     `json:"mem_used_mb"`
+	MemTotalMB   int     `json:"mem_total_mb"`
+	UnknownMemMB int     `json:"unknown_mem_mb,omitempty"`
+	TempC        int     `json:"temp_c"`
+	PowerW       float64 `json:"power_w"`
+	Procs        []Proc  `json:"procs"`
 }
 
 type Source interface {
@@ -54,7 +55,11 @@ type MachineSource interface {
 // NewSource 默认用 nvidia-smi；设置 DANLU_FAKE_GPUS=N 时用假 GPU（测试用）。
 // runRoot 是本实例的 <数据目录>/run，只有运行目录在它下面的进程才算本实例的任务；
 // 为空时不识别任务进程（比如 doctor 只看卡在不在）。
-func NewSource(runRoot string) Source {
+func NewSource(runRoot string, thresholds ...int) Source {
+	unknownMemoryThresholdMB := 1024
+	if len(thresholds) > 0 && thresholds[0] > 0 {
+		unknownMemoryThresholdMB = thresholds[0]
+	}
 	if n, _ := strconv.Atoi(os.Getenv("DANLU_FAKE_GPUS")); n > 0 {
 		busy := map[int]bool{}
 		for _, s := range strings.Split(os.Getenv("DANLU_FAKE_BUSY"), ",") {
@@ -64,13 +69,14 @@ func NewSource(runRoot string) Source {
 		}
 		return &Fake{N: n, Busy: busy}
 	}
-	return SMI{RunRoot: runRoot}
+	return SMI{RunRoot: runRoot, UnknownMemoryThresholdMB: unknownMemoryThresholdMB}
 }
 
 // ---------- nvidia-smi ----------
 
 type SMI struct {
-	RunRoot string // 见 NewSource
+	RunRoot                  string // 见 NewSource
+	UnknownMemoryThresholdMB int
 }
 
 const gpuQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
@@ -116,7 +122,22 @@ func (s SMI) Query(ctx context.Context) ([]GPU, error) {
 		p := Proc{PID: a.PID, UsedMemMB: a.UsedMemMB, User: procfs.Owner(a.PID), JobID: procfs.JobOf(a.PID, s.RunRoot)}
 		gpus[i].Procs = append(gpus[i].Procs, p)
 	}
+	markUnknownMemory(gpus, apps, s.UnknownMemoryThresholdMB)
 	return gpus, nil
+}
+
+func markUnknownMemory(gpus []GPU, apps []App, thresholdMB int) {
+	visible := make(map[string]int, len(apps))
+	for _, app := range apps {
+		visible[app.UUID] += app.UsedMemMB
+	}
+	for i := range gpus {
+		gpus[i].UnknownMemMB = 0
+		unaccounted := max(0, gpus[i].MemUsedMB-visible[gpus[i].UUID])
+		if unaccounted > thresholdMB {
+			gpus[i].UnknownMemMB = unaccounted
+		}
+	}
 }
 
 var machineVersionRE = regexp.MustCompile(`Driver Version:\s*([^\s|]+).*CUDA Version:\s*([^\s|]+)`)

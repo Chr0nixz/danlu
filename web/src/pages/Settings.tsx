@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, CircleCheck, CircleX, Download, LogOut, Monitor, Moon, QrCode, RefreshCw, ShieldCheck, Sun, TriangleAlert } from 'lucide-react'
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useId, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { Button, buttonClass, Card, Dialog, ErrorBox, Field, Input, Segmented, Select, Skeleton } from '../components/ui'
+import { ShortcutList } from '../components/Shortcuts'
+import { Button, buttonClass, Card, cx, Dialog, ErrorBox, Field, hitArea, Input, Segmented, Select, Skeleton } from '../components/ui'
 import { api } from '../lib/api'
 import { fmtTime, type DeviceToken, type NotifyStatus } from '@danlu/core'
 import { getTheme, setTheme, type Theme } from '../lib/theme'
@@ -21,6 +22,8 @@ const actionLabel: Record<string, string> = {
   job_memo: '修改任务备注',
   job_notify: '修改结束提醒',
 }
+
+const doctorLevel: Record<string, string> = { ok: '通过', warn: '警告', fail: '失败' }
 
 type CaPlatform = 'android' | 'ios' | 'macos' | 'windows' | 'other'
 
@@ -142,6 +145,8 @@ export function Settings() {
               <div key={check.id} className="grid gap-x-3 gap-y-0.5 py-2 sm:grid-cols-[150px_minmax(0,1fr)]">
                 <div className="flex items-center gap-2 text-ui font-medium">
                   {check.level === 'ok' ? <CircleCheck className="size-4 text-ok" aria-hidden /> : check.level === 'warn' ? <TriangleAlert className="size-4 text-warn" aria-hidden /> : <CircleX className="size-4 text-fail" aria-hidden />}
+                  {/* 结论只靠图标的形状和颜色表达，读屏另外读出来 */}
+                  <span className="sr-only">{doctorLevel[check.level]}：</span>
                   {check.title}
                 </div>
                 <div className="min-w-0 break-all text-ui text-fg-2">
@@ -175,6 +180,13 @@ export function Settings() {
         />
       </Section>
 
+      {/* 有鼠标或触控板的设备才显示（多半也有键盘） */}
+      <div className="hidden pointer-fine:block">
+        <Section title="快捷键" desc="不在输入框里时生效。随时按 ? 也能打开这份一览。">
+          <ShortcutList />
+        </Section>
+      </div>
+
       {st.notify && <NotifySection status={st.notify} />}
 
       {st.ca_available && <CaInstallSection fingerprint={st.ca_fingerprint ?? ''} platform={caPlatform} onPlatform={setCaPlatform} />}
@@ -195,7 +207,7 @@ export function Settings() {
                 <span className={e.action === 'login_fail' || e.action === 'login_locked' ? 'font-medium text-fail' : 'font-medium'}>
                   {actionLabel[e.action] ?? e.action}
                 </span>
-                <span className="col-span-2 min-w-0 truncate text-fg-3 sm:col-span-1">
+                <span className="col-span-2 -my-2 min-w-0 truncate py-2 text-fg-3 sm:col-span-1">
                   <AuditDetail text={e.detail} />
                 </span>
               </div>
@@ -311,7 +323,7 @@ function AuditDetail({ text }: { text: string }) {
   if (!m) return <>{text}</>
   return (
     <>
-      <Link to={`/jobs/${m[1]}`} className="text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg">
+      <Link to={`/jobs/${m[1]}`} className={cx(hitArea, 'text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg')}>
         #{m[1]}
       </Link>
       {m[2]}
@@ -400,7 +412,12 @@ function PasswordSection() {
   const [old, setOld] = useState('')
   const [next, setNext] = useState('')
   const [again, setAgain] = useState('')
-  const [err, setErr] = useState<unknown>(null)
+  // 字段错误写在字段下方，不用浏览器自带的必填气泡（和登录页、新建页一样）
+  const [errs, setErrs] = useState<Partial<Record<'old' | 'next' | 'again', string>>>({})
+  const uid = useId()
+  const ids = { old: `${uid}-old`, next: `${uid}-next`, again: `${uid}-again` }
+  const field = (k: keyof typeof ids) => ({ id: ids[k], 'aria-invalid': !!errs[k] || undefined, 'aria-describedby': errs[k] ? `${ids[k]}-err` : undefined })
+  const clear = (k: keyof typeof ids) => errs[k] && setErrs((e) => ({ ...e, [k]: undefined }))
   const m = useMutation({
     mutationFn: () => api.changePassword(old, next),
     onSuccess: () => {
@@ -411,12 +428,22 @@ function PasswordSection() {
   })
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    setErr(null)
-    if (next !== again) return setErr(new Error('两次输入的新密码不一致'))
+    const found: typeof errs = {}
+    if (!old) found.old = '请填写当前密码'
+    if (!next) found.next = '请填写新密码'
+    else if (Array.from(next).length < 8) found.next = '新密码至少 8 位'
+    if (!again) found.again = '请再输入一次新密码'
+    else if (next && next !== again) found.again = '两次输入的新密码不一致'
+    setErrs(found)
+    const first = (['old', 'next', 'again'] as const).find((k) => found[k])
+    if (first) {
+      document.getElementById(ids[first])?.focus()
+      return
+    }
     m.mutate()
   }
   return (
-    <form onSubmit={submit}>
+    <form onSubmit={submit} noValidate>
       <Section
         title="修改密码"
         desc="至少 8 位。修改后，其他设备上的登录会失效。"
@@ -435,17 +462,17 @@ function PasswordSection() {
         }
       >
         <div className="grid gap-3 sm:grid-cols-3">
-          <Field label="当前密码">
-            <Input type="password" value={old} onChange={(e) => setOld(e.target.value)} autoComplete="current-password" required />
+          <Field label="当前密码" error={errs.old} errorId={`${ids.old}-err`}>
+            <Input {...field('old')} type="password" value={old} onChange={(e) => (setOld(e.target.value), clear('old'))} autoComplete="current-password" />
           </Field>
-          <Field label="新密码">
-            <Input type="password" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" minLength={8} required />
+          <Field label="新密码" error={errs.next} errorId={`${ids.next}-err`}>
+            <Input {...field('next')} type="password" value={next} onChange={(e) => (setNext(e.target.value), clear('next'))} autoComplete="new-password" />
           </Field>
-          <Field label="再输入一次">
-            <Input type="password" value={again} onChange={(e) => setAgain(e.target.value)} autoComplete="new-password" required />
+          <Field label="再输入一次" error={errs.again} errorId={`${ids.again}-err`}>
+            <Input {...field('again')} type="password" value={again} onChange={(e) => (setAgain(e.target.value), clear('again'))} autoComplete="new-password" />
           </Field>
         </div>
-        <ErrorBox error={err ?? m.error} className="mt-3" />
+        <ErrorBox error={m.error} className="mt-3" />
       </Section>
     </form>
   )

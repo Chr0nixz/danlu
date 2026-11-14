@@ -28,7 +28,7 @@ export function StarButton({ job, label = false }: { job: Job; label?: boolean }
   const action = job.starred ? '取消标星' : '标星'
   return (
     <Button
-      size={label ? 'sm' : 'icon-sm'} variant={label ? 'secondary' : 'ghost'}
+      size={label ? 'sm' : 'icon-sm'} variant="ghost"
       className={cx(!label && 'max-md:size-11', job.starred ? 'text-fg' : 'text-fg-3')}
       loading={star.pending} aria-pressed={!!job.starred} aria-label={`${action}任务 #${job.id}`}
       title={star.title}

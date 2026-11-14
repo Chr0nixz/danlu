@@ -29,6 +29,19 @@ func TestParseApps(t *testing.T) {
 	}
 }
 
+func TestMarkUnknownMemory(t *testing.T) {
+	gpus := []GPU{{UUID: "GPU-a", MemUsedMB: 3000}, {UUID: "GPU-b", MemUsedMB: 1500}}
+	apps := []App{{UUID: "GPU-a", UsedMemMB: 1900}, {UUID: "GPU-b", UsedMemMB: 1400}}
+	markUnknownMemory(gpus, apps, 1024)
+	if gpus[0].UnknownMemMB != 1100 || gpus[1].UnknownMemMB != 0 {
+		t.Fatalf("未知显存计算错误: %+v", gpus)
+	}
+	markUnknownMemory(gpus, apps, 1100)
+	if gpus[0].UnknownMemMB != 0 {
+		t.Fatalf("等于阈值时不应标记未知占用: %+v", gpus[0])
+	}
+}
+
 func TestParseMachineVersions(t *testing.T) {
 	output := "| NVIDIA-SMI 560.94 Driver Version: 560.94 CUDA Version: 12.6 |"
 	driver, cuda, err := parseMachineVersions(output)

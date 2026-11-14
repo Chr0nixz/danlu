@@ -34,7 +34,7 @@
 | # | 怎么做 | 应该看到 | 贴回来 |
 |---|---|---|---|
 | B1 | 看 `collect.sh` 报告里的 `smi-query-gpu.txt` 和面板首页 | 每张卡的型号、显存、利用率、温度、功耗和 `nvidia-smi` 一致 | 报告 |
-| B2 | 有其他用户或容器在用卡时跑一次 `collect.sh` | `gpu-procs.txt` 里能看到他们的进程；面板上那几张卡标成外部进程 | 报告。没有这种情况就写"没条件" |
+| B2 | 有其他用户或容器在用卡时跑一次 `collect.sh` | `gpu-procs.txt` 里能看到他们的进程；面板上那几张卡标成外部进程；如果进程列表看不到但显存仍超过配置阈值，面板标成未知显存占用且不分配 | 报告。没有这种情况就写"没条件" |
 | B3 | 第 A5 条取消后，在 SSH 里运行 `bash ~/s0/jobs/kill_worker.sh <id> dry` | 列不出任何进程 | 输出 |
 | B4 | 提交 `torchrun --nproc_per_node=2 ddp_dummy.py --minutes 10`，跑起来后 `bash ~/s0/jobs/kill_worker.sh <id>` 杀掉一个 worker | 任务失败；记下面板上显示的原因（预计是"退出码 N"或"进程被外部终止"）；卡上没有残留进程 | 任务详情截图；日志文件 `~/.danlu/logs/<id>.log` |
 | B5 | 在电脑上用 `ssh <服务器> danlu ca > danlu-ca.crt` 取回 CA，传到安卓手机安装，再打开面板 | 不再有证书警告 | 截图；如果装 CA 的步骤卡住了，写下卡在哪一步（S3 要写装 CA 的说明） |
@@ -52,8 +52,9 @@
 | C4 | `torchrun --nproc_per_node=2 fail_nccl.py` | 1–2 分钟后 NCCL watchdog 超时 |
 | C5 | 第 B4 条的日志 | `kill -9` 一个 worker 之后 torchrun 的输出 |
 | C6 | 平时真实训练里遇到的任何失败 | 越多越好 |
+| C7 | 在隔离 cgroup 内运行一个 DataLoader worker 被内核 OOM kill 的任务 | 日志出现 `DataLoader worker ... killed by signal: Killed`，任务归类为“运行期间本机发生过 OOM kill”，danlu 服务不重启 | 日志、任务详情和 `systemctl --user show danlu -p OOMPolicy` 输出 |
 
-主机内存不足（被 OOM killer 杀掉）这次不造：在共享的服务器上可能误杀别人的进程。S1 会用 cgroup 限额安全地造。
+OOM 验收只在 C7 指定的隔离 cgroup 内进行；不要在共享服务器上直接制造内存压力，以免误杀其他进程。
 
 ## D. 六个使用场景
 

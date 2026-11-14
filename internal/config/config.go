@@ -76,6 +76,7 @@ type Runtime struct {
 	SilenceAlert       Duration `toml:"silence_alert"`
 	DiskWarnGB         int64    `toml:"disk_warn_gb"`
 	DiskMinGB          int64    `toml:"disk_min_gb"`
+	UnknownGPUMemoryMB int      `toml:"unknown_gpu_memory_mb"`
 	SnapshotMaxFileMB  int      `toml:"snapshot_max_file_mb"`
 	SnapshotMaxTotalMB int      `toml:"snapshot_max_total_mb"`
 }
@@ -108,6 +109,7 @@ func Default() *Config {
 			SilenceAlert:       Duration{30 * time.Minute},
 			DiskWarnGB:         20,
 			DiskMinGB:          2,
+			UnknownGPUMemoryMB: 1024,
 			SnapshotMaxFileMB:  1,
 			SnapshotMaxTotalMB: 50,
 		},
@@ -240,6 +242,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Runtime.SnapshotMaxFileMB <= 0 || c.Runtime.SnapshotMaxTotalMB <= 0 {
 		return errors.New("快照大小上限必须大于 0")
+	}
+	if c.Runtime.UnknownGPUMemoryMB <= 0 {
+		return errors.New("runtime.unknown_gpu_memory_mb 必须大于 0")
 	}
 	// 这几项为 0 或负数时没有合理含义：max_failures = 0 第一次输错就锁定，
 	// kill_grace = 0 取消时立刻强杀，session_ttl / lockout 为 0 时会话立即过期、锁定不生效

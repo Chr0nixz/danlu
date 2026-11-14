@@ -3,14 +3,12 @@ import { Check, FolderOpen, History, Minus, Plus } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { gpuBusy, useGpus } from '../components/GpuGrid'
+import { modKey } from '../components/Shortcuts'
 import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
-import { failText, type GPU, type Job } from '@danlu/core'
+import { failText, sameCodeFailKinds, type GPU, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 
 type JobFormMode = 'new' | 'copy' | 'rerun'
-
-/** 和代码无关的失败分类：重跑时默认用原任务的快照 */
-const sameCodeKinds = ['reboot', 'killed', 'signal', 'nccl']
 
 function rerunName(name: string) {
   const m = name.match(/^(.*)-r(\d+)$/)
@@ -31,8 +29,46 @@ function parseEnv(text: string): Record<string, string> {
   return env
 }
 
+/**
+ * 没提交的表单内容存在 sessionStorage 里：手机浏览器回收标签页、误点了别处或刷新之后，回来还在。
+ * 只存和默认值不一样的内容；提交成功或点"重新填写"后清掉；关掉标签页就没有了。
+ */
+interface Draft {
+  name: string
+  memo: string
+  workdir: string
+  condaEnv: string
+  cmd: string
+  mode: 'count' | 'pinned'
+  count: number
+  pinned: number[]
+  envText: string
+  inheritBashrc: boolean
+  useSnapshot: boolean
+}
+
+function readDraft(key: string): Partial<Draft> | null {
+  try {
+    const raw = sessionStorage.getItem(key)
+    const draft: unknown = raw ? JSON.parse(raw) : null
+    return draft && typeof draft === 'object' ? (draft as Partial<Draft>) : null
+  } catch {
+    return null
+  }
+}
+
+function writeDraft(key: string, draft: Draft | null) {
+  try {
+    if (draft) sessionStorage.setItem(key, JSON.stringify(draft))
+    else sessionStorage.removeItem(key)
+  } catch {
+    // 存储不可用时只是不保留草稿
+  }
+}
+
 export function NewJob() {
   const [params] = useSearchParams()
+  const [generation, setGeneration] = useState(0)
   const copyId = Number(params.get('copy')) || null
   const sourceId = copyId ?? (Number(params.get('from')) || null)
   const formMode: JobFormMode = copyId ? 'copy' : sourceId ? 'rerun' : 'new'
@@ -46,14 +82,14 @@ export function NewJob() {
     )
   }
   if (sourceId && source.error) return <ErrorBox error={source.error} />
-  return <JobForm key={`${formMode}-${sourceId ?? ''}`} source={source.data ?? null} formMode={formMode} />
+  return <JobForm key={`${formMode}-${sourceId ?? ''}-${generation}`} source={source.data ?? null} formMode={formMode} onReset={() => setGeneration((g) => g + 1)} />
 }
 
 type Field = 'workdir' | 'cmd' | 'gpu' | 'memo' | 'env'
 
 const notifyPreferenceKey = 'danlu.notify-done'
 
-function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMode }) {
+function JobForm({ source, formMode, onReset }: { source: Job | null; formMode: JobFormMode; onReset(): void }) {
   const nav = useNavigate()
   const gpus = useGpus()
   const conda = useQuery({ queryKey: ['conda'], queryFn: api.condaEnvs, staleTime: 60_000 })
@@ -64,11 +100,13 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
 
   const rerun = formMode === 'rerun'
   const canRestore = !!source?.snapshot_ok && !source.pruned_at && (source.pid > 0 || source.ended_at !== null)
+  const draftKey = `danlu.draft.${formMode}.${source?.id ?? ''}`
+  const [saved] = useState(() => readDraft(draftKey))
   // 被重启、外部终止这类和代码无关的失败，默认用原任务的快照原样重跑；其余默认用工作目录现在的代码（多半刚改过）
-  const [useSnapshot, setUseSnapshot] = useState(() => rerun && canRestore && sameCodeKinds.includes(source?.fail_kind ?? ''))
+  const [useSnapshot, setUseSnapshot] = useState(() => saved?.useSnapshot ?? (rerun && canRestore && sameCodeFailKinds.includes(source?.fail_kind ?? '')))
   const snapshotSelected = rerun && useSnapshot
-  const [name, setName] = useState(source && rerun ? rerunName(source.name) : source?.name ?? '')
-  const [memo, setMemo] = useState('')
+  const [name, setName] = useState(saved?.name ?? (source && rerun ? rerunName(source.name) : source?.name ?? ''))
+  const [memo, setMemo] = useState(saved?.memo ?? '')
   const [notifyDone, setNotifyDone] = useState(() => {
     try {
       return localStorage.getItem(notifyPreferenceKey) === '1'
@@ -76,16 +114,27 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
       return false
     }
   })
-  const [workdir, setWorkdir] = useState(source?.workdir ?? '')
+  const [workdir, setWorkdir] = useState(saved?.workdir ?? source?.workdir ?? '')
   const activeWorkdir = snapshotSelected ? source!.workdir : workdir
-  const [condaEnv, setCondaEnv] = useState(source?.conda_env ?? '')
-  const [cmd, setCmd] = useState(source?.cmd ?? '')
-  const [mode, setMode] = useState<'count' | 'pinned'>(source?.gpus_pinned.length ? 'pinned' : 'count')
-  const [count, setCount] = useState(source?.gpus_req ?? 1)
-  const [pinned, setPinned] = useState<number[]>(source?.gpus_pinned ?? [])
-  const [envText, setEnvText] = useState(source ? Object.entries(source.env).map(([k, v]) => `${k}=${v}`).join('\n') : '')
-  const [inheritBashrc, setInheritBashrc] = useState(source?.inherit_bashrc ?? false)
+  const [condaEnv, setCondaEnv] = useState(saved?.condaEnv ?? source?.conda_env ?? '')
+  const [cmd, setCmd] = useState(saved?.cmd ?? source?.cmd ?? '')
+  const [mode, setMode] = useState<'count' | 'pinned'>(saved?.mode ?? (source?.gpus_pinned.length ? 'pinned' : 'count'))
+  const [count, setCount] = useState(saved?.count ?? source?.gpus_req ?? 1)
+  const [pinned, setPinned] = useState<number[]>(saved?.pinned ?? source?.gpus_pinned ?? [])
+  const [envText, setEnvText] = useState(saved?.envText ?? (source ? Object.entries(source.env).map(([k, v]) => `${k}=${v}`).join('\n') : ''))
+  const [inheritBashrc, setInheritBashrc] = useState(saved?.inheritBashrc ?? source?.inherit_bashrc ?? false)
   const [errors, setErrors] = useState<Partial<Record<Field, string>>>({})
+
+  // 草稿：和刚打开时不一样才存。默认的 conda 环境是列表到了之后才选上的，不算用户改过
+  const draft: Draft = { name, memo, workdir, condaEnv, cmd, mode, count, pinned, envText, inheritBashrc, useSnapshot }
+  const draftJson = JSON.stringify(draft)
+  const pristine = useRef(saved ? null : draftJson)
+  const submitted = useRef(false)
+  useEffect(() => {
+    if (submitted.current) return
+    writeDraft(draftKey, draftJson === pristine.current ? null : draft)
+    // draftJson 变了才需要重存
+  }, [draftKey, draftJson])
 
   // 改了哪个字段就清掉哪个字段的错误
   const edit =
@@ -96,17 +145,42 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
     }
 
   // 新建任务时默认选第一个非 base 的环境。只在环境列表第一次到达时选一次，之后用户选了"不使用 conda"也要保留
-  const condaDefaulted = useRef(false)
+  // 恢复出来的草稿里"不使用 conda"也是用户选的，同样保留
+  const condaDefaulted = useRef(!!saved)
   useEffect(() => {
     const envs = conda.data?.envs
     if (source || condaDefaulted.current || !envs?.length) return
     condaDefaulted.current = true
-    setCondaEnv((current) => current || (envs.find((e) => e.name !== 'base')?.name ?? envs[0].name))
+    const pick = envs.find((e) => e.name !== 'base')?.name ?? envs[0].name
+    if (condaEnv) return
+    setCondaEnv(pick)
+    // 从刚打开时的内容算，不能用现在的：环境列表到之前用户可能已经填了别的字段
+    if (pristine.current) pristine.current = JSON.stringify({ ...(JSON.parse(pristine.current) as Draft), condaEnv: pick })
   }, [conda.data, source])
+
+  // 用键盘进来（按 N、点重跑）时焦点直接落在第一个要填的字段上：新建是工作目录，重跑和复制多半是改命令。
+  // 触屏上不自动聚焦，免得一进页面就弹出输入法
+  useEffect(() => {
+    if (!matchMedia('(pointer: fine)').matches) return
+    document.getElementById(source ? ids.cmd : ids.workdir)?.focus({ preventScroll: true })
+  }, [])
+
+  // Ctrl/⌘ + Enter 提交，焦点不在表单里也有效
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || document.querySelector('dialog[open]')) return
+      e.preventDefault()
+      formRef.current?.requestSubmit()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const submit = useMutation({
     mutationFn: api.submit,
     onSuccess: (j, request) => {
+      submitted.current = true
+      writeDraft(draftKey, null)
       try {
         localStorage.setItem(notifyPreferenceKey, request.notify_done ? '1' : '0')
       } catch {
@@ -161,6 +235,7 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
   const pick = (i: number) => gpuList.find((g) => g.index === i)
   // 指定了被外部进程占着的卡：丹炉永远不会分配它，严格先来先跑下这个任务会一直堵在队首
   const pinnedExternal = mode === 'pinned' ? pinned.filter((i) => pick(i)?.external.length) : []
+  const pinnedUnknown = mode === 'pinned' ? pinned.filter((i) => (pick(i)?.unknown_mem_mb ?? 0) > 0) : []
   const pinnedBusy = mode === 'pinned' && pinned.some((i) => {
     const g = pick(i)
     return g && gpuBusy(g)
@@ -174,10 +249,6 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
       ref={formRef}
       noValidate
       onSubmit={onSubmit}
-      onKeyDown={(e) => {
-        // Ctrl/⌘ + Enter 提交
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) formRef.current?.requestSubmit()
-      }}
       className="mx-auto max-w-3xl space-y-4"
     >
       <div>
@@ -193,6 +264,25 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
           </p>
         )}
       </div>
+      {saved && (
+        <Alert>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span className="min-w-0 flex-1">已恢复上次没提交的内容。</span>
+            <button
+              type="button"
+              className="relative shrink-0 font-medium text-fg underline decoration-fg/30 underline-offset-2 before:absolute before:-inset-x-2 before:-inset-y-3 hover:decoration-fg"
+              data-draft-reset
+              onClick={() => {
+                submitted.current = true
+                writeDraft(draftKey, null)
+                onReset()
+              }}
+            >
+              重新填写
+            </button>
+          </div>
+        </Alert>
+      )}
       {rerun && source && !snapshotSelected && <CodeChangeNotice source={source} workdir={workdir} />}
 
       <Card className="divide-y divide-line">
@@ -208,7 +298,8 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
         )}
         <FormRow label={snapshotSelected ? '原工作目录' : '工作目录'} hint={snapshotSelected ? '从这里补齐数据和权重。命令在恢复后的目录中执行。' : '服务器上的绝对路径，输入或按 ↓ 列出子目录。启动时会自动保存一份代码快照。'} htmlFor={ids.workdir}>
           {snapshotSelected ? (
-            <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="font-mono" />
+            // 只读：衬底色、浅一级的强边线、次要文字色，悬停和聚焦时边线不变，看起来不像可以编辑的输入框
+            <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="cursor-default border-line-strong! bg-subtle! font-mono text-[12.5px] text-fg-2! hover:border-line-strong! focus:border-line-strong! focus:ring-0!" />
           ) : <WorkdirInput
             id={ids.workdir}
             describedBy={describe('workdir')}
@@ -264,14 +355,15 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
             />
             {mode === 'count' ? (
               <div className="flex items-center gap-3">
-                <div role="group" aria-label="GPU 张数" className="inline-flex h-9 items-stretch overflow-hidden rounded-md border border-line-strong">
-                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40" onClick={() => setCount((c) => Math.max(0, c - 1))} disabled={count <= 0} aria-label="少一张">
+                {/* 步进器相当于一个数字输入框，边线和输入框一致 */}
+                <div role="group" aria-label="GPU 张数" className="inline-flex h-9 items-stretch overflow-hidden rounded-md border border-field-line max-sm:h-[46px]">
+                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40 max-sm:w-11" onClick={() => setCount((c) => Math.max(0, c - 1))} disabled={count <= 0} aria-label="少一张">
                     <Minus className="size-4" aria-hidden />
                   </button>
-                  <output aria-live="polite" className="grid w-10 place-items-center border-x border-line-strong text-sm font-semibold">
+                  <output aria-live="polite" className="grid w-10 place-items-center border-x border-field-line text-sm font-semibold">
                     {count}
                   </output>
-                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40" onClick={() => setCount((c) => Math.min(total || 64, c + 1))} disabled={total > 0 && count >= total} aria-label="多一张">
+                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40 max-sm:w-11" onClick={() => setCount((c) => Math.min(total || 64, c + 1))} disabled={total > 0 && count >= total} aria-label="多一张">
                     <Plus className="size-4" aria-hidden />
                   </button>
                 </div>
@@ -284,6 +376,10 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
             {pinnedExternal.length > 0 ? (
               <p className="text-xs leading-relaxed text-warn">
                 GPU {pinnedExternal.join(', ')} 被外部进程占用，丹炉不会分配它。任务会一直排在队首、挡住后面所有任务，直到那个进程退出。
+              </p>
+            ) : pinnedUnknown.length > 0 ? (
+              <p className="text-xs leading-relaxed text-warn">
+                GPU {pinnedUnknown.join(', ')} 有进程列表无法解释的显存占用，丹炉不会分配它。任务会排在队首，直到显存释放或状态恢复。
               </p>
             ) : (
               willQueue && <p className="text-xs leading-relaxed text-warn">现在空闲的卡不够，提交后会排队，等卡空出来自动开始。</p>
@@ -326,7 +422,7 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
         </FormRow>
 
         <FormRow label="Bash 环境" hint="缺失或加载超时会启动失败">
-          <label className="inline-flex min-h-8 items-center gap-2 text-ui text-fg-2">
+          <label className="inline-flex min-h-8 items-center gap-2 text-ui text-fg-2 max-sm:min-h-11">
             <input
               type="checkbox"
               checked={inheritBashrc}
@@ -337,14 +433,14 @@ function JobForm({ source, formMode }: { source: Job | null; formMode: JobFormMo
           </label>
         </FormRow>
 
-        {/* 手机上提交栏吸在底部导航上方，长表单不用滚到底才能提交 */}
-        <div className="flex flex-col-reverse gap-3 rounded-b-lg bg-subtle px-4 py-3 max-sm:sticky max-sm:bottom-[calc(3.5rem+env(safe-area-inset-bottom))] max-sm:z-10 sm:flex-row sm:items-center sm:px-5">
+        {/* 提交栏吸在视口底部（手机上在底部导航上方），长表单不用滚到底才能提交 */}
+        <div className="sticky bottom-0 z-10 flex flex-col-reverse gap-3 rounded-b-lg bg-subtle px-4 py-3 max-sm:bottom-[calc(3.5rem+env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:px-5">
           <ErrorBox error={submit.error} className="sm:mr-auto" />
           <div className="flex gap-2 sm:ml-auto">
             <Button onClick={() => nav(-1)}>返回</Button>
             <Button type="submit" variant="primary" loading={submit.isPending} disabled={submit.isPending || (snapshotSelected && !canRestore)} className="flex-1 sm:flex-none">
               提交任务
-              <Kbd>Ctrl ↵</Kbd>
+              <Kbd>{modKey} ↵</Kbd>
             </Button>
           </div>
         </div>
@@ -358,8 +454,8 @@ function GpuPicker({ id, describedBy, gpus, value, onChange }: { id: string; des
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
       {gpus.map((g, n) => {
         const on = value.includes(g.index)
-        const state = g.job ? `#${g.job.id} 在用` : g.external.length ? '外部进程' : '空闲'
-        const tone = g.job ? 'text-run' : g.external.length ? 'text-warn' : 'text-ok'
+        const state = g.job ? `#${g.job.id} 在用` : g.external.length ? '外部进程' : (g.unknown_mem_mb ?? 0) > 0 ? '未知显存占用' : '空闲'
+        const tone = g.job ? 'text-run' : g.external.length || (g.unknown_mem_mb ?? 0) > 0 ? 'text-warn' : 'text-ok'
         return (
           <button
             type="button"
