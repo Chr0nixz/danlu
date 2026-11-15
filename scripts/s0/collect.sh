@@ -38,34 +38,16 @@ run cgroup.txt sh -c 'cat /proc/self/cgroup; echo; p=$(systemctl --user show dan
 run journal.txt journalctl --user -u danlu -n 500 --no-pager
 
 # ---------- GPU ----------
-# 和 internal/gpu/gpu.go 里的两条查询完全一致
+# 和 internal/gpu/gpu.go 里的查询完全一致
 runt smi-full.txt nvidia-smi
-runt smi-query-gpu.txt nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits
+runt smi-query-gpu.txt nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,pci.bus_id --format=csv,noheader,nounits
 runt smi-compute-apps.txt nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits
+runt smi-pids.txt nvidia-smi -q -d PIDS
 runt smi-driver.txt nvidia-smi --query-gpu=index,name,driver_version,persistence_mode,pci.bus_id --format=csv
 runt smi-time.txt sh -c 'time nvidia-smi --query-gpu=index --format=csv,noheader >/dev/null'
 
-# compute-apps 里的每个 pid：属于谁、命令是什么、danlu 能不能读到它的 environ（认不认得出是哪个任务）
-{
-  echo "pid | 用户 | environ 可读 | DANLU_RUN_DIR | 命令"
-  timeout 20 nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | while read -r pid; do
-    pid=${pid// /}
-    [ -z "$pid" ] && continue
-    if [ ! -d "/proc/$pid" ]; then
-      echo "$pid | （本机 /proc 里没有这个 pid，可能在容器的 pid 命名空间里）"
-      continue
-    fi
-    user=$(ps -o user= -p "$pid" 2>/dev/null)
-    cmd=$(ps -o args= -p "$pid" 2>/dev/null | cut -c1-120)
-    if env=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null); then
-      readable=是
-      job=$(echo "$env" | sed -n 's/^DANLU_RUN_DIR=//p')
-    else
-      readable=否 job=
-    fi
-    echo "$pid | $user | $readable | ${job:--} | $cmd"
-  done
-} >"$OUT/gpu-procs.txt" 2>&1
+# 每张卡上的每个进程（含图形进程）：属于谁、danlu 认不认得出是哪个任务、它自己看到的选卡变量
+bash "$(dirname -- "${BASH_SOURCE[0]}")/gpu-procs.sh" >"$OUT/gpu-procs.txt" 2>&1
 
 # ---------- conda ----------
 run conda.txt sh -c 'command -v conda; conda --version; conda info --base; conda env list'

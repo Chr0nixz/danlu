@@ -348,6 +348,10 @@ func (s *Service) consume(next *state, e store.Event, fastFailure *completion) {
 					return
 				}
 				message.Title, message.Body = s.hostname+" · 训练 GPU 被外部占用", fmt.Sprintf("任务 #%d 使用的 GPU %v 出现外部进程 PID %d。", *e.JobID, data.GPUs, data.PID)
+				if data.OtherJob > 0 {
+					message.Title = s.hostname + " · 训练 GPU 上有别的任务的进程"
+					message.Body = fmt.Sprintf("任务 #%d 使用的 GPU %v 上出现了任务 #%d 的进程，那个任务跑到了没分给它的卡上。", *e.JobID, data.GPUs, data.OtherJob)
+				}
 			case "blocked", "blocked_unknown":
 				if e.JobID == nil {
 					return

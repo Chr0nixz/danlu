@@ -39,6 +39,7 @@
 | B4 | 提交 `torchrun --nproc_per_node=2 ddp_dummy.py --minutes 10`，跑起来后 `bash ~/s0/jobs/kill_worker.sh <id>` 杀掉一个 worker | 任务失败；记下面板上显示的原因（预计是"退出码 N"或"进程被外部终止"）；卡上没有残留进程 | 任务详情截图；日志文件 `~/.danlu/logs/<id>.log` |
 | B5 | 在电脑上用 `ssh <服务器> danlu ca > danlu-ca.crt` 取回 CA，传到安卓手机安装，再打开面板 | 不再有证书警告 | 截图；如果装 CA 的步骤卡住了，写下卡在哪一步（S3 要写装 CA 的说明） |
 | B6 | （可选）能重启机器的话：跑着一个 `ddp_dummy.py --minutes 60` 时重启 | 开机后不用登录，danlu 就已经在运行（linger）；那个任务显示"服务器重启，任务中断" | 开机后的任务详情截图；`collect.sh` 报告 |
+| B7 | （可选，有 EGL/OpenGL 渲染负载时）跑一个 MuJoCo/robosuite 类任务，同时运行 `bash ~/s0/gpu-procs.sh` | 脚本能看到图形进程；面板把属于任务的图形进程归到任务，别的任务的进程合并成一行；任务分到卡但卡上还没有它的进程时显示"卡上暂无该任务的进程" | 脚本输出和 GPU 面板截图 |
 
 ## C. 失败日志样本（给 S1 的失败归类用）
 

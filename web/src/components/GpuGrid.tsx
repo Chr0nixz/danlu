@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { mb, type GPU } from '@danlu/core'
+import { mb, type GPU, type Proc } from '@danlu/core'
 import { api } from '../lib/api'
 import { Alert, Card, cx, ErrorBox, Meter, Skeleton, StatusIcon } from './ui'
 
@@ -9,6 +9,36 @@ export function useGpus() {
 }
 
 export const gpuBusy = (g: GPU) => !!g.job || g.external.length > 0 || (g.unknown_mem_mb ?? 0) > 0
+
+/** 占着别人卡的进程叫什么：别的任务跑过来的进程写任务号，其余是外部进程 */
+export const strayLabel = (p: Proc) => `${p.job_id ? `#${p.job_id} 的` : '外部'}${p.graphics ? '图形' : ''}进程`
+
+type Stray = { key: string; job: number; user: string; procs: Proc[]; mem: number }
+
+/** 按任务（外部进程按用户）合并：EGL 渲染一个任务在一张卡上就能有几十个进程 */
+function groupStray(procs: Proc[]): Stray[] {
+  const out: Stray[] = []
+  for (const p of procs) {
+    const key = p.job_id ? `job:${p.job_id}` : `user:${p.user}`
+    let s = out.find((x) => x.key === key)
+    if (!s) out.push((s = { key, job: p.job_id, user: p.user, procs: [], mem: 0 }))
+    s.procs.push(p)
+    s.mem += p.used_mem_mb
+  }
+  return out
+}
+
+function strayTitle(s: Stray) {
+  const pids = s.procs.map((p) => p.pid)
+  const list = pids.slice(0, 12).join(', ') + (pids.length > 12 ? ' …' : '')
+  const graphics = s.procs.filter((p) => p.graphics).length
+  const kinds = graphics
+    ? `，其中 ${graphics} 个是图形进程（EGL/OpenGL 渲染，按自己的设备编号选卡，不受 CUDA_VISIBLE_DEVICES 限制）`
+    : ''
+  return s.job
+    ? `任务 #${s.job} 的进程（pid ${list}${kinds}），但这张卡没有分给它：程序自己选了卡，或是已结束任务的残留。这张卡不会被分配`
+    : `外部进程（pid ${list}${s.user ? `，用户 ${s.user}` : ''}${kinds}）：不是 danlu 启动的，这张卡不会被分配`
+}
 
 /** "NVIDIA GeForce RTX 4090" → "RTX 4090" */
 export const shortName = (name: string) => name.replace(/^NVIDIA\s+/, '').replace(/^GeForce\s+/, '')
@@ -58,21 +88,22 @@ export function GpuGrid() {
       {/* 手机：每张卡一行 */}
       <Card className="divide-y divide-line overflow-hidden sm:hidden">
         {gpus.map((g) => (
-          <GpuRow key={g.index} g={g} showModel={mixed} />
+          <GpuRow key={g.index} g={g} showModel={mixed} procsKnown={!data?.error} />
         ))}
       </Card>
 
       {/* 电脑：每张卡一个面板 */}
       <div className="hidden gap-3 sm:grid sm:grid-cols-2 lg:grid-cols-4">
         {gpus.map((g) => (
-          <GpuPanel key={g.index} g={g} showModel={mixed} />
+          <GpuPanel key={g.index} g={g} showModel={mixed} procsKnown={!data?.error} />
         ))}
       </div>
     </section>
   )
 }
 
-function Occupant({ g }: { g: GPU }) {
+// procsKnown：这一轮查到了卡上的进程。查不到时不能说任务没在用这张卡
+function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
   return (
     <div className="min-w-0 space-y-0.5 text-ui">
       {g.job && (
@@ -83,25 +114,39 @@ function Occupant({ g }: { g: GPU }) {
           <span className="truncate font-medium">{g.job.name}</span>
         </Link>
       )}
-      {g.external.map((p) => (
-        <div
-          key={p.pid}
-          className="flex min-w-0 items-center gap-1.5 text-warn"
-          title={`外部进程 ${p.pid}${p.user ? ` · ${p.user}` : ''}：不是 danlu 启动的进程，这张卡不会被分配`}
-        >
-          <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
-          <span className="truncate">
-            外部进程 {p.pid}
-            {p.user && ` · ${p.user}`}
-          </span>
-          {/* 显存放在截断范围外，窄的时候宁可截掉用户名 */}
-          <span className="shrink-0">· {mb(p.used_mem_mb)}</span>
+      {g.job && procsKnown && !g.procs.some((p) => p.job_id === g.job!.id) && (
+        <div className="text-xs text-fg-3" title="这张卡分给了这个任务，但卡上还没有它的进程：可能还在启动，也可能程序没有用这张卡">
+          卡上暂无该任务的进程
         </div>
-      ))}
+      )}
+      {groupStray(g.external).map((s) => {
+        const one = s.procs.length === 1 ? s.procs[0] : null
+        const text = (
+          <>
+            <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
+            <span className="truncate">
+              {one ? `${strayLabel(one)} ${one.pid}` : s.job ? `#${s.job} 的 ${s.procs.length} 个进程` : `${s.procs.length} 个外部进程`}
+              {!s.job && s.user && ` · ${s.user}`}
+            </span>
+            {/* 显存放在截断范围外，窄的时候宁可截掉用户名 */}
+            <span className="shrink-0">· {mb(s.mem)}</span>
+          </>
+        )
+        // 本实例任务的进程跑到了没分给它的卡上：程序自己选了卡、渲染落到了别的卡，或者是已结束任务的残留
+        return s.job ? (
+          <Link key={s.key} to={`/jobs/${s.job}`} className="flex min-w-0 items-center gap-1.5 text-warn hover:underline" title={strayTitle(s)}>
+            {text}
+          </Link>
+        ) : (
+          <div key={s.key} className="flex min-w-0 items-center gap-1.5 text-warn" title={strayTitle(s)}>
+            {text}
+          </div>
+        )
+      })}
       {(g.unknown_mem_mb ?? 0) > 0 && (
         <div
           className="flex items-center gap-1.5 text-warn"
-          title="进程列表无法解释这部分显存，这张卡不会被分配"
+          title="nvidia-smi 列出的进程解释不了这部分显存（比如别的容器里的进程），这张卡不会被分配"
         >
           <span className="size-1.5 shrink-0 rounded-full bg-warn" />
           未知显存占用 · {mb(g.unknown_mem_mb ?? 0)}
@@ -117,7 +162,7 @@ function Occupant({ g }: { g: GPU }) {
   )
 }
 
-function GpuPanel({ g, showModel }: { g: GPU; showModel: boolean }) {
+function GpuPanel({ g, showModel, procsKnown }: { g: GPU; showModel: boolean; procsKnown: boolean }) {
   const s = stateOf(g)
   const memPct = g.mem_total_mb ? (g.mem_used_mb / g.mem_total_mb) * 100 : 0
   return (
@@ -149,13 +194,13 @@ function GpuPanel({ g, showModel }: { g: GPU; showModel: boolean }) {
         </div>
       </div>
       <div className="mt-3 border-t border-line pt-2">
-        <Occupant g={g} />
+        <Occupant g={g} procsKnown={procsKnown} />
       </div>
     </Card>
   )
 }
 
-function GpuRow({ g, showModel }: { g: GPU; showModel: boolean }) {
+function GpuRow({ g, showModel, procsKnown }: { g: GPU; showModel: boolean; procsKnown: boolean }) {
   const s = stateOf(g)
   return (
     <div className="px-3 py-2.5">
@@ -171,7 +216,7 @@ function GpuRow({ g, showModel }: { g: GPU; showModel: boolean }) {
         <span className="w-9 shrink-0 text-right text-xs text-fg-3">{g.temp_c}°</span>
       </div>
       <div className={cx('mt-1 flex items-center gap-2 pl-[3.75rem]')}>
-        <Occupant g={g} />
+        <Occupant g={g} procsKnown={procsKnown} />
         {showModel && <span className="ml-auto shrink-0 truncate text-xs text-fg-3">{shortName(g.name)}</span>}
       </div>
     </div>

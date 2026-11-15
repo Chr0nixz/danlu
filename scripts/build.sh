@@ -17,4 +17,4 @@ if [[ -z "${VERSION:-}" ]]; then
 fi
 cd "$ROOT"
 GOOS=linux GOARCH=$ARCH CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "dist/danlu-linux-$ARCH" ./cmd/danlu
-echo "已生成 dist/danlu-linux-$ARCH（$VERSION）"
+echo "已生成 dist/danlu-linux-${ARCH}（${VERSION}）"

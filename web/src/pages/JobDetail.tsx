@@ -188,6 +188,10 @@ export function JobDetail() {
                 <GitCompareArrows aria-hidden />
                 和…对比
               </Link>
+              <Link to={`/new?copy=${j.id}`} className={minor} title="复制任务设置，提交为独立的新任务">
+                <Copy aria-hidden />
+                复制任务
+              </Link>
               {canCancel && (
                 <Link to={`/new?from=${j.id}`} className={minor} title={rerunTitle}>
                   <RotateCw aria-hidden />
@@ -227,6 +231,10 @@ export function JobDetail() {
                     {rerunLabel}
                   </Link>
                 )}
+                <Link role="menuitem" to={`/new?copy=${j.id}`} className={menuItemClass}>
+                  <Copy aria-hidden />
+                  复制任务
+                </Link>
                 {terminal && (
                   <Link role="menuitem" to={`/terminal?job_id=${j.id}`} className={menuItemClass}>
                     <TerminalIcon aria-hidden />

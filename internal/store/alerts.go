@@ -5,6 +5,7 @@ type AlertData struct {
 	Type           string `json:"type"`
 	GPUs           []int  `json:"gpus,omitempty"`
 	PID            int    `json:"pid,omitempty"`
+	OtherJob       int64  `json:"other_job,omitempty"` // external：占卡的是本实例另一个任务的进程
 	AvailableBytes uint64 `json:"available_bytes,omitempty"`
 	DataDisk       bool   `json:"data_disk,omitempty"`
 	Name           string `json:"name,omitempty"`

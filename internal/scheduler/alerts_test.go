@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +207,59 @@ func TestAlertWriteFailureRetriesWithoutRepeating(t *testing.T) {
 	updateAlerts(t, h.m, time.Now())
 	if len(alertEvents(t, h.st.Store)) != 1 {
 		t.Fatal("重试应只记一次事件")
+	}
+}
+
+// 任务的进程跑到了没分给它的卡上（程序自己选卡、EGL 渲染按自己的编号选卡）：这张卡不能再分出去，
+// 等待原因要说清是哪个任务的进程，而不是笼统的"外部进程"。
+func TestStrayJobProcessBlocksCard(t *testing.T) {
+	h := newHarness(t, 2)
+	a := h.add(1)
+	h.tick()
+	h.expect(a, store.StatusRunning, 0)
+	h.gpus.set(func(f *fakeGPUs) {
+		f.gpus[1].Procs = []gpu.Proc{{PID: 4321, JobID: a, Graphics: true, UsedMemMB: 2048}}
+	})
+	b := h.add(1)
+	h.tick()
+	h.expect(b, store.StatusQueued)
+	want := fmt.Sprintf("GPU 1 有任务 #%d 的进程（PID 4321）", a)
+	if reason := h.m.WaitReasons()[b]; !strings.Contains(reason, want) {
+		t.Fatalf("等待原因 %q 里没有 %q", reason, want)
+	}
+	h.gpus.set(func(f *fakeGPUs) { f.gpus[1].Procs = nil })
+	h.tick()
+	h.expect(b, store.StatusRunning, 1)
+}
+
+// 别的任务的渲染进程落到自己的卡上：几十个进程只记一条告警，写明是哪个任务。
+func TestStrayJobProcessesMergedIntoOneAlert(t *testing.T) {
+	h := newHarness(t, 2)
+	a := h.add(1)
+	b := h.add(1)
+	h.tick()
+	h.expect(a, store.StatusRunning, 0)
+	h.expect(b, store.StatusRunning, 1)
+	h.gpus.set(func(f *fakeGPUs) {
+		f.gpus[0].Procs = []gpu.Proc{{PID: 10, JobID: a}, {PID: 2002, JobID: b, Graphics: true}, {PID: 2001, JobID: b, Graphics: true}, {PID: 2003, JobID: b}}
+	})
+	h.tick()
+	updateAlerts(t, h.m, time.Now())
+	events := alertEvents(t, h.st.Store)
+	if len(events) != 1 || events[0].Key != fmt.Sprintf("external:%d:job%d", a, b) || *events[0].JobID != a {
+		t.Fatalf("应只有一条按任务合并的告警: %+v", events)
+	}
+	var data store.AlertData
+	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.OtherJob != b || data.PID != 2001 || !slices.Equal(data.GPUs, []int{0}) {
+		t.Fatalf("告警数据错误: %+v %v", data, err)
+	}
+	// 进程增减不再重复告警
+	h.gpus.set(func(f *fakeGPUs) {
+		f.gpus[0].Procs = append(f.gpus[0].Procs, gpu.Proc{PID: 2004, JobID: b, Graphics: true})
+	})
+	h.tick()
+	updateAlerts(t, h.m, time.Now())
+	if n := len(alertEvents(t, h.st.Store)); n != 1 {
+		t.Fatalf("同一对任务重复告警: %d 条", n)
 	}
 }

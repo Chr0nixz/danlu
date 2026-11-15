@@ -59,7 +59,7 @@ bash scripts/e2e.sh      # end-to-end suite with fake GPUs, on port 17699
 bash scripts/dev-wsl.sh  # demo server on 127.0.0.1:17600 (TLS off, fake GPUs, sample git project)
 ```
 
-`scripts/s0/` is the S0 real-machine kit, run on the GPU server itself: `collect.sh` gathers a redacted report (system, systemd, cgroup `memory.events`, raw `nvidia-smi` output, per-process ownership, danlu's own state and a few API responses), `CHECKLIST.md` walks DEMO.md §0 item by item, and `jobs/` holds the submit-time test scripts (a fake multi-GPU DDP run plus CUDA OOM, Python exception, NCCL timeout and killing one worker).
+`scripts/s0/` is the S0 real-machine kit, run on the GPU server itself: `collect.sh` gathers a redacted report (system, systemd, cgroup `memory.events`, raw `nvidia-smi` output, per-process ownership, danlu's own state and a few API responses) and calls `gpu-procs.sh` to list every GPU process (CUDA and graphics) with its CUDA/EGL environment, `CHECKLIST.md` walks DEMO.md §0 item by item, and `jobs/` holds the submit-time test scripts (a fake multi-GPU DDP run plus CUDA OOM, Python exception, NCCL timeout and killing one worker).
 
 - **Fake GPUs:** set `DANLU_FAKE_GPUS=N`. Use `DANLU_FAKE_BUSY=i,j` to mark cards as held by an external process.
 - **Failure-classification tests:** `DANLU_BOOT_ID_FILE` points to a test boot-id file; on Linux, `DANLU_MEMORY_EVENTS` points to a test cgroup `memory.events` file containing `oom_kill N`.
@@ -102,7 +102,8 @@ The job lifecycle spans `scheduler`, `runner`, `procfs`, `snapshot` and `store`.
 
 - **State changes.** All of them go through `scheduler.Manager` under a single lock. Only millisecond work happens under it.
 - **OS seam.** The manager talks to the OS only through the `Executor` interface (`*runner.Runner` in production) and reads GPUs through `GPUSource`, so the state machine is unit-tested with fakes in `scheduler/manager_test.go`. Add a case there when you change scheduling, launch, cancel or recovery.
-- **Scheduling.** Strict FIFO: when the job at the head of the queue doesn't fit, nothing behind it starts. Jobs get whole GPUs only, and a card with any external compute process is never allocated. While GPU data is untrusted (`Latest()` errors: stale, or `gpu.ErrProcsUnknown`), no GPU job starts.
+- **Scheduling.** Strict FIFO: when the job at the head of the queue doesn't fit, nothing behind it starts. Jobs get whole GPUs only, and a card with any external process, a stray process of another job, or unknown memory above the threshold is never allocated. While GPU data is untrusted (`Latest()` errors: stale, or `gpu.ErrProcsUnknown`), no GPU job starts.
+- **GPU process sources.** `--query-compute-apps` misses graphics processes (EGL/OpenGL rendering, which picks cards by EGL index and ignores `CUDA_VISIBLE_DEVICES`). When a card's used memory exceeds its listed processes, `gpu.SMI` also parses `nvidia-smi -q -d PIDS` (best effort, 3 s) and matches cards by PCI bus id: every process of this instance's jobs is listed, external ones only above the unknown-memory threshold, so Xorg-style processes on every card don't block allocation.
 - **Three-step start.** Write before you fork, so a job can never start twice:
   1. Reserve, under the lock: the job is saved as `running` with `pid = 0`, its GPUs, port and `boot_id`. If that write fails, nothing starts.
   2. Prepare, outside the lock (`launch`): the snapshot (size-capped, 10 s timeout; on failure it is noted on the job, which starts anyway), `LoadEnv` (`.bashrc`, 10 s) and the first `danlu.json` write (10 s; a timeout fails the job). `runner` serialises manifest writes per output directory, so one stuck directory only blocks its own job.
@@ -110,7 +111,7 @@ The job lifecycle spans `scheduler`, `runner`, `procfs`, `snapshot` and `store`.
 - **Unsaved state.** When a save fails, the job goes into `Manager.pending` and the in-memory copy wins until a later round saves it.
 - **Launch.** `runner` writes two scripts into `~/.danlu/run/<id>/`: a fixed wrapper, `run.sh`, and the user command, `cmd.sh`. It starts them with `setsid`.
   - Parameters reach the wrapper only through env vars; nothing user-supplied is interpolated into a script.
-  - The wrapper first writes a `pid` file, activates conda and writes an `exitcode` file when the job ends.
+  - The wrapper first writes a `pid` file, activates conda and writes an `exitcode` file when the job ends. After `conda activate` it restores `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` from `DANLU_GPUS` if the env's own variables changed them, and logs a `[danlu]` line saying so.
   - stdout and stderr go straight to `~/.danlu/logs/<id>.log`, so jobs survive a danlu restart.
 - **Injected env.** `CUDA_VISIBLE_DEVICES`, `PET_MASTER_PORT` (unique per job; torchrun's default master port), `WANDB_TAGS=danlu-<id>`, and the `DANLU_*` variables. Users cannot override the reserved keys (`runner.ReservedEnv`).
 - **Liveness and restart.** A job is identified by its pid plus the process start time from `/proc`, which guards against pid reuse; with no start time, `DANLU_RUN_DIR` in its environ is checked instead. `Manager.Recover()` re-attaches to running jobs at startup. A `running` job with `pid = 0` that isn't being launched goes through `reconcile`: adopt it from the pid file, finalize it if it already ran, or requeue it if it never started. A job that vanished without an exit code is "服务器重启" if `boot_id` changed, else "进程被外部终止". The systemd unit must keep `KillMode=process`; without it, restarting danlu kills the training processes.

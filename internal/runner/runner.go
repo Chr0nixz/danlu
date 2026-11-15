@@ -72,6 +72,11 @@ if [ -n "$DANLU_CONDA_ENV" ]; then
   fi
   source "$DANLU_CONDA_BASE/etc/profile.d/conda.sh" && conda activate "$DANLU_CONDA_ENV" \
     || { echo "[danlu] conda activate 失败: $DANLU_CONDA_ENV"; finish 127; }
+  # conda 环境可以带自己的环境变量（conda env config vars、activate.d 脚本），不能让它改掉分给任务的卡
+  if [ "${CUDA_VISIBLE_DEVICES-未设置}" != "$DANLU_GPUS" ] || [ "${CUDA_DEVICE_ORDER-}" != PCI_BUS_ID ]; then
+    echo "[danlu] conda 环境改动了选卡变量（CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-未设置}，CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER-未设置}），已恢复为分配的 GPU=[$DANLU_GPUS]"
+    export CUDA_VISIBLE_DEVICES="$DANLU_GPUS" CUDA_DEVICE_ORDER=PCI_BUS_ID
+  fi
 fi
 echo "[danlu] 任务 #$DANLU_JOB_ID 开始于 $(date '+%F %T')  GPU=[$CUDA_VISIBLE_DEVICES]  端口=$PET_MASTER_PORT"
 bash "$DANLU_RUN_DIR/cmd.sh"
@@ -128,6 +133,8 @@ func (r *Runner) BuildEnv(base []string, s Spec) []string {
 	}
 	id := strconv.FormatInt(s.JobID, 10)
 	set("CUDA_VISIBLE_DEVICES", strings.Join(gpus, ","))
+	// 包装脚本激活 conda 以后拿它核对 CUDA_VISIBLE_DEVICES 有没有被 conda 环境改掉
+	set("DANLU_GPUS", strings.Join(gpus, ","))
 	// 让 CUDA 的设备编号和 nvidia-smi 一致（CUDA 默认按算力排序，编号可能对不上）
 	set("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 	// torchrun 会读 PET_MASTER_PORT 作为 --master_port 的默认值，避免多个任务撞端口

@@ -217,13 +217,14 @@ func TestQueueAndAlertMessages(t *testing.T) {
 		{store.EventAlertCleared, `{"type":"disk_low"}`},
 		{store.EventAlertRaised, `{"type":"blocked"}`},
 		{store.EventAlertRaised, `{"type":"blocked_unknown"}`},
+		{store.EventAlertRaised, `{"type":"external","gpus":[3],"pid":1325028,"other_job":56}`},
 	} {
 		addEvent(t, st, ts, e.kind, &id, e.data)
 	}
 	for range 10 {
 		step(t, s, ts)
 	}
-	if len(r.requests) != 7 {
+	if len(r.requests) != 8 {
 		t.Fatalf("通知事件缺失或手动暂停/普通恢复被发送: %+v", r.requests)
 	}
 	if r.requests[0].priority != "4" || r.requests[0].click != s.baseURL+"/jobs/7" {
@@ -236,6 +237,9 @@ func TestQueueAndAlertMessages(t *testing.T) {
 	}
 	if !strings.Contains(r.requests[6].title, "未知显存") || !strings.Contains(r.requests[6].body, "GPU 显存释放") {
 		t.Fatalf("未知显存阻塞通知文案错误: %+v", r.requests[6])
+	}
+	if !strings.Contains(r.requests[7].body, "任务 #56 的进程") || strings.Contains(r.requests[7].body, "外部进程") {
+		t.Fatalf("别的任务跑过来的进程不应写成外部进程: %+v", r.requests[7])
 	}
 }
 

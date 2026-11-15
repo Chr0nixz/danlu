@@ -96,23 +96,40 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 	} else {
 		m.gpuErrorSince = time.Time{}
 		// 同一个任务与进程只记一次，多张卡合并到一条事实里。
+		// 别的任务跑过来的进程按那个任务合成一条：EGL 渲染一个任务就能有几十个进程，逐个告警会刷屏
 		for _, j := range running {
 			byPID := map[int][]int{}
+			byJob := map[int64]*store.AlertData{}
 			for _, g := range gpus {
 				if !slices.Contains(j.GPUsAssigned, g.Index) {
 					continue
 				}
 				for _, p := range g.Procs {
-					if p.JobID != j.ID {
+					switch {
+					case p.JobID == j.ID:
+					case p.JobID > 0:
+						a := byJob[p.JobID]
+						if a == nil {
+							a = &store.AlertData{Type: "external", OtherJob: p.JobID, PID: p.PID}
+							byJob[p.JobID] = a
+						}
+						a.PID = min(a.PID, p.PID)
+						a.GPUs = append(a.GPUs, g.Index)
+					default:
 						byPID[p.PID] = append(byPID[p.PID], g.Index)
 					}
 				}
 			}
+			id := j.ID
 			for pid, cards := range byPID {
 				slices.Sort(cards)
-				id := j.ID
 				raise(fmt.Sprintf("external:%d:%d", id, pid), &id,
 					store.AlertData{Type: "external", PID: pid, GPUs: slices.Compact(cards)})
+			}
+			for other, a := range byJob {
+				slices.Sort(a.GPUs)
+				a.GPUs = slices.Compact(a.GPUs)
+				raise(fmt.Sprintf("external:%d:job%d", id, other), &id, *a)
 			}
 		}
 	}
@@ -222,6 +239,10 @@ func allocationWait(gpus []gpu.GPU, running []*store.Job, head *store.Job) (stri
 				busy[g.Index] = true
 				if blocker == "" && (len(head.GPUsPinned) == 0 || slices.Contains(head.GPUsPinned, g.Index)) {
 					blocker = fmt.Sprintf("GPU %d 有外部进程（PID %d）", g.Index, p.PID)
+					if p.JobID > 0 {
+						// 任务自己选了卡、渲染落到了别的卡，或者已结束任务的残留进程
+						blocker = fmt.Sprintf("GPU %d 有任务 #%d 的进程（PID %d），这张卡没有分给它", g.Index, p.JobID, p.PID)
+					}
 				}
 			}
 		}

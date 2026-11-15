@@ -211,7 +211,7 @@ export function Jobs() {
                   <div className="px-3 pt-2 text-xs text-fg-3 sm:px-4">
                     来源：{match.source === 'output_dir' ? '输出目录' : match.source === 'run_code' ? '快照重跑目录' : match.source === 'danlu_json' ? 'danlu.json' : '可能是'}
                   </div>
-                  <JobRow job={match.job} select={selectJob(match.job)} />
+                  <JobRow job={match.job} showCopy select={selectJob(match.job)} />
                 </div>
               ))}
             </div>
@@ -220,9 +220,10 @@ export function Jobs() {
           )
         ) : (
           <JobList
-            header={<JobListHeader selecting={selection !== null} />}
+            header={<JobListHeader selecting={selection !== null} showCopy />}
             select={selection ? (job) => selectJob(job)! : undefined}
             jobs={res.data?.jobs ?? []}
+            showCopy
             empty={
               q || status || recent || starred || batch ? (
                 <Empty>没有符合条件的任务</Empty>

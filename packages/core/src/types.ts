@@ -130,7 +130,10 @@ export interface Proc {
   pid: number
   used_mem_mb: number
   user: string
+  /** 本实例 danlu 任务的编号；0 表示不是 danlu 任务的进程 */
   job_id: number
+  /** 图形进程（EGL/OpenGL 渲染），nvidia-smi 的 compute-apps 列不出来，由服务端另外补查 */
+  graphics?: boolean
 }
 
 export interface GPU {
@@ -144,7 +147,10 @@ export interface GPU {
   unknown_mem_mb?: number
   temp_c: number
   power_w: number
+  /** 卡上能认出的全部进程，包括分到这张卡的任务自己的进程 */
+  procs: Proc[]
   job: { id: number; name: string } | null
+  /** 不属于这张卡上任务的进程：外部进程，或者 job_id 不为 0 时是别的任务跑到了这张卡上（也可能是已结束任务的残留） */
   external: Proc[]
 }
 

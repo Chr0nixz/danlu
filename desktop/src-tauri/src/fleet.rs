@@ -171,6 +171,9 @@ struct ProcLite {
     user: String,
     #[serde(default)]
     used_mem_mb: i64,
+    /// 不为 0 时是这台服务器上另一个任务跑过来的进程
+    #[serde(default)]
+    job_id: i64,
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(v: &[Value]) -> Vec<T> {
@@ -376,31 +379,45 @@ fn evaluate(
         let gpus: Vec<GpuLite> = parse(s.gpus.as_array().map(|v| v.as_slice()).unwrap_or(&[]));
         let jobs: Vec<JobLite> = parse(&s.jobs);
 
-        // 外部进程只在影响你时才报：出现在你的任务正在用的卡上
+        // 外部进程只在影响你时才报：出现在你的任务正在用的卡上。
+        // 别的任务跑过来的进程按任务合成一条：EGL 渲染一个任务在一张卡上就能有几十个进程
         for g in &gpus {
             let Some(job) = &g.job else { continue };
             for p in &g.external {
-                let key = format!("external:{name}:{}:{}", g.index, p.pid);
+                let (key, title, text) = if p.job_id > 0 {
+                    let key = format!("external:{name}:{}:job{}", g.index, p.job_id);
+                    if seen_external.contains(&key) {
+                        continue;
+                    }
+                    let mem: i64 = g.external.iter().filter(|q| q.job_id == p.job_id).map(|q| q.used_mem_mb).sum();
+                    let text = format!(
+                        "{name} 的 GPU {} 上有 {} 的进程，占了 {} MB，可能和 {} 抢显存",
+                        g.index,
+                        job_key(name, p.job_id),
+                        mem,
+                        job_key(name, job.id)
+                    );
+                    (key, "别的任务跑到了你的卡上", text)
+                } else {
+                    let who = if p.user.is_empty() {
+                        format!("pid {}", p.pid)
+                    } else {
+                        format!("{}（pid {}）", p.user, p.pid)
+                    };
+                    let text = format!(
+                        "{name} 的 GPU {} 上有外部进程 {who}，占了 {} MB，可能和 {} 抢显存",
+                        g.index,
+                        p.used_mem_mb,
+                        job_key(name, job.id)
+                    );
+                    (format!("external:{name}:{}:{}", g.index, p.pid), "外部进程占用了你的卡", text)
+                };
                 seen_external.insert(key.clone());
-                let who =
-                    if p.user.is_empty() { format!("pid {}", p.pid) } else { format!("{}（pid {}）", p.user, p.pid) };
-                let text = format!(
-                    "{name} 的 GPU {} 上有外部进程 {who}，占了 {} MB，可能和 {} 抢显存",
-                    g.index,
-                    p.used_mem_mb,
-                    job_key(name, job.id)
-                );
                 if !read.contains(&key) {
                     alerts.push(Alert { key: key.clone(), server: name.into(), kind: "external", text: text.clone() });
                 }
                 if fleet.track.lock().unwrap().external_notified.insert(key) {
-                    notify(
-                        app,
-                        fleet,
-                        "外部进程占用了你的卡",
-                        &text,
-                        Focus { kind: "job", key: job_key(name, job.id) },
-                    );
+                    notify(app, fleet, title, &text, Focus { kind: "job", key: job_key(name, job.id) });
                 }
             }
         }

@@ -115,11 +115,14 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
 
 ### 4.1 GPU 面板
 
-- 每 2 秒执行一次 `nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits`。
+- 每 2 秒执行一次 `nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,pci.bus_id --format=csv,noheader,nounits`。
 - 同时执行 `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits`，再读取每个进程 `/proc/<pid>/environ` 里的 `DANLU_RUN_DIR`（`<数据目录>/run/<id>`；只认本实例数据目录下的，别的数据目录的同号任务算外部进程）：
-  - 属于某个正在运行、并且分到了这张卡的 danlu 任务 → 这张卡显示为**该任务占用**；
-  - 其他情况（没有标记、任务已结束、跑到了没分给它的卡上）→ 显示为**外部进程**（附上 pid 和进程所属用户），调度时不分配这张卡。
+  - 属于某个正在运行、并且分到了这张卡的 danlu 任务 → 这张卡显示为**该任务占用**；分到了卡、卡上却还没有它的进程时，在任务下面用灰字注明"卡上暂无该任务的进程"（还在启动，或者程序没用这张卡）；
+  - 本实例任务的进程出现在没分给它的卡上（程序自己选了卡、渲染落到了别的卡，或已结束任务的残留进程）→ 显示为"**#任务号 的进程**"，链接到那个任务，调度时不分配这张卡。同一个任务的多个进程在一张卡上合成一行；它挤到别的任务的卡上时，告警和推送也按任务合成一条，不按进程逐个发；
+  - 其他情况（没有标记）→ 显示为**外部进程**（附上 pid 和进程所属用户），调度时不分配这张卡。
   - 为什么不用进程组：torchrun 会把每个 worker 放进**新的 session**，进程组追踪不到它们；环境变量会一路继承下去，靠它识别最可靠。
+- **图形进程**：`--query-compute-apps` 只列 CUDA 进程，EGL/OpenGL 离屏渲染（MuJoCo、robosuite、LIBERO 的仿真画面）这类图形进程列不出来。EGL 按自己的设备编号选卡，不受 `CUDA_VISIBLE_DEVICES` 限制，经常落在没分给任务的卡上。所以某张卡的已用显存比列出的进程多时，再执行一次 `nvidia-smi -q -d PIDS`（3 秒超时，失败就跳过），按 PCI 总线号把其中的进程对到卡上：属于本实例任务的一律列出（面板写"图形进程"），不属于任务的只列显存超过未知占用阈值的（Xorg、桌面这类小进程不列，免得每张卡都分不出去）。
+- **未知显存占用**：已用显存减去列出的进程仍超过阈值（默认 1 GiB）时，这张卡标为未知显存占用，不分配。常见原因是别的容器或 PID 命名空间里的进程。
 - **数据不可信时不分卡**：两次查询各有 8 秒超时，超时连子进程一起杀掉。查不到卡上的进程、`nvidia-smi` 出错，或者超过 20 秒没有一次采集完成（驱动卡死时 `nvidia-smi` 可能连信号都杀不掉），`/api/gpus` 都带 `error`，面板提示"暂停分配新任务"，调度器不再分配 GPU；排在前面、不用卡的任务照常启动。
 - **假 GPU 模式**：设置 `DANLU_FAKE_GPUS=4` 后会模拟 4 张卡，利用率和显存随机波动；设置 `DANLU_FAKE_BUSY=2` 可以模拟第 2 号卡被外部进程占用。用于在 WSL 或没有显卡的机器上测试。
 
@@ -176,6 +179,7 @@ finish $?
   |---|---|---|
   | `CUDA_VISIBLE_DEVICES` | 分到的卡号 | 限定任务只能看到这几张卡 |
   | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | **CUDA 默认按算力给卡编号，可能和 nvidia-smi 的编号对不上**，统一按 PCI 总线顺序 |
+  | `DANLU_GPUS` | 分到的卡号 | 包装脚本激活 conda 后拿它核对：conda 环境自带的变量（`conda env config vars`、`activate.d` 脚本）改掉了 `CUDA_VISIBLE_DEVICES` 或 `CUDA_DEVICE_ORDER` 时，改回分配的值，并在日志开头写一行提示 |
   | `PET_MASTER_PORT` | 一个空闲端口 | torchrun 自动读取它作为 `--master_port`，避免多个任务撞端口 |
   | `PYTHONUNBUFFERED=1` | | **否则输出重定向到文件时，Python 的 print 会被缓冲，日志要很久才出现** |
   | `DANLU_JOB_ID`、`DANLU_JOB_NAME` | | 方便在代码里引用 |

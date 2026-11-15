@@ -115,13 +115,15 @@ export interface RowSelect {
  *   卡号、时间、无输出、剩余时间这些短标记，后面连着排说明文字（最新输出、失败原因、排队位置），一共最多两行。
  *   说明文字折行后占满整行，不会被卡号和时间挤成一条窄缝。
  * 手机上右侧只留一个 44px 的操作（在跑或排队的放取消，结束的放复制），标星只显示一个小星标。
- * 传 select 时是对比选择模式：整行变成勾选框的点击区，名字和 commit 不再是链接，点到行不会离开页面。
+ * 传 select 时是对比选择模式：整行变成勾选框的点击区，名字和 commit 不再是链接，点到行不会离开页面；
+ * 复制按钮也不显示（点了会离开页面、丢掉已选的任务），但留出位置，列宽不跳。
  */
 export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCopy?: boolean; select?: RowSelect }) {
   const [confirming, setConfirming] = useState(false)
   const flash = useFlash(j)
   const d = jobDuration(j)
   const gpus = j.gpus_assigned.length ? j.gpus_assigned : j.gpus_pinned
+  const copy = showCopy && !select
   const info = detail(j)
   const ended = !isActive(j)
   const time = j.status === 'queued' ? `等 ${duration(now() - j.created_at)}` : d !== null ? duration(d) : ''
@@ -155,7 +157,7 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
       )}
       <StatusIcon status={j.status} cancelling={j.cancel_requested} className="self-start mt-0.5 md:mt-0 md:self-center" />
       <div className="flex min-w-0 flex-1 flex-col gap-1 md:flex-row md:items-center md:gap-4">
-        {/* 首页从名称列调配复制入口的宽度，保留卡号和最新输出列的空间；1280px 以下名称列收窄，让给失败原因和最新输出 */}
+        {/* 带复制图标时（首页和任务页）从名称列调配宽度，保留卡号和最新输出列的空间；1280px 以下名称列收窄，让给失败原因和最新输出 */}
         <div className={cx('flex min-w-0 items-baseline gap-2 md:shrink-0', showCopy ? 'md:w-[208px] xl:w-[248px]' : 'md:w-[240px] xl:w-[280px]')}>
           {select ? (
             <span title={j.name} className="flex min-w-0 items-baseline gap-2">
@@ -235,20 +237,24 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
         </div>
       </div>
       {/* 操作按钮比一行字高，用负的上下外边距收回去，不撑高任务行：电脑上行高 40px */}
-      <div className={cx('relative z-10 flex shrink-0 items-center max-md:-my-1 max-md:-mr-2 md:-my-1.5', !showCopy && !canCancel && 'max-md:hidden')}>
+      <div className={cx('relative z-10 flex shrink-0 items-center max-md:-my-1 max-md:-mr-2 md:-my-1.5', !copy && !canCancel && 'max-md:hidden')}>
         <div className="max-md:hidden">
           <StarButton job={j} />
         </div>
-        {showCopy && (
-          <Link
-            to={`/new?copy=${j.id}`}
-            className={cx(buttonClass('ghost', 'icon-sm'), 'text-fg-3 max-md:size-11', canCancel && 'max-md:hidden')}
-            title="复制任务"
-            aria-label={`复制任务 #${j.id}`}
-          >
-            <Copy aria-hidden />
-          </Link>
-        )}
+        {showCopy &&
+          (copy ? (
+            <Link
+              to={`/new?copy=${j.id}`}
+              className={cx(buttonClass('ghost', 'icon-sm'), 'text-fg-3 max-md:size-11', canCancel && 'max-md:hidden')}
+              title="复制任务"
+              aria-label={`复制任务 #${j.id}`}
+            >
+              <Copy aria-hidden />
+            </Link>
+          ) : (
+            // 对比选择模式下只留位置，不让人点到复制把已选的任务丢掉
+            <span className="hidden size-8 shrink-0 md:block" />
+          ))}
         {canCancel ? (
           <Button
             size="icon-sm"
@@ -270,19 +276,20 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
 }
 
 /** 任务页电脑端的列头，列宽和 JobRow 的固定列一致 */
-export function JobListHeader({ selecting = false }: { selecting?: boolean }) {
+export function JobListHeader({ selecting = false, showCopy = false }: { selecting?: boolean; showCopy?: boolean }) {
   return (
     <div className="hidden h-8 items-center gap-3 border-b border-line bg-subtle px-4 text-xs text-fg-3 md:flex" aria-hidden>
       {selecting && <span className="w-5 shrink-0" />}
       <span className="w-4 shrink-0" />
       <div className="flex min-w-0 flex-1 items-center gap-4">
-        <span className="w-[240px] shrink-0 xl:w-[280px]">任务</span>
+        <span className={cx('shrink-0', showCopy ? 'w-[208px] xl:w-[248px]' : 'w-[240px] xl:w-[280px]')}>任务</span>
         <span className="min-w-0 flex-1">卡 · 最新输出</span>
         <span className="w-[5.5rem] shrink-0 text-right">耗时</span>
         <span className="w-[4.5rem] shrink-0 text-right">结束于</span>
         <span className="w-[4.5rem] shrink-0">代码</span>
       </div>
-      <span className="h-8 w-16 shrink-0" />
+      {/* 标星、复制、取消各 32px；没有复制时和行里的占位一起收窄 */}
+      <span className={cx('h-8 shrink-0', showCopy ? 'w-24' : 'w-16')} />
     </div>
   )
 }

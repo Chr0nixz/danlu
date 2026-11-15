@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -213,5 +215,57 @@ func TestParseBashEnvironment(t *testing.T) {
 	want := []string{"PATH=/custom/bin", "TOKEN=a=b", "MULTILINE=one\ntwo"}
 	if !slices.Equal(env, want) {
 		t.Fatalf("parseBashEnvironment = %#v，期望 %#v", env, want)
+	}
+}
+
+// conda 环境自带的变量（conda env config vars、activate.d）会在 danlu 设好环境以后才生效，
+// 包装脚本要把分配的卡改回来，否则任务会跑到没分给它的卡上。
+func TestRunScriptRestoresGPUsAfterConda(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil || runtime.GOOS == "windows" {
+		t.Skip("需要 bash")
+	}
+	cases := []struct {
+		name, activate string
+		gpus           []int
+		want           string
+		restored       bool
+	}{
+		{"改了卡号", `export CUDA_VISIBLE_DEVICES=7`, []int{1, 2}, "cvd=1,2 order=PCI_BUS_ID", true},
+		{"改了编号顺序", `export CUDA_DEVICE_ORDER=FASTEST_FIRST`, []int{3}, "cvd=3 order=PCI_BUS_ID", true},
+		{"去掉了变量", `unset CUDA_VISIBLE_DEVICES`, nil, "cvd= order=PCI_BUS_ID", true},
+		{"没有改动", `true`, []int{0, 4}, "cvd=0,4 order=PCI_BUS_ID", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			conda := filepath.Join(dir, "conda")
+			if err := os.MkdirAll(filepath.Join(conda, "etc", "profile.d"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			script := "conda() { " + c.activate + "; }\n"
+			if err := os.WriteFile(filepath.Join(conda, "etc", "profile.d", "conda.sh"), []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := &Runner{RunRoot: filepath.Join(dir, "run"), LogRoot: filepath.Join(dir, "logs"), CondaBase: conda}
+			spec := Spec{JobID: 1, Name: "x", Workdir: dir, CondaEnv: "env", GPUs: c.gpus, Port: 29500,
+				Cmd: `echo "cvd=${CUDA_VISIBLE_DEVICES-未设置} order=$CUDA_DEVICE_ORDER"`}
+			run, err := r.prepare(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(bash, run)
+			cmd.Env = r.BuildEnv([]string{"PATH=" + os.Getenv("PATH")}, spec)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), c.want+"\n") {
+				t.Fatalf("输出里没有 %q:\n%s", c.want, out)
+			}
+			if got := strings.Contains(string(out), "已恢复为分配的 GPU"); got != c.restored {
+				t.Fatalf("恢复提示 = %v，期望 %v:\n%s", got, c.restored, out)
+			}
+		})
 	}
 }

@@ -2,7 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Check, FolderOpen, History, Minus, Plus } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { gpuBusy, useGpus } from '../components/GpuGrid'
+import { gpuBusy, strayLabel, useGpus } from '../components/GpuGrid'
 import { modKey } from '../components/Shortcuts'
 import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
 import { failText, sameCodeFailKinds, type GPU, type Job } from '@danlu/core'
@@ -375,7 +375,7 @@ function JobForm({ source, formMode, onReset }: { source: Job | null; formMode: 
             <FieldError id={`${ids.gpu}-err`}>{errors.gpu}</FieldError>
             {pinnedExternal.length > 0 ? (
               <p className="text-xs leading-relaxed text-warn">
-                GPU {pinnedExternal.join(', ')} 被外部进程占用，丹炉不会分配它。任务会一直排在队首、挡住后面所有任务，直到那个进程退出。
+                GPU {pinnedExternal.join(', ')} 被外部进程或别的任务的进程占用，丹炉不会分配它。任务会一直排在队首、挡住后面所有任务，直到那个进程退出。
               </p>
             ) : pinnedUnknown.length > 0 ? (
               <p className="text-xs leading-relaxed text-warn">
@@ -454,7 +454,7 @@ function GpuPicker({ id, describedBy, gpus, value, onChange }: { id: string; des
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
       {gpus.map((g, n) => {
         const on = value.includes(g.index)
-        const state = g.job ? `#${g.job.id} 在用` : g.external.length ? '外部进程' : (g.unknown_mem_mb ?? 0) > 0 ? '未知显存占用' : '空闲'
+        const state = g.job ? `#${g.job.id} 在用` : g.external.length ? strayLabel(g.external[0]) : (g.unknown_mem_mb ?? 0) > 0 ? '未知显存占用' : '空闲'
         const tone = g.job ? 'text-run' : g.external.length || (g.unknown_mem_mb ?? 0) > 0 ? 'text-warn' : 'text-ok'
         return (
           <button

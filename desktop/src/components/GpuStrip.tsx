@@ -66,12 +66,20 @@ function ServerRow({ snap: s, onServer }: { snap: ServerSnap; onServer?: (name: 
 function GpuCell({ server, gpu: g, points }: { server: string; gpu: GPU; points: [number, number][] }) {
   const external = g.external.length > 0
   const unknown = unknownBusy(g)
-  const owner = g.job ? `${server}-${g.job.id}` : external ? g.external.map((p) => p.user || `pid ${p.pid}`).join(', ') : unknown ? '未知显存占用' : '空闲'
+  // 别的任务跑过来的进程按任务合并，外部进程按用户合并：EGL 渲染一个任务在一张卡上就能有几十个进程
+  const strays = new Map<string, { n: number; pid: number; mem: number }>()
+  for (const p of g.external) {
+    const k = p.job_id ? `任务 ${server}-${p.job_id} 的进程` : `外部进程 ${p.user || '?'}`
+    const s = strays.get(k)
+    strays.set(k, { n: (s?.n ?? 0) + 1, pid: s?.pid ?? p.pid, mem: (s?.mem ?? 0) + p.used_mem_mb })
+  }
+  const strayOwners = [...new Set(g.external.map((p) => (p.job_id ? `${server}-${p.job_id}` : p.user || `pid ${p.pid}`)))]
+  const owner = g.job ? `${server}-${g.job.id}` : external ? strayOwners.join(', ') : unknown ? '未知显存占用' : '空闲'
   const title = [
     `GPU ${g.index} · ${g.name}`,
     `利用率 ${g.util}% · 显存 ${mb(g.mem_used_mb)} / ${mb(g.mem_total_mb)} · ${g.temp_c}°C · ${g.power_w}W`,
     g.job ? `任务 ${server}-${g.job.id} ${g.job.name}` : '',
-    ...g.external.map((p) => `外部进程 ${p.user || '?'} · pid ${p.pid} · ${mb(p.used_mem_mb)}`),
+    ...[...strays].map(([k, s]) => `${k} · ${s.n > 1 ? `${s.n} 个` : `pid ${s.pid}`} · ${mb(s.mem)}`),
     unknown ? `进程列表无法解释 ${mb(g.unknown_mem_mb ?? 0)} 显存，这张卡不会被分配` : '',
   ]
     .filter(Boolean)
