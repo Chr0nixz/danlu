@@ -17,6 +17,7 @@ const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m
 const NotFound = lazy(() => import('./pages/NotFound').then((m) => ({ default: m.NotFound })))
 const Terminal = lazy(() => import('./pages/Terminal').then((m) => ({ default: m.Terminal })))
 const Compare = lazy(() => import('./pages/Compare').then((m) => ({ default: m.Compare })))
+const Resources = lazy(() => import('./pages/Resources').then((m) => ({ default: m.Resources })))
 const pageFallback = <div className="grid min-h-64 place-items-center"><Spinner /></div>
 
 const queryClient = new QueryClient({
@@ -42,6 +43,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/jobs" element={<Suspense fallback={pageFallback}><Jobs /></Suspense>} />
               <Route path="/jobs/:id" element={<Suspense fallback={pageFallback}><JobDetail /></Suspense>} />
               <Route path="/compare" element={<Suspense fallback={pageFallback}><Compare /></Suspense>} />
+              <Route path="/resources" element={<Suspense fallback={pageFallback}><Resources /></Suspense>} />
               <Route path="/new" element={<Suspense fallback={pageFallback}><NewJob /></Suspense>} />
               <Route path="/settings" element={<Suspense fallback={pageFallback}><Settings /></Suspense>} />
               <Route path="/terminal" element={<Suspense fallback={pageFallback}><Terminal /></Suspense>} />

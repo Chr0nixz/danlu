@@ -2,10 +2,208 @@ package gpu
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestParseGPUExtras(t *testing.T) {
+	out := `0, GPU-aaa, NVIDIA A100-SXM4-80GB, 35, 1234, 81920, 45, 120.50, 00000000:18:00.0, 55, 1410, 1215, 300.00, P0
+1, GPU-bbb, NVIDIA A100-SXM4-80GB, 0, 4, 81920, 30, 50.00, 00000000:2A:00.0, [N/A], [N/A], [N/A], [N/A], [Not Supported]
+`
+	gpus, err := ParseGPUs(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gpus[0].FanPercent != 55 || gpus[0].ClockGraphicsMHz != 1410 || gpus[0].ClockMemoryMHz != 1215 ||
+		gpus[0].PowerLimitW != 300 || gpus[0].PState != "P0" {
+		t.Fatalf("扩展字段解析错误: %+v", gpus[0])
+	}
+	if gpus[1].FanPercent != 0 || gpus[1].ClockGraphicsMHz != 0 || gpus[1].ClockMemoryMHz != 0 ||
+		gpus[1].PowerLimitW != 0 || gpus[1].PState != "" {
+		t.Fatalf("[N/A] 应该当作不可用: %+v", gpus[1])
+	}
+}
+
+func TestSMIExtrasFallback(t *testing.T) {
+	base := "0, GPU-aaa, A100, 35, 0, 81920, 45, 120.50, 00000000:18:00.0\n"
+	extCalls, baseCalls := 0, 0
+	s := &SMI{query: func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case strings.Contains(args[0], "fan.speed"):
+			extCalls++
+			return nil, errors.New("unsupported option")
+		case strings.HasPrefix(args[0], "--query-gpu="):
+			baseCalls++
+			return []byte(base), nil
+		case strings.HasPrefix(args[0], "--query-compute-apps="):
+			return []byte(""), nil
+		default:
+			return nil, errors.New("unexpected nvidia-smi args: " + strings.Join(args, " "))
+		}
+	}}
+	gpus, err := s.Query(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gpus) != 1 || s.nextExtrasAt.Load() == 0 || extCalls != 1 || baseCalls != 1 {
+		t.Fatalf("首次失败应降级并重试一次: gpus=%d next=%d ext=%d base=%d", len(gpus), s.nextExtrasAt.Load(), extCalls, baseCalls)
+	}
+	if _, err := s.Query(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if extCalls != 1 || baseCalls != 2 {
+		t.Fatalf("冷却期内不应再查扩展列: ext=%d base=%d", extCalls, baseCalls)
+	}
+}
+
+func TestSMIExtrasBaseFailureRetriesLater(t *testing.T) {
+	extCalls, baseCalls := 0, 0
+	fail := true
+	s := &SMI{query: func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case strings.Contains(args[0], "fan.speed"):
+			extCalls++
+			if fail {
+				return nil, errors.New("gpu reset")
+			}
+			return []byte("0, GPU-aaa, A100, 35, 0, 81920, 45, 120.50, 00000000:18:00.0, 55, 1410, 1215, 300.00, P0\n"), nil
+		case strings.HasPrefix(args[0], "--query-gpu="):
+			baseCalls++
+			if fail {
+				return nil, errors.New("gpu reset")
+			}
+			return []byte("0, GPU-aaa, A100, 35, 0, 81920, 45, 120.50, 00000000:18:00.0\n"), nil
+		case strings.HasPrefix(args[0], "--query-compute-apps="):
+			return []byte(""), nil
+		default:
+			return nil, errors.New("unexpected nvidia-smi args: " + strings.Join(args, " "))
+		}
+	}}
+	if _, err := s.Query(context.Background()); err == nil {
+		t.Fatal("两次查询都失败时应返回错误")
+	}
+	if s.nextExtrasAt.Load() == 0 {
+		t.Fatal("临时故障后应设置重试时间")
+	}
+	if extCalls != 1 || baseCalls != 1 {
+		t.Fatalf("首次应各调一次: ext=%d base=%d", extCalls, baseCalls)
+	}
+
+	// 模拟冷却结束、故障恢复：扩展列应重新启用，而不是永久降级。
+	fail = false
+	s.nextExtrasAt.Store(0)
+	gpus, err := s.Query(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gpus) != 1 || gpus[0].FanPercent != 55 || extCalls != 2 || baseCalls != 1 {
+		t.Fatalf("恢复后应重新使用扩展列: gpus=%+v ext=%d base=%d", gpus, extCalls, baseCalls)
+	}
+}
+
+func TestSMIExtrasContextCanceledDoesNotFallback(t *testing.T) {
+	baseCalls := 0
+	s := &SMI{query: func(ctx context.Context, args ...string) ([]byte, error) {
+		switch {
+		case strings.Contains(args[0], "fan.speed"):
+			return nil, ctx.Err()
+		default:
+			baseCalls++
+			return []byte(""), nil
+		}
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Query(ctx); err == nil {
+		t.Fatal("取消的上下文应该返回错误")
+	}
+	if baseCalls != 0 || s.nextExtrasAt.Load() != 0 {
+		t.Fatalf("取消时不应补查或设置冷却: base=%d next=%d", baseCalls, s.nextExtrasAt.Load())
+	}
+}
+
+// 老驱动加上没开 persistence mode 时，扩展查询每次都要好几秒才报错。这一轮可以不补查，
+// 但之后必须只用基本查询，否则每一轮都卡在扩展查询上，调度器永远拿不到卡的数据。
+func TestSMIExtrasSlowFailurePausesExtras(t *testing.T) {
+	old := extrasSlowFailure
+	extrasSlowFailure = 20 * time.Millisecond
+	defer func() { extrasSlowFailure = old }()
+
+	extCalls, baseCalls := 0, 0
+	s := &SMI{query: func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case strings.Contains(args[0], "fan.speed"):
+			extCalls++
+			time.Sleep(40 * time.Millisecond)
+			return nil, errors.New("slow unsupported field")
+		case strings.HasPrefix(args[0], "--query-gpu="):
+			baseCalls++
+			return []byte("0, GPU-aaa, A100, 35, 0, 81920, 45, 120.50, 00000000:18:00.0\n"), nil
+		case strings.HasPrefix(args[0], "--query-compute-apps="):
+			return []byte(""), nil
+		default:
+			return nil, errors.New("unexpected nvidia-smi args: " + strings.Join(args, " "))
+		}
+	}}
+	if _, err := s.Query(context.Background()); err == nil {
+		t.Fatal("扩展查询慢失败的这一轮应返回错误")
+	}
+	if baseCalls != 0 {
+		t.Fatalf("慢失败的这一轮不应补查基本查询: base=%d", baseCalls)
+	}
+	if next := time.Unix(0, s.nextExtrasAt.Load()); time.Until(next) < extrasRetryAfterFallback-time.Minute {
+		t.Fatalf("慢失败后应按降级暂停扩展列，下次重试在 %s", time.Until(next))
+	}
+	for range 3 {
+		gpus, err := s.Query(context.Background())
+		if err != nil {
+			t.Fatalf("暂停扩展列后基本查询应能拿到数据: %v", err)
+		}
+		if len(gpus) != 1 {
+			t.Fatalf("gpus=%+v", gpus)
+		}
+	}
+	if extCalls != 1 || baseCalls != 3 {
+		t.Fatalf("冷却期内只应跑基本查询: ext=%d base=%d", extCalls, baseCalls)
+	}
+}
+
+// 扩展查询很快失败时同一轮补查基本查询，两者共用一个 smiTimeout，整轮不超出 Monitor 的过期时间。
+func TestSMIExtrasFallbackSharesTimeout(t *testing.T) {
+	const extSpent = 20 * time.Millisecond
+	var remaining time.Duration
+	var hasDeadline bool
+	s := &SMI{query: func(ctx context.Context, args ...string) ([]byte, error) {
+		switch {
+		case strings.Contains(args[0], "fan.speed"):
+			time.Sleep(extSpent)
+			return nil, errors.New("unsupported option")
+		case strings.HasPrefix(args[0], "--query-gpu="):
+			var deadline time.Time
+			deadline, hasDeadline = ctx.Deadline()
+			remaining = time.Until(deadline)
+			return []byte("0, GPU-aaa, A100, 35, 0, 81920, 45, 120.50, 00000000:18:00.0\n"), nil
+		case strings.HasPrefix(args[0], "--query-compute-apps="):
+			return []byte(""), nil
+		default:
+			return nil, errors.New("unexpected nvidia-smi args: " + strings.Join(args, " "))
+		}
+	}}
+	if _, err := s.Query(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !hasDeadline {
+		t.Fatal("补查的基本查询应带期限")
+	}
+	// 扩展查询已经用掉 extSpent，补查剩下的时间不能再是完整的 smiTimeout
+	if remaining > smiTimeout-extSpent {
+		t.Fatalf("补查还剩 %s，应扣掉扩展查询用掉的 %s", remaining, extSpent)
+	}
+}
 
 func TestParseGPUs(t *testing.T) {
 	out := `0, GPU-aaa, NVIDIA A100-SXM4-80GB, 35, 1234, 81920, 45, 120.50, 00000000:18:00.0
@@ -165,5 +363,26 @@ func TestFakeBusy(t *testing.T) {
 	gpus, _ := f.Query(context.Background())
 	if len(gpus) != 4 || len(gpus[2].Procs) != 1 || len(gpus[0].Procs) != 0 {
 		t.Fatalf("假 GPU 不符合预期: %+v", gpus)
+	}
+	if gpus[0].FanPercent == 0 || gpus[0].PowerLimitW == 0 || gpus[0].PState != "P0" {
+		t.Fatalf("假 GPU 应带扩展指标: %+v", gpus[0])
+	}
+}
+
+func TestCloneGPUsProcsNotNull(t *testing.T) {
+	// 空的 procs 克隆后必须还是空数组而不是 nil：nil 会被 JSON 编码成 null，
+	// 总览页在"卡分给了任务但还没有进程"时按数组读 procs，遇到 null 直接崩
+	gpus := []GPU{{Index: 0, Procs: []Proc{}}, {Index: 1, Procs: []Proc{{PID: 42}}}}
+	out := cloneGPUs(gpus)
+	if out[0].Procs == nil {
+		t.Fatal("空的 procs 克隆后不应变成 nil")
+	}
+	b, err := json.Marshal(out[0])
+	if err != nil || !strings.Contains(string(b), `"procs":[]`) {
+		t.Fatalf("procs 应编码成空数组: %s %v", b, err)
+	}
+	out[1].Procs[0].PID = 43
+	if gpus[1].Procs[0].PID != 42 {
+		t.Fatal("克隆应深拷贝进程列表，改副本不能影响原件")
 	}
 }

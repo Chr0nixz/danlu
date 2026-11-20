@@ -147,6 +147,12 @@ export interface GPU {
   unknown_mem_mb?: number
   temp_c: number
   power_w: number
+  /** 资源详情页的扩展指标；老驱动可能没有这些字段 */
+  fan_percent?: number
+  clock_graphics_mhz?: number
+  clock_memory_mhz?: number
+  power_limit_w?: number
+  pstate?: string
   /** 卡上能认出的全部进程，包括分到这张卡的任务自己的进程 */
   procs: Proc[]
   job: { id: number; name: string } | null
@@ -180,6 +186,146 @@ export interface HostMetricsResponse {
   disks?: Disk[]
   disks_updated_at?: number
   disks_error?: string
+}
+
+export type ResourceRange = '1m' | '5m' | '15m' | '1h'
+
+export interface ResourceHost {
+  hostname: string
+  os?: string
+  kernel?: string
+  cpu_model?: string
+  cpu_cores: number
+  memory_total_bytes: number
+  swap_total_bytes: number
+  uptime_seconds: number
+  boot_time?: number
+}
+
+export interface ResourceCPU {
+  percent: number | null
+  /** 每核百分比，-1 表示还没有第二次采样 */
+  cores: number[]
+  load_1: number
+  load_5: number
+  load_15: number
+  freq_mhz: number | null
+  freq_max_mhz: number | null
+  temp_c: number | null
+  power_w: number | null
+  /** CPU 功耗读不到的原因（多半是内核只允许 root 读能量计数器）；还在等第二次读数时没有 */
+  power_error?: string
+}
+
+export interface ResourceMemory {
+  total_bytes: number
+  used_bytes: number
+  available_bytes: number
+  free_bytes: number
+  cached_bytes: number
+  buffers_bytes: number
+  percent: number
+  swap_total_bytes: number
+  swap_used_bytes: number
+  swap_percent: number
+}
+
+export interface ResourceNetIface {
+  name: string
+  virtual: boolean
+  speed_mbps?: number
+  rx_bytes_per_sec: number
+  tx_bytes_per_sec: number
+  rx_total_bytes: number
+  tx_total_bytes: number
+  rx_errors: number
+  tx_errors: number
+  rx_drops: number
+  tx_drops: number
+}
+
+export interface ResourceDiskIO {
+  name: string
+  read_bytes_per_sec: number
+  write_bytes_per_sec: number
+  read_total_bytes: number
+  write_total_bytes: number
+  busy_percent: number
+}
+
+export interface ResourceProcess {
+  pid: number
+  user: string
+  command: string
+  cpu_percent: number
+  rss_bytes: number
+  job_id: number
+  job_name?: string
+}
+
+export interface ResourceSnapshot {
+  /** 最近一次成功采样的时间；0 表示还没有成功过，这时其它字段都是零值 */
+  updated_at: number
+  samples: number
+  process_samples: number
+  host: ResourceHost
+  cpu: ResourceCPU
+  memory: ResourceMemory
+  gpu_power_w: number | null
+  gpu_temp_max_c: number | null
+  power_w: number | null
+  energy_wh: number | null
+  net_rx_bps: number
+  net_tx_bps: number
+  disk_read_bps: number
+  disk_write_bps: number
+  network: ResourceNetIface[]
+  disk_io: ResourceDiskIO[]
+  processes: ResourceProcess[]
+  processes_at: number
+  root_disk?: Disk
+  root_disk_at?: number
+  disks: Disk[]
+  disks_updated_at?: number
+  disks_error?: string
+  error?: string
+  network_error?: string
+  disk_io_error?: string
+  processes_error?: string
+}
+
+export interface ResourcePoint {
+  at: number
+  cpu_percent: number | null
+  memory_percent: number
+  swap_percent: number
+  net_rx_bps: number
+  net_tx_bps: number
+  disk_read_bps: number
+  disk_write_bps: number
+  cpu_power_w: number | null
+  gpu_power_w: number | null
+}
+
+export interface ResourcePeaks {
+  cpu_percent: number | null
+  memory_percent: number
+  swap_percent: number
+  net_rx_bps: number
+  net_tx_bps: number
+  disk_read_bps: number
+  disk_write_bps: number
+  cpu_power_w: number | null
+  gpu_power_w: number | null
+}
+
+export interface ResourceHistory {
+  range: ResourceRange
+  from: number
+  to: number
+  updated_at: number
+  points: ResourcePoint[]
+  peaks: ResourcePeaks
 }
 
 export interface Me {

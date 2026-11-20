@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Flame, LayoutDashboard, ListChecks, Plus, Settings, Terminal as TerminalIcon } from 'lucide-react'
+import { Activity, Flame, LayoutDashboard, ListChecks, Plus, Settings, Terminal as TerminalIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api } from '../lib/api'
@@ -10,10 +10,13 @@ import { Announcer, buttonClass, cx, Kbd } from './ui'
 
 const nav = [
   { to: '/', label: '总览', icon: LayoutDashboard, end: true },
+  { to: '/resources', label: '资源', icon: Activity, end: false },
   { to: '/jobs', label: '任务', icon: ListChecks, end: false },
   { to: '/terminal', label: '终端', icon: TerminalIcon, end: false },
   { to: '/settings', label: '设置', icon: Settings, end: false },
 ]
+const homeNav = nav.find((n) => n.to === '/')!
+const jobsNav = nav.find((n) => n.to === '/jobs')!
 
 export function Brand({ className }: { className?: string }) {
   return (
@@ -147,7 +150,7 @@ export function Layout() {
       {/* 手机底部导航：新建放在正中间，终端和设置在顶栏右侧 */}
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] sm:hidden">
         <div className="grid h-14 grid-cols-3">
-          {[nav[0], { to: '/new', label: '新建', icon: Plus, end: false }, nav[1]].map((n) => (
+          {[homeNav, { to: '/new', label: '新建', icon: Plus, end: false }, jobsNav].map((n) => (
             <NavLink
               key={n.to}
               to={n.to}

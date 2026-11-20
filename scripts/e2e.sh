@@ -159,7 +159,19 @@ sleep 2
 GPUS=$(api "$BASE/api/gpus")
 check "看到 4 张假 GPU" [ "$(echo "$GPUS" | json "len(d['gpus'])")" = 4 ]
 check "GPU 3 显示为外部进程占用" [ "$(echo "$GPUS" | json "len(d['gpus'][3]['external'])")" = 1 ]
+check "procs 和 external 永远是数组，空也不能是 null" [ "$(echo "$GPUS" | json "all(isinstance(g['procs'], list) and isinstance(g['external'], list) for g in d['gpus'])")" = True ]
+check "假 GPU 返回功耗上限、风扇和 P-State" [ "$(echo "$GPUS" | json "d['gpus'][0]['power_limit_w'] > 0 and d['gpus'][0]['fan_percent'] > 0 and d['gpus'][0]['pstate'] == 'P0'")" = True ]
 check "磁盘采集返回数据分区和实际可用容量" [ "$(api "$BASE/api/system" | json "any(x['data'] and x['total_bytes']>0 and x['available_bytes']<=x['total_bytes'] for x in d['disks'])")" = True ]
+
+echo "== 服务器资源 =="
+resource_ready() { [ "$(api "$BASE/api/resources" | json "d.get('samples', 0) >= 2 and d['cpu']['percent'] is not None")" = True ]; }
+history_ready() { [ "$(api "$BASE/api/resources/history?range=1m" | json "len(d['points']) > 0")" = True ]; }
+check "资源接口返回 CPU 和内存" wait_until 10 resource_ready
+check "资源接口的每核数量与核数一致" [ "$(api "$BASE/api/resources" | json "d['host']['cpu_cores'] > 0 and len(d['cpu']['cores']) == d['host']['cpu_cores']")" = True ]
+check "资源接口返回进程列表" [ "$(api "$BASE/api/resources" | json "len(d['processes']) > 0")" = True ]
+check "资源历史有数据点" wait_until 10 history_ready
+check "资源历史包含功耗字段" [ "$(api "$BASE/api/resources/history?range=1m" | json "'cpu_power_w' in d['points'][0] and 'gpu_power_w' in d['points'][0]")" = True ]
+check "非法资源范围返回 400" [ "$(code "$BASE/api/resources/history?range=3h")" = 400 ]
 
 echo "== 调度 =="
 A=$(submit "{\"name\":\"A\",\"workdir\":\"$W\",\"cmd\":\"echo hello; python3 train.py; sleep 4\",\"gpus\":2,\"conda_env\":\"myenv\"}")

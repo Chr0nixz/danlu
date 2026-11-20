@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { Cpu, HardDrive, MemoryStick } from 'lucide-react'
+import { ArrowRight, Cpu, HardDrive, MemoryStick } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { Link } from 'react-router'
 import { now, type HostMetricsResponse, type HostSample } from '@danlu/core'
 import { api } from '../lib/api'
 import { Card, cx, Meter, Skeleton } from './ui'
@@ -18,11 +19,16 @@ export function HostMetrics() {
 
   return (
     <Card className="overflow-hidden">
-      <div className="flex h-9 items-center gap-2 border-b border-line bg-subtle px-3 text-ui sm:px-4">
+      {/* 手机上标题栏 44px 高，这样右侧的「资源详情」整条都是可点区域；桌面仍是 36px */}
+      <div className="flex h-9 items-center gap-2 border-b border-line bg-subtle px-3 text-ui max-sm:h-11 sm:px-4">
         <h2 className="font-medium">主机资源</h2>
-        <span className={cx('ml-auto text-xs', stale ? 'text-warn' : 'text-fg-3')}>
+        <span className={cx('ml-auto min-w-0 truncate text-xs', stale ? 'text-warn' : 'text-fg-3')}>
           {stale ? `数据 ${Math.round(age)} 秒没有更新` : samples.length >= 31 ? '近 1 分钟 · 每 2 秒采样' : samples.length ? `采样中 ${samples.length}/31` : '每 2 秒采样'}
         </span>
+        <Link to="/resources" className="-mr-2 flex h-full min-w-9 shrink-0 items-center justify-center gap-1 px-2 text-xs text-fg-3 hover:text-fg max-sm:min-w-11" title="服务器资源详情">
+          <span className="max-sm:sr-only">资源详情</span>
+          <ArrowRight className="size-3.5" aria-hidden />
+        </Link>
       </div>
       {error ? (
         <div role="alert" className="px-3 py-3 text-ui text-fail sm:px-4">读取 CPU 和内存失败：{(error as Error).message}</div>

@@ -268,6 +268,22 @@ func cmdInit(args []string) error {
 	return nil
 }
 
+// resourceGPUStats 汇总资源页需要的 GPU 功耗和最高温度；读不到功耗或温度的卡跳过。
+func resourceGPUStats(gpus []gpu.GPU) system.GPUStats {
+	stats := system.GPUStats{}
+	for _, card := range gpus {
+		if card.PowerW > 0 {
+			stats.PowerW += card.PowerW
+			stats.PowerKnown = true
+		}
+		if card.TempC > 0 {
+			stats.MaxTempC = max(stats.MaxTempC, card.TempC)
+			stats.TempKnown = true
+		}
+	}
+	return stats
+}
+
 // ---------- serve ----------
 
 func cmdServe(args []string) error {
@@ -321,6 +337,17 @@ func cmdServe(args []string) error {
 	go host.Run(ctx)
 	disks := system.NewDiskMonitor(p.Home, outputRoot, func() ([]string, error) { return st.RecentWorkdirs(10) }, uint64(c.Runtime.DiskWarnGB)<<30)
 	go disks.Run(ctx)
+	gpuStats := func() system.GPUStats {
+		gpus, _, err := mon.Latest()
+		// ErrProcsUnknown 时卡本身的功耗和温度仍然有效，只有进程归属未知；
+		// 不能因为它把整页的 GPU 功耗一起丢掉。其它错误（包括数据过期）照旧不采信。
+		if len(gpus) == 0 || (err != nil && !errors.Is(err, gpu.ErrProcsUnknown)) {
+			return system.GPUStats{}
+		}
+		return resourceGPUStats(gpus)
+	}
+	resources := system.NewResourceMonitor(system.NewResourceSource(p.Run, uint64(c.Runtime.DiskWarnGB)<<30, gpuStats))
+	go resources.Run(ctx)
 
 	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, EnvRoot: p.Envs, CondaBase: c.Runtime.CondaBase}
 	terminals := terminal.NewManager()
@@ -365,7 +392,7 @@ func cmdServe(args []string) error {
 		MaxFailures: c.Auth.MaxFailures, Lockout: c.Auth.Lockout.Duration,
 	})
 	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, System: host, Auth: au, Runner: run, Terminal: terminals,
-		Static: webui.FS(), Version: version, Disks: disks, Notify: notifier}
+		Static: webui.FS(), Version: version, Disks: disks, Resources: resources, Notify: notifier}
 
 	// 请求的 context 都从 base 派生：停止时先取消它，日志 SSE 这类长连接马上退出
 	base, cancelBase := context.WithCancel(context.Background())

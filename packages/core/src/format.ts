@@ -42,6 +42,8 @@ export function mb(v: number): string {
 }
 
 export function bytes(n: number): string {
+  // 数据盘、网卡累计流量常到几十 TB，写成 13969.8 GB 读不出量级
+  if (n >= 2 ** 40) return `${(n / 2 ** 40).toFixed(1)} TB`
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`
   if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`

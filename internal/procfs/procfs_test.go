@@ -9,7 +9,8 @@ func TestParseStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.PID != 4242 || st.State != 'S' || st.PPID != 1 || st.PGID != 4242 || st.StartTime != 987654 {
+	if st.PID != 4242 || st.State != 'S' || st.PPID != 1 || st.PGID != 4242 || st.StartTime != 987654 ||
+		st.Comm != "python (main) x" || st.UTime != 5 || st.STime != 3 || st.RSSPages != 456 {
 		t.Fatalf("解析错误: %+v", st)
 	}
 }

@@ -523,12 +523,13 @@ export function Tabs<T extends string>({
 
 export const tabPanelProps = (id: string, value: string) => ({ role: 'tabpanel' as AriaRole, id: `${id}-panel`, 'aria-labelledby': `${id}-tab-${value}` })
 
-/** 4px 细条。数值变化时用 transform 过渡，不触发重新布局（首页一次有十几根，每次轮询都会变） */
+/** 4px 细条。数值变化时用 transform 过渡，不触发重新布局（首页一次有十几根，每次轮询都会变）。
+ *  填充色默认 bg-fg-3：漏传 className 时也是一根看得见的灰条，而不是透明轨道。按状态传 bg-run / bg-warn 覆盖。 */
 export function Meter({ value, className }: { value: number; className?: string }) {
   const v = Math.max(0, Math.min(100, value))
   return (
     <div className="h-1 w-full overflow-hidden rounded-full bg-hover">
-      <div className={cx('h-full origin-left transition-transform duration-500 ease-out', className)} style={{ transform: `scaleX(${v / 100})` }} />
+      <div className={cx('h-full origin-left transition-transform duration-500 ease-out', className ?? 'bg-fg-3')} style={{ transform: `scaleX(${v / 100})` }} />
     </div>
   )
 }

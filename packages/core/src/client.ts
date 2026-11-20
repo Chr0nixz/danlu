@@ -12,6 +12,9 @@ import type {
   LogSearchResult,
   Me,
   QueueState,
+  ResourceHistory,
+  ResourceRange,
+  ResourceSnapshot,
   Settings,
   SnapshotMeta,
   SubmitReq,
@@ -112,6 +115,8 @@ export function createApi(t: Transport, opt: ApiOptions) {
     pauseQueue: () => post<QueueState>('/api/queue/pause'),
     resumeQueue: () => post<QueueState>('/api/queue/resume'),
     hostMetrics: () => get<HostMetricsResponse>('/api/system'),
+    resources: () => get<ResourceSnapshot>('/api/resources'),
+    resourceHistory: (range: ResourceRange) => get<ResourceHistory>(`/api/resources/history${qs({ range })}`),
     condaEnvs: () =>
       get<{ available: boolean; base?: string; envs: { name: string; path: string }[]; error?: string }>('/api/conda-envs'),
     dirs: (path: string) => get<{ dirs: string[] }>(`/api/fs/dirs${qs({ path })}`),

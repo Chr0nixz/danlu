@@ -43,19 +43,20 @@ import (
 const APIVersion = 1
 
 type Server struct {
-	Cfg      *config.Config
-	Paths    config.Paths
-	Store    *store.Store
-	Mgr      *scheduler.Manager
-	GPUs     *gpu.Monitor
-	System   *system.Monitor
-	Disks    *system.DiskMonitor
-	Notify   *notify.Service
-	Terminal *terminal.Manager
-	Auth     *auth.Auth
-	Runner   *runner.Runner
-	Static   fs.FS
-	Version  string
+	Cfg       *config.Config
+	Paths     config.Paths
+	Store     *store.Store
+	Mgr       *scheduler.Manager
+	GPUs      *gpu.Monitor
+	System    *system.Monitor
+	Resources *system.ResourceMonitor
+	Disks     *system.DiskMonitor
+	Notify    *notify.Service
+	Terminal  *terminal.Manager
+	Auth      *auth.Auth
+	Runner    *runner.Runner
+	Static    fs.FS
+	Version   string
 
 	conda       condaCache
 	comparisons comparisonCache
@@ -73,6 +74,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/queue/pause", s.pauseQueue)
 	mux.HandleFunc("POST /api/queue/resume", s.resumeQueue)
 	mux.HandleFunc("GET /api/system", s.systemMetrics)
+	mux.HandleFunc("GET /api/resources", s.resources)
+	mux.HandleFunc("GET /api/resources/history", s.resourceHistory)
 	mux.HandleFunc("GET /api/conda-envs", s.condaEnvs)
 	mux.HandleFunc("GET /api/fs/dirs", s.dirs)
 	mux.HandleFunc("GET /api/fs/git", s.gitHead)
@@ -251,6 +254,9 @@ func (s *Server) gpus(w http.ResponseWriter, r *http.Request) {
 	views := make([]gpuView, 0, len(gpus))
 	for _, g := range gpus {
 		v := gpuView{GPU: g, Job: owner[g.Index], External: []gpu.Proc{}}
+		if v.Procs == nil {
+			v.Procs = []gpu.Proc{} // procs 约定是数组；nil 会被编码成 null，前端按数组读会崩
+		}
 		for _, p := range g.Procs {
 			if own, ok := assigned[p.JobID]; !ok || !slices.Contains(own, g.Index) {
 				v.External = append(v.External, p)

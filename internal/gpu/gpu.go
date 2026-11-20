@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"os"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"danlu/internal/execx"
@@ -38,8 +40,14 @@ type GPU struct {
 	UnknownMemMB int     `json:"unknown_mem_mb,omitempty"`
 	TempC        int     `json:"temp_c"`
 	PowerW       float64 `json:"power_w"`
-	Procs        []Proc  `json:"procs"`
-	BusID        string  `json:"-"` // PCI 总线号，nvidia-smi -q 的输出按它分卡
+	// 以下字段是资源详情页的扩展指标，老驱动可能返回 [N/A]，此时为 0/空
+	FanPercent       int     `json:"fan_percent,omitempty"`
+	ClockGraphicsMHz int     `json:"clock_graphics_mhz,omitempty"`
+	ClockMemoryMHz   int     `json:"clock_memory_mhz,omitempty"`
+	PowerLimitW      float64 `json:"power_limit_w,omitempty"`
+	PState           string  `json:"pstate,omitempty"`
+	Procs            []Proc  `json:"procs"`
+	BusID            string  `json:"-"` // PCI 总线号，nvidia-smi -q 的输出按它分卡
 }
 
 type Source interface {
@@ -73,17 +81,39 @@ func NewSource(runRoot string, thresholds ...int) Source {
 		}
 		return &Fake{N: n, Busy: busy}
 	}
-	return SMI{RunRoot: runRoot, UnknownMemoryThresholdMB: unknownMemoryThresholdMB}
+	return &SMI{RunRoot: runRoot, UnknownMemoryThresholdMB: unknownMemoryThresholdMB, query: smi}
 }
 
 // ---------- nvidia-smi ----------
 
+// SMI 每次查询都先带上扩展指标。扩展字段不是调度必需的，老驱动不支持时自动降级到原查询。
+// 降级后要过一段时间再试：驱动不支持时不会每一轮都多跑一次 nvidia-smi，
+// 临时故障恢复后功耗、风扇等指标也能自己回来。
 type SMI struct {
 	RunRoot                  string // 见 NewSource
 	UnknownMemoryThresholdMB int
+
+	nextExtrasAt atomic.Int64                                     // UnixNano；在此之前只用基本查询
+	extrasLog    sync.Once                                        // 降级日志只打印一次
+	query        func(context.Context, ...string) ([]byte, error) // 测试时替换
 }
 
 const gpuQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,pci.bus_id"
+
+// 扩展列从第 10 列开始，ParseGPUs 把它们当作可选列。
+const gpuQueryExt = gpuQuery + ",fan.speed,clocks.current.graphics,clocks.current.memory,power.limit,pstate"
+
+const (
+	// 扩展查询失败后先退回基本查询：驱动不支持时十分钟再试一次，代价可以忽略；
+	// 如果是临时故障，恢复后扩展指标会自动回来，不会整个进程周期都缺失。
+	extrasRetryAfterFallback = 10 * time.Minute
+	// 基本查询也失败时更像临时故障，一分钟后重试。
+	extrasRetryAfterFailure = time.Minute
+)
+
+// 扩展查询失败前已经花了一半超时时间，这一轮不再补查基本查询（剩下的时间不够它跑完）。
+// 是变量只为单测能调短。
+var extrasSlowFailure = smiTimeout / 2
 
 // ErrProcsUnknown 表示卡的数据拿到了，但查不到卡上的进程。这时被外部进程占着的卡看起来是空的，
 // 所以 Query 照常返回卡的数据（面板能显示），同时带上这个错误，调度器据此不分配 GPU。
@@ -93,7 +123,8 @@ var ErrMachineInfoNotReady = errors.New("机器 GPU 信息尚未采集完成")
 // 每次调用单独计时：没开 persistence mode 的机器上，nvidia-smi 调一次就可能要几秒
 const smiTimeout = 8 * time.Second
 
-// 补查图形进程只是尽力而为，给得短一些：三次调用加起来不超过 Monitor 的 20 秒过期时间
+// 补查图形进程只是尽力而为，给得短一些：卡的查询（扩展查询和同一轮补查的基本查询共用一个 smiTimeout）、
+// 进程查询和这一次加起来不超过 Monitor 的 20 秒过期时间
 const pidsTimeout = 3 * time.Second
 
 func smi(ctx context.Context, args ...string) ([]byte, error) {
@@ -102,8 +133,60 @@ func smi(ctx context.Context, args ...string) ([]byte, error) {
 	return execx.Output(execx.Command(ctx, "nvidia-smi", append(args, "--format=csv,noheader,nounits")...))
 }
 
-func (s SMI) Query(ctx context.Context) ([]GPU, error) {
-	out, err := smi(ctx, "--query-gpu="+gpuQuery)
+func (s *SMI) run(ctx context.Context, args ...string) ([]byte, error) {
+	if s.query != nil {
+		return s.query(ctx, args...)
+	}
+	return smi(ctx, args...)
+}
+
+// queryGPUs 先查扩展列；失败时按情况降级，并记住多久之后再试。
+// 扩展列只给资源页用，调度靠的是基本列：扩展查询无论怎么失败，都不能让之后的轮次拿不到卡的数据。
+func (s *SMI) queryGPUs(ctx context.Context) ([]byte, error) {
+	if time.Now().UnixNano() < s.nextExtrasAt.Load() {
+		return s.run(ctx, "--query-gpu="+gpuQuery)
+	}
+	started := time.Now()
+	out, err := s.run(ctx, "--query-gpu="+gpuQueryExt)
+	if err == nil {
+		return out, nil
+	}
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	elapsed := time.Since(started)
+	if elapsed >= extrasSlowFailure {
+		// 失败得慢，分不清是 nvidia-smi 整个卡住，还是只有扩展列有问题（比如老驱动加上没开
+		// persistence mode，每次调用都要好几秒）。这一轮不补查，但扩展列必须按降级暂停：
+		// 不暂停的话，下一轮又先等扩展查询失败，基本查询明明能用也永远拿不到数据，
+		// 调度器就一直不发 GPU 任务。真是整体卡住时，之后几轮的基本查询会照常报错。
+		s.fallBack(err)
+		return nil, err
+	}
+	// 和扩展查询共用一个 smiTimeout，这一轮卡的查询总耗时不比只跑基本查询时长。
+	bctx, cancel := context.WithDeadline(ctx, started.Add(smiTimeout))
+	defer cancel()
+	base, baseErr := s.run(bctx, "--query-gpu="+gpuQuery)
+	if baseErr != nil {
+		// 两次都失败更像临时故障（驱动重置、GPU 掉线），不要永久关掉扩展列。
+		s.nextExtrasAt.Store(time.Now().Add(extrasRetryAfterFailure).UnixNano())
+		return nil, baseErr
+	}
+	// 基本查询成功而扩展查询失败，通常是驱动不认识新增字段。
+	s.fallBack(err)
+	return base, nil
+}
+
+// fallBack 暂停扩展列，过一段时间再试，驱动升级或临时故障恢复后指标会回来。
+func (s *SMI) fallBack(err error) {
+	s.nextExtrasAt.Store(time.Now().Add(extrasRetryAfterFallback).UnixNano())
+	s.extrasLog.Do(func() {
+		log.Printf("GPU 扩展指标不可用，暂用基本查询（%s 后重试）: %v", extrasRetryAfterFallback, err)
+	})
+}
+
+func (s *SMI) Query(ctx context.Context) ([]GPU, error) {
+	out, err := s.queryGPUs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi 执行失败: %w", err)
 	}
@@ -111,7 +194,7 @@ func (s SMI) Query(ctx context.Context) ([]GPU, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err = smi(ctx, "--query-compute-apps=pid,gpu_uuid,used_memory")
+	out, err = s.run(ctx, "--query-compute-apps=pid,gpu_uuid,used_memory")
 	if err != nil {
 		return gpus, fmt.Errorf("%w（nvidia-smi: %v）", ErrProcsUnknown, err)
 	}
@@ -267,7 +350,7 @@ func parseMachineVersions(output string) (string, string, error) {
 	return match[1], match[2], nil
 }
 
-func (SMI) Machine(ctx context.Context) (MachineInfo, error) {
+func (*SMI) Machine(ctx context.Context) (MachineInfo, error) {
 	info := MachineInfo{}
 	info.Hostname, _ = os.Hostname()
 	ctx, cancel := context.WithTimeout(ctx, smiTimeout)
@@ -301,6 +384,22 @@ func ParseGPUs(out string) ([]GPU, error) {
 		}
 		if len(f) > 8 {
 			g.BusID = f[8]
+		}
+		// 扩展列都是可选的；[N/A] 经 atoi/atof 后是 0，P-State 单独清空。
+		if len(f) > 9 {
+			g.FanPercent = atoi(f[9])
+		}
+		if len(f) > 10 {
+			g.ClockGraphicsMHz = atoi(f[10])
+		}
+		if len(f) > 11 {
+			g.ClockMemoryMHz = atoi(f[11])
+		}
+		if len(f) > 12 {
+			g.PowerLimitW = atof(f[12])
+		}
+		if len(f) > 13 && !gpuFieldUnavailable(f[13]) {
+			g.PState = f[13]
 		}
 		gpus = append(gpus, g)
 	}
@@ -338,6 +437,12 @@ func splitCSV(line string) []string {
 		f[i] = strings.TrimSpace(f[i])
 	}
 	return f
+}
+
+// gpuFieldUnavailable 判断字符串字段是不是驱动给出的不可用占位。
+func gpuFieldUnavailable(s string) bool {
+	s = strings.TrimSpace(s)
+	return s == "" || strings.Contains(s, "N/A") || strings.Contains(s, "Not Supported")
 }
 
 // 不支持的字段会显示为 [N/A] 或 [Not Supported]，统一当作 0
@@ -379,7 +484,9 @@ func (f *Fake) Query(context.Context) ([]GPU, error) {
 		f.util[i] = max(0, min(100, f.util[i]+rand.IntN(21)-10))
 		g := GPU{Index: i, UUID: fmt.Sprintf("GPU-fake-%d", i), Name: "Fake GPU 24GB",
 			Util: f.util[i], MemUsedMB: 300 + f.util[i]*100, MemTotalMB: 24576,
-			TempC: 35 + f.util[i]/3, PowerW: 60 + float64(f.util[i])*2.5, Procs: []Proc{}}
+			TempC: 35 + f.util[i]/3, PowerW: 60 + float64(f.util[i])*2.5, Procs: []Proc{},
+			FanPercent: 30 + f.util[i]/4, ClockGraphicsMHz: 900 + f.util[i]*12,
+			ClockMemoryMHz: 8000, PowerLimitW: 350, PState: "P0"}
 		if f.Busy[i] {
 			g.Procs = append(g.Procs, Proc{PID: 900000 + i, UsedMemMB: 2048, User: "someone"})
 		}
@@ -427,7 +534,8 @@ func (m *Monitor) MachineLatest() (MachineInfo, time.Time, error) {
 func cloneGPUs(gpus []GPU) []GPU {
 	out := make([]GPU, len(gpus))
 	for i, g := range gpus {
-		g.Procs = append([]Proc(nil), g.Procs...)
+		// 空列表也要保持非 nil：nil 切片会被 JSON 编码成 null，面板按数组读 procs 会直接报错
+		g.Procs = append([]Proc{}, g.Procs...)
 		out[i] = g
 	}
 	return out

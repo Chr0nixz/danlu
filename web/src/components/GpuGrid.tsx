@@ -15,8 +15,8 @@ export const strayLabel = (p: Proc) => `${p.job_id ? `#${p.job_id} 的` : '外�
 
 type Stray = { key: string; job: number; user: string; procs: Proc[]; mem: number }
 
-/** 按任务（外部进程按用户）合并：EGL 渲染一个任务在一张卡上就能有几十个进程 */
-function groupStray(procs: Proc[]): Stray[] {
+/** 按任务（外部进程按用户）合并：EGL 渲染一个任务在一张卡上就能有几十个进程。资源页的 GPU 行复用同一套叙事 */
+export function groupStray(procs: Proc[]): Stray[] {
   const out: Stray[] = []
   for (const p of procs) {
     const key = p.job_id ? `job:${p.job_id}` : `user:${p.user}`
@@ -28,7 +28,7 @@ function groupStray(procs: Proc[]): Stray[] {
   return out
 }
 
-function strayTitle(s: Stray) {
+export function strayTitle(s: Stray) {
   const pids = s.procs.map((p) => p.pid)
   const list = pids.slice(0, 12).join(', ') + (pids.length > 12 ? ' …' : '')
   const graphics = s.procs.filter((p) => p.graphics).length

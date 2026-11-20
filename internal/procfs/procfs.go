@@ -45,10 +45,14 @@ func JobFromRunDir(runRoot, dir string) int64 {
 
 type Stat struct {
 	PID       int
+	Comm      string
 	State     byte
 	PPID      int
 	PGID      int
+	UTime     uint64 // 用户态时钟滴答数
+	STime     uint64 // 内核态时钟滴答数
 	StartTime uint64 // 自系统启动以来的时钟滴答数，用来识别 pid 是否被复用
+	RSSPages  uint64 // 常驻内存页数（stat 第 24 个字段），比再读 statm 少一次系统调用
 }
 
 // ParseStat 解析 /proc/<pid>/stat。进程名 comm 可能含空格和括号，所以从最后一个 ')' 往后切。
@@ -64,15 +68,21 @@ func ParseStat(s string) (Stat, error) {
 		return st, err
 	}
 	f := strings.Fields(s[close+1:])
-	// f[0]=state f[1]=ppid f[2]=pgrp ... f[19]=starttime（即 stat 的第 22 个字段）
+	// f[0]=state f[1]=ppid f[2]=pgrp ... f[11]=utime f[12]=stime ... f[19]=starttime（即 stat 的第 22 个字段）
 	if len(f) < 20 || len(f[0]) == 0 {
 		return st, errors.New("stat 字段不足")
 	}
 	st.PID = pid
+	st.Comm = strings.TrimSpace(s[open+1 : close])
 	st.State = f[0][0]
 	st.PPID, _ = strconv.Atoi(f[1])
 	st.PGID, _ = strconv.Atoi(f[2])
+	st.UTime, _ = strconv.ParseUint(f[11], 10, 64)
+	st.STime, _ = strconv.ParseUint(f[12], 10, 64)
 	st.StartTime, err = strconv.ParseUint(f[19], 10, 64)
+	if len(f) > 21 {
+		st.RSSPages, _ = strconv.ParseUint(f[21], 10, 64)
+	}
 	return st, err
 }
 

@@ -38,13 +38,20 @@ run cgroup.txt sh -c 'cat /proc/self/cgroup; echo; p=$(systemctl --user show dan
 run journal.txt journalctl --user -u danlu -n 500 --no-pager
 
 # ---------- GPU ----------
-# 和 internal/gpu/gpu.go 里的查询完全一致
+# 基础列和 internal/gpu/gpu.go 的原查询一致；扩展列单独查，老驱动失败也不影响这里
 runt smi-full.txt nvidia-smi
 runt smi-query-gpu.txt nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,pci.bus_id --format=csv,noheader,nounits
+# 扩展列单独查：老驱动不支持时也不会破坏上面的基础数据
+runt smi-query-gpu-extras.txt nvidia-smi --query-gpu=index,fan.speed,clocks.current.graphics,clocks.current.memory,power.limit,pstate --format=csv,noheader,nounits
 runt smi-compute-apps.txt nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits
 runt smi-pids.txt nvidia-smi -q -d PIDS
 runt smi-driver.txt nvidia-smi --query-gpu=index,name,driver_version,persistence_mode,pci.bus_id --format=csv
 runt smi-time.txt sh -c 'time nvidia-smi --query-gpu=index --format=csv,noheader >/dev/null'
+
+# 资源页的功耗/温度/链路速率来源，读不到就留空
+run rapl.txt sh -c 'for d in /sys/class/powercap/intel-rapl:*; do [ -d "$d" ] || continue; echo "$d"; cat "$d/name" "$d/energy_uj" "$d/max_energy_range_uj" 2>/dev/null; done'
+run hwmon.txt sh -c 'for d in /sys/class/hwmon/hwmon*; do [ -d "$d" ] || continue; echo "$d"; cat "$d/name" 2>/dev/null; for f in "$d"/temp*_input; do [ -e "$f" ] || continue; echo "$f"; cat "$f"; cat "${f%_input}_label" 2>/dev/null; done; done'
+run net-speed.txt sh -c 'for d in /sys/class/net/*; do n=${d##*/}; printf "%s " "$n"; cat "$d/speed" 2>/dev/null || echo; done'
 
 # 每张卡上的每个进程（含图形进程）：属于谁、danlu 认不认得出是哪个任务、它自己看到的选卡变量
 bash "$(dirname -- "${BASH_SOURCE[0]}")/gpu-procs.sh" >"$OUT/gpu-procs.txt" 2>&1
@@ -60,9 +67,10 @@ run danlu-config.txt sed -E 's/^([[:space:]]*(password_hash|entrance|ntfy|token)
 run danlu-dirs.txt sh -c 'd=${DANLU_HOME:-$HOME/.danlu}; ls -la "$d" "$d/backup" 2>&1; du -sh "$d"/* 2>&1; df -h "$d"'
 
 if s0_open_api s0-collect; then
-  for ep in me gpus system queue settings; do
+  for ep in me gpus system resources queue settings; do
     s0_api "$ep" >"$OUT/api-$ep.json" 2>&1 || echo "请求失败" >>"$OUT/api-$ep.json"
   done
+  s0_api "resources/history?range=1m" >"$OUT/api-resources-history.json" 2>&1 || echo "请求失败" >>"$OUT/api-resources-history.json"
   s0_api jobs | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 for j in d["jobs"]:

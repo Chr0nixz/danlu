@@ -71,7 +71,7 @@ bash scripts/dev-wsl.sh  # demo server on 127.0.0.1:17600 (TLS off, fake GPUs, s
 `cmd/danlu/main.go` holds every subcommand (`init`, `serve`, `install-service`, `passwd`, …). `serve` wires the parts together:
 
 1. `store` (SQLite)
-2. `gpu.Monitor` (polls `nvidia-smi` every 2 s) and `system.Monitor` (CPU and memory), both a `sample.Sampler`: `Latest()` returns an error once no sample has completed for 20 s, so stale data is never trusted
+2. `gpu.Monitor` (polls `nvidia-smi` every 2 s; the same query also asks for fan/clocks/power-limit/P-State, and falls back to the basic query for ten minutes if a driver rejects the extra columns or the extended query fails slowly — the fallback is time-limited, so a temporary driver failure doesn't lose those metrics until the next restart, and the extended query can never keep the scheduler from getting card data; within one round the extended query and its fallback share one `nvidia-smi` timeout) and `system.Monitor` (CPU and memory), both a `sample.Sampler`: `Latest()` returns an error once no sample has completed for 20 s, so stale data is never trusted. `system.ResourceMonitor` adds the resource page's detail sampling (CPU per-core/load/frequency/temperature/RAPL or amd_energy power, memory/swap, network, physical-disk I/O, root disk, top processes) every 2 s, keeps one hour of history in memory, scans processes every 10 s, and has its own sampler so a stuck `/proc` read only stales the resource page.
 3. `runner`, which implements `scheduler.Executor`
 4. `scheduler.Manager`
 5. `auth`
