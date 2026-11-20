@@ -108,3 +108,41 @@ func TestLogStreamEndsAfterTruncatedCharacter(t *testing.T) {
 		t.Fatalf("应该发出残缺字符再结束: %q", body)
 	}
 }
+
+// 日志下载带 Content-Length，支持 Range：手机网络断了能接着下
+func TestLogDownloadSupportsRange(t *testing.T) {
+	home := t.TempDir()
+	st, err := store.Open(filepath.Join(home, "danlu.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	j := &store.Job{Name: "train", Workdir: home, Cmd: "true", Status: store.StatusSucceeded}
+	if err := st.InsertJob(j); err != nil {
+		t.Fatal(err)
+	}
+	run := &runner.Runner{LogRoot: home}
+	if err := os.WriteFile(run.LogPath(j.ID), []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{Store: st, Runner: run}
+	get := func(rangeHeader string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/api/jobs/1/log/download", nil)
+		r.SetPathValue("id", strconv.FormatInt(j.ID, 10))
+		if rangeHeader != "" {
+			r.Header.Set("Range", rangeHeader)
+		}
+		w := httptest.NewRecorder()
+		srv.jobLogDownload(w, r)
+		return w
+	}
+	w := get("")
+	if w.Code != 200 || w.Body.String() != "0123456789" || w.Header().Get("Content-Length") != "10" ||
+		!strings.HasPrefix(w.Header().Get("Content-Disposition"), "attachment;") {
+		t.Fatalf("完整下载 = %d %q %v", w.Code, w.Body.String(), w.Header())
+	}
+	w = get("bytes=4-")
+	if w.Code != http.StatusPartialContent || w.Body.String() != "456789" || w.Header().Get("Content-Range") != "bytes 4-9/10" {
+		t.Fatalf("续传 = %d %q %v", w.Code, w.Body.String(), w.Header())
+	}
+}

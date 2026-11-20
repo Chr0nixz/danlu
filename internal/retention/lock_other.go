@@ -3,7 +3,6 @@
 package retention
 
 import (
-	"errors"
 	"os"
 	"sync"
 )
@@ -13,7 +12,7 @@ var testLock sync.Mutex
 
 func lock(*os.Root) (func(), error) {
 	if !testLock.TryLock() {
-		return nil, errors.New("另一个清理正在运行")
+		return nil, ErrBusy
 	}
 	return testLock.Unlock, nil
 }

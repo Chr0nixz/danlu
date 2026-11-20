@@ -12,7 +12,7 @@ func cmdTrace(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("用法：danlu trace <服务器上的绝对路径>")
 	}
-	p, c, err := loadForEdit()
+	p, c, err := loadEffective()
 	if err != nil {
 		return err
 	}

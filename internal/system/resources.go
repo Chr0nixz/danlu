@@ -140,6 +140,9 @@ type ResourcePoint struct {
 	DiskWriteBps  uint64   `json:"disk_write_bps"`
 	CPUPowerW     *float64 `json:"cpu_power_w"`
 	GPUPowerW     *float64 `json:"gpu_power_w"`
+	// 丹炉自身占用（数据目录总量、数据库逻辑大小）；自身统计还没成功或已过期时为 null，不画假 0。
+	DataBytes *uint64 `json:"data_bytes"`
+	DBBytes   *uint64 `json:"db_bytes"`
 }
 
 type ResourcePeaks struct {
@@ -152,6 +155,8 @@ type ResourcePeaks struct {
 	DiskWriteBps  uint64   `json:"disk_write_bps"`
 	CPUPowerW     *float64 `json:"cpu_power_w"`
 	GPUPowerW     *float64 `json:"gpu_power_w"`
+	DataBytes     *uint64  `json:"data_bytes"`
+	DBBytes       *uint64  `json:"db_bytes"`
 }
 
 type ResourceSource interface {
@@ -161,6 +166,10 @@ type ResourceSource interface {
 // ResourceMonitor 保存最新主机快照和最近 1 小时的压缩历史。
 type ResourceMonitor struct {
 	*sample.Sampler[ResourceSnapshot]
+
+	// SelfBytes 读自身占用监控的缓存值（数据目录总量、数据库逻辑大小），
+	// 在 Run 启动前设置，只由采集 goroutine 调用。未设置时历史里没有占用曲线。
+	SelfBytes func() (data, db uint64, ok bool)
 
 	mu     sync.RWMutex
 	points []ResourcePoint
@@ -202,6 +211,11 @@ func (m *ResourceMonitor) record(snap ResourceSnapshot) {
 		NetRxBps: snap.NetRxBps, NetTxBps: snap.NetTxBps,
 		DiskReadBps: snap.DiskReadBps, DiskWriteBps: snap.DiskWriteBps,
 		CPUPowerW: cloneFloat(snap.CPU.PowerW), GPUPowerW: cloneFloat(snap.GPUPowerW),
+	}
+	if m.SelfBytes != nil {
+		if data, db, ok := m.SelfBytes(); ok {
+			p.DataBytes, p.DBBytes = cloneUint64(data), cloneUint64(db)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -257,6 +271,12 @@ func resourcePeaks(points []ResourcePoint) ResourcePeaks {
 		if p.GPUPowerW != nil && (peaks.GPUPowerW == nil || *p.GPUPowerW > *peaks.GPUPowerW) {
 			peaks.GPUPowerW = cloneFloat(p.GPUPowerW)
 		}
+		if p.DataBytes != nil && (peaks.DataBytes == nil || *p.DataBytes > *peaks.DataBytes) {
+			peaks.DataBytes = cloneUint64(*p.DataBytes)
+		}
+		if p.DBBytes != nil && (peaks.DBBytes == nil || *p.DBBytes > *peaks.DBBytes) {
+			peaks.DBBytes = cloneUint64(*p.DBBytes)
+		}
 	}
 	return peaks
 }
@@ -291,6 +311,12 @@ func downsampleResource(points []ResourcePoint, maxPoints int) []ResourcePoint {
 		}
 		if values := averageFloatPointers(part, func(x ResourcePoint) *float64 { return x.GPUPowerW }); values != nil {
 			p.GPUPowerW = values
+		}
+		if values := averageUint64Pointers(part, func(x ResourcePoint) *uint64 { return x.DataBytes }); values != nil {
+			p.DataBytes = values
+		}
+		if values := averageUint64Pointers(part, func(x ResourcePoint) *uint64 { return x.DBBytes }); values != nil {
+			p.DBBytes = values
 		}
 		out = append(out, p)
 	}
@@ -350,6 +376,22 @@ func averageFloatPointers(points []ResourcePoint, pick func(ResourcePoint) *floa
 	return &v
 }
 
+func averageUint64Pointers(points []ResourcePoint, pick func(ResourcePoint) *uint64) *uint64 {
+	var total uint64
+	var n int
+	for _, p := range points {
+		if v := pick(p); v != nil {
+			total += *v
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	v := total / uint64(n)
+	return &v
+}
+
 func mathRound(v float64) int64 {
 	if v < 0 {
 		return 0
@@ -394,4 +436,8 @@ func cloneFloat(v *float64) *float64 {
 	}
 	n := *v
 	return &n
+}
+
+func cloneUint64(v uint64) *uint64 {
+	return &v
 }

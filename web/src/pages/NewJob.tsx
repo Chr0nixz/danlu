@@ -5,8 +5,9 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 import { gpuBusy, strayLabel, useGpus } from '../components/GpuGrid'
 import { modKey } from '../components/Shortcuts'
 import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
-import { failText, sameCodeFailKinds, type GPU, type Job } from '@danlu/core'
+import { failText, sameCodeFailKinds, type GPU, type Job, type Prefs } from '@danlu/core'
 import { api } from '../lib/api'
+import { usePrefs } from '../lib/prefs'
 
 type JobFormMode = 'new' | 'copy' | 'rerun'
 
@@ -73,7 +74,9 @@ export function NewJob() {
   const sourceId = copyId ?? (Number(params.get('from')) || null)
   const formMode: JobFormMode = copyId ? 'copy' : sourceId ? 'rerun' : 'new'
   const source = useQuery({ queryKey: ['job', sourceId], queryFn: () => api.job(sourceId!), enabled: !!sourceId })
-  if (sourceId && source.isLoading) {
+  // 表单的初始值来自面板偏好：等它到了再挂载，草稿才能和"刚打开时"正确比较
+  const { prefs, ready } = usePrefs()
+  if ((sourceId && source.isLoading) || !ready) {
     return (
       <div className="mx-auto max-w-3xl space-y-4">
         <Skeleton className="h-7 w-48" />
@@ -82,14 +85,12 @@ export function NewJob() {
     )
   }
   if (sourceId && source.error) return <ErrorBox error={source.error} />
-  return <JobForm key={`${formMode}-${sourceId ?? ''}-${generation}`} source={source.data ?? null} formMode={formMode} onReset={() => setGeneration((g) => g + 1)} />
+  return <JobForm key={`${formMode}-${sourceId ?? ''}-${generation}`} source={source.data ?? null} formMode={formMode} prefs={prefs} onReset={() => setGeneration((g) => g + 1)} />
 }
 
 type Field = 'workdir' | 'cmd' | 'gpu' | 'memo' | 'env'
 
-const notifyPreferenceKey = 'danlu.notify-done'
-
-function JobForm({ source, formMode, onReset }: { source: Job | null; formMode: JobFormMode; onReset(): void }) {
+function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; formMode: JobFormMode; prefs: Prefs; onReset(): void }) {
   const nav = useNavigate()
   const gpus = useGpus()
   const conda = useQuery({ queryKey: ['conda'], queryFn: api.condaEnvs, staleTime: 60_000 })
@@ -107,22 +108,17 @@ function JobForm({ source, formMode, onReset }: { source: Job | null; formMode: 
   const snapshotSelected = rerun && useSnapshot
   const [name, setName] = useState(saved?.name ?? (source && rerun ? rerunName(source.name) : source?.name ?? ''))
   const [memo, setMemo] = useState(saved?.memo ?? '')
-  const [notifyDone, setNotifyDone] = useState(() => {
-    try {
-      return localStorage.getItem(notifyPreferenceKey) === '1'
-    } catch {
-      return false
-    }
-  })
+  // 默认值在「设置 → 面板偏好」里改，手机和电脑共用
+  const [notifyDone, setNotifyDone] = useState(prefs.new_job_notify_done)
   const [workdir, setWorkdir] = useState(saved?.workdir ?? source?.workdir ?? '')
   const activeWorkdir = snapshotSelected ? source!.workdir : workdir
   const [condaEnv, setCondaEnv] = useState(saved?.condaEnv ?? source?.conda_env ?? '')
   const [cmd, setCmd] = useState(saved?.cmd ?? source?.cmd ?? '')
   const [mode, setMode] = useState<'count' | 'pinned'>(saved?.mode ?? (source?.gpus_pinned.length ? 'pinned' : 'count'))
-  const [count, setCount] = useState(saved?.count ?? source?.gpus_req ?? 1)
+  const [count, setCount] = useState(saved?.count ?? source?.gpus_req ?? prefs.new_job_gpus)
   const [pinned, setPinned] = useState<number[]>(saved?.pinned ?? source?.gpus_pinned ?? [])
   const [envText, setEnvText] = useState(saved?.envText ?? (source ? Object.entries(source.env).map(([k, v]) => `${k}=${v}`).join('\n') : ''))
-  const [inheritBashrc, setInheritBashrc] = useState(saved?.inheritBashrc ?? source?.inherit_bashrc ?? false)
+  const [inheritBashrc, setInheritBashrc] = useState(saved?.inheritBashrc ?? source?.inherit_bashrc ?? prefs.new_job_bashrc)
   const [errors, setErrors] = useState<Partial<Record<Field, string>>>({})
 
   // 草稿：和刚打开时不一样才存。默认的 conda 环境是列表到了之后才选上的，不算用户改过
@@ -144,9 +140,9 @@ function JobForm({ source, formMode, onReset }: { source: Job | null; formMode: 
       if (errors[field]) setErrors((e) => ({ ...e, [field]: undefined }))
     }
 
-  // 新建任务时默认选第一个非 base 的环境。只在环境列表第一次到达时选一次，之后用户选了"不使用 conda"也要保留
-  // 恢复出来的草稿里"不使用 conda"也是用户选的，同样保留
-  const condaDefaulted = useRef(!!saved)
+  // 新建任务时默认选第一个非 base 的环境（面板偏好里可以关掉）。只在环境列表第一次到达时选一次，
+  // 之后用户选了"不使用 conda"也要保留；恢复出来的草稿里"不使用 conda"也是用户选的，同样保留
+  const condaDefaulted = useRef(!!saved || prefs.new_job_conda === 'none')
   useEffect(() => {
     const envs = conda.data?.envs
     if (source || condaDefaulted.current || !envs?.length) return
@@ -178,14 +174,9 @@ function JobForm({ source, formMode, onReset }: { source: Job | null; formMode: 
 
   const submit = useMutation({
     mutationFn: api.submit,
-    onSuccess: (j, request) => {
+    onSuccess: (j) => {
       submitted.current = true
       writeDraft(draftKey, null)
-      try {
-        localStorage.setItem(notifyPreferenceKey, request.notify_done ? '1' : '0')
-      } catch {
-        // 存储不可用时仍进入已提交的任务。
-      }
       nav(`/jobs/${j.id}`)
     },
   })

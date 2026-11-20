@@ -8,22 +8,11 @@ import { Navigate, useSearchParams } from 'react-router'
 import { type TerminalSession } from '@danlu/core'
 import { Button, Card, cx, Dialog, ErrorBox, Spinner, Textarea } from '../components/ui'
 import { api } from '../lib/api'
+import { saveTerminalFontSize, storedTerminalFontSize } from '../lib/localPrefs'
 import { connectTerminal, TERMINAL_REPLACED, TERMINAL_UNAUTHORIZED, type TerminalSocket } from '../lib/terminal'
 
-const fontSizeKey = 'danlu.terminal.fontSize'
 const encoder = new TextEncoder()
 const emptySessions: TerminalSession[] = []
-
-/** 字号只是偏好：浏览器禁用了站点存储（隐私模式、屏蔽 Cookie）时读写会抛错，用默认值，不能让终端页打不开 */
-function storedFontSize() {
-  try {
-    const value = Number(localStorage.getItem(fontSizeKey))
-    if (Number.isInteger(value) && value >= 11 && value <= 20) return value
-  } catch {
-    // 用默认字号
-  }
-  return 13
-}
 
 export function Terminal() {
   const queryClient = useQueryClient()
@@ -36,7 +25,7 @@ export function Terminal() {
     refetchInterval: 3000,
   })
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [fontSize, setFontSize] = useState(storedFontSize)
+  const [fontSize, setFontSize] = useState(storedTerminalFontSize)
   const [openError, setOpenError] = useState<unknown>(null)
   // 关闭终端会结束里面的进程，先确认
   const [closing, setClosing] = useState<TerminalSession | null>(null)
@@ -80,13 +69,7 @@ export function Terminal() {
     if (!selectedId && items.length) setSelectedId(items[0].id)
     else if (selectedId && !items.some((s) => s.id === selectedId)) setSelectedId(items[0]?.id ?? null)
   }, [items, selectedId])
-  useEffect(() => {
-    try {
-      localStorage.setItem(fontSizeKey, String(fontSize))
-    } catch {
-      // 存不下时只是下次打开回到默认字号
-    }
-  }, [fontSize])
+  useEffect(() => saveTerminalFontSize(fontSize), [fontSize])
 
   const maxed = items.length >= 3
   const requestOpen = (jobId?: number) => {

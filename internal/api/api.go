@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -29,8 +28,10 @@ import (
 	"danlu/internal/logs"
 	"danlu/internal/notify"
 	"danlu/internal/qrutil"
+	"danlu/internal/retention"
 	"danlu/internal/runner"
 	"danlu/internal/scheduler"
+	"danlu/internal/settings"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
 	"danlu/internal/system"
@@ -51,15 +52,21 @@ type Server struct {
 	System    *system.Monitor
 	Resources *system.ResourceMonitor
 	Disks     *system.DiskMonitor
+	Self      *system.SelfMonitor
 	Notify    *notify.Service
 	Terminal  *terminal.Manager
 	Auth      *auth.Auth
 	Runner    *runner.Runner
 	Static    fs.FS
 	Version   string
+	// Settings 是面板上能改的运行设置；Pruner 是后台清理，保存保留策略后叫它马上清理一次。
+	// 单测里可以为 nil，这时设置页不显示这两组
+	Settings *settings.Runtime
+	Pruner   *retention.Pruner
 
 	conda       condaCache
 	comparisons comparisonCache
+	logLines    logLineCache
 }
 
 func (s *Server) Handler() http.Handler {
@@ -105,6 +112,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings/ca.crt", s.caCert)
 	mux.HandleFunc("GET /api/settings/qr.svg", s.settingsQR)
 	mux.HandleFunc("POST /api/settings/password", s.changePassword)
+	mux.HandleFunc("POST /api/settings/security", s.updateSecurity)
+	mux.HandleFunc("POST /api/settings/runtime", s.updateRuntime(settings.GroupRuntime))
+	mux.HandleFunc("POST /api/settings/retention", s.updateRuntime(settings.GroupRetention))
+	mux.HandleFunc("POST /api/settings/retention/preview", s.previewRetention)
+	mux.HandleFunc("POST /api/settings/prefs", s.updatePrefs)
+	mux.HandleFunc("GET /api/sessions", s.listSessions)
+	mux.HandleFunc("POST /api/sessions/revoke-others", s.revokeOtherSessions)
+	mux.HandleFunc("POST /api/sessions/{id}/revoke", s.revokeSession)
 	mux.HandleFunc("POST /api/notify/test", s.notifyTest)
 	mux.HandleFunc("GET /api/terminal", s.listTerminals)
 	mux.HandleFunc("POST /api/terminal", s.openTerminal)
@@ -174,6 +189,18 @@ func attachment(w http.ResponseWriter, name, contentType string) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, name))
 }
 
+// serveFile 发送已打开的文件，带 Content-Length，支持 Range：手机网络断了能接着下。
+// 长度按开始时的大小算，运行中的任务日志还在变长时只发到那一刻；文件变了以后，
+// 带 If-Range 的续传会拿到完整的新文件，不会拼出半新半旧的内容。
+func serveFile(w http.ResponseWriter, r *http.Request, f *os.File) {
+	fi, err := f.Stat()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
+}
+
 // sseWriteTimeout 是日志 SSE 每次写的期限，每写一次续期一次。
 const sseWriteTimeout = 30 * time.Second
 
@@ -201,6 +228,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrLocked):
 		mins := int(wait.Minutes()) + 1
 		writeErr(w, 429, fmt.Sprintf("尝试次数过多，请 %d 分钟后再试", mins))
+	case errors.Is(err, auth.ErrLoginBusy):
+		writeErr(w, 429, err.Error())
 	case errors.Is(err, auth.ErrBadCredentials):
 		writeErr(w, 401, err.Error())
 	case errors.Is(err, auth.ErrNeedTOTP), errors.Is(err, auth.ErrBadTOTP):
@@ -213,7 +242,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, doctor.Run(r.Context(), s.Cfg, s.Paths, s.Version, APIVersion))
+	writeJSON(w, http.StatusOK, doctor.Run(r.Context(), s.effectiveConfig(), s.Paths, s.Version, APIVersion))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -493,13 +522,10 @@ func (s *Server) views(jobs []*store.Job) []jobView {
 		if s.Mgr != nil && j.Status == store.StatusRunning {
 			v.SilentSince = s.Mgr.RuntimeView(j.ID).SilentSince
 		}
-		// 结束的任务也显示最后一行，通常是最终的指标
+		// 结束的任务也显示最后一行，通常是最终的指标。失败的任务再找一条报错行：
+		// 最后一行常常是 torchrun 的汇总或空白分隔线，不是原因
 		if j.StartedAt != nil {
-			v.LastLine = logs.LastLine(s.Runner.LogPath(j.ID))
-		}
-		// 失败的任务再找一条报错行：最后一行常常是 torchrun 的汇总或空白分隔线，不是原因
-		if j.Status == store.StatusFailed && j.StartedAt != nil {
-			v.ErrorLine = logs.ErrorLine(s.Runner.LogPath(j.ID))
+			v.LastLine, v.ErrorLine = s.logLines.lines(s.Runner.LogPath(j.ID), j.Status == store.StatusFailed)
 		}
 		out[i] = v
 	}
@@ -613,7 +639,7 @@ func (s *Server) jobEnv(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="env-%d.txt"`, j.ID))
 	w.Header().Set("Cache-Control", "private, no-store")
-	_, _ = io.Copy(w, f)
+	serveFile(w, r, f)
 }
 
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
@@ -860,7 +886,7 @@ func (s *Server) jobLogDownload(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	attachment(w, fmt.Sprintf("danlu-%d.log", j.ID), "text/plain; charset=utf-8")
 	noWriteTimeout(w)
-	io.Copy(w, f)
+	serveFile(w, r, f)
 }
 
 // ---------- 代码快照 ----------
@@ -938,7 +964,7 @@ func (s *Server) snapshotDownload(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	attachment(w, fmt.Sprintf("danlu-%d-code.tar.gz", j.ID), "application/gzip")
 	noWriteTimeout(w)
-	io.Copy(w, f)
+	serveFile(w, r, f)
 }
 
 // ---------- 设置 ----------
@@ -955,6 +981,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"conda_base": s.Cfg.Runtime.CondaBase, "ca_available": false,
 		"terminal_enabled": s.Cfg.Terminal.Enabled,
 		"totp_enabled":     totpEnabled,
+		"security":         s.securityView(s.security()),
 	}
 	if s.Cfg.TLS.Mode == config.TLSLocalCA {
 		if fp, err := tlsutil.Fingerprint(tlsutil.FilesIn(s.Paths.TLS).CACert); err == nil {
@@ -968,6 +995,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp["notify"] = status
+	}
+	if err := s.panelSettings(resp); err != nil {
+		writeErr(w, 500, "读取面板设置失败")
+		return
 	}
 	writeJSON(w, 200, resp)
 }
@@ -983,7 +1014,7 @@ func (s *Server) caCert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) settingsQR(w http.ResponseWriter, r *http.Request) {
-	svg, err := qrutil.SVG(s.Cfg.URL())
+	svg, err := qrutil.SVG(s.entranceURL(s.security()))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "生成接入二维码失败")
 		return
@@ -1002,7 +1033,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	if !s.Auth.CheckPassword(body.Old) {
+	if !s.Auth.CheckPassword(r.Context(), body.Old) {
 		writeErr(w, 400, "当前密码不正确")
 		return
 	}

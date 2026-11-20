@@ -3,10 +3,12 @@ package retention
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -318,5 +320,169 @@ func TestPruneKeepsArtifactsOfSnapshotRerun(t *testing.T) {
 	}
 	if got, _ := p.Store.GetJob(j.ID); got.PrunedAt == nil {
 		t.Fatal("清理状态未记录")
+	}
+}
+
+// 任务把 code/ 里恢复出来的目录换成指向另一个任务的相对链接时，清理不能顺着链接删到另一个任务的文件
+func TestPruneDoesNotFollowParentSymlinkIntoOtherJob(t *testing.T) {
+	p := newPruner(t)
+	victim := addJob(t, p, 1, store.StatusSucceeded)
+	old := addJob(t, p, 120, store.StatusSucceeded)
+	put := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	victimFile := filepath.Join(p.Paths.Run, fmt.Sprint(victim.ID), "code", "cfg", "a.yaml")
+	put(victimFile, "lr: 1")
+	id := fmt.Sprint(old.ID)
+	meta, _ := json.Marshal(snapshot.Meta{Files: []snapshot.FileEntry{{Path: "train.py"}, {Path: "cfg/a.yaml"}}})
+	put(filepath.Join(p.Paths.Snapshots, id+".meta.json"), string(meta))
+	code := filepath.Join(p.Paths.Run, id, "code")
+	put(filepath.Join(code, "train.py"), "print(1)")
+	target := filepath.Join("..", "..", fmt.Sprint(victim.ID), "code", "cfg")
+	if err := os.Symlink(target, filepath.Join(code, "cfg")); err != nil {
+		t.Skipf("当前系统不能创建符号链接: %v", err)
+	}
+
+	p.Options = Options{KeepDays: 90, DryRun: true}
+	r, err := p.Prune(context.Background())
+	if err != nil || len(r.Jobs) != 1 || r.Jobs[0].JobID != old.ID {
+		t.Fatalf("预览结果不对: %+v %v", r, err)
+	}
+	p.Options.DryRun = false
+	if _, err := p.Prune(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(victimFile); err != nil {
+		t.Fatalf("清理顺着父目录链接删了另一个任务的文件: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(code, "train.py")); !os.IsNotExist(err) {
+		t.Fatalf("恢复出来的代码应该已清理: %v", err)
+	}
+}
+
+// 面板上的保留策略盖住 Options；按 OlderThan 手动清理时不用它
+func TestLiveOptionsOverrideAndOlderThanIgnoresThem(t *testing.T) {
+	p := newPruner(t)
+	mid := addJob(t, p, 40, store.StatusSucceeded)
+	p.Options.DryRun = true
+	if r, err := p.Prune(context.Background()); err != nil || len(r.Jobs) != 0 {
+		t.Fatalf("90 天内不应清理: %+v %v", r, err)
+	}
+	p.Live = func() (int64, int64) { return 30, 0 }
+	if r, err := p.Prune(context.Background()); err != nil || len(r.Jobs) != 1 || r.Jobs[0].JobID != mid.ID {
+		t.Fatalf("改成 30 天后应清理 40 天前的任务: %+v %v", r, err)
+	}
+	older := 100 * 24 * time.Hour
+	p.Options.OlderThan = &older
+	if r, err := p.Prune(context.Background()); err != nil || len(r.Jobs) != 0 {
+		t.Fatalf("手动按时长清理不应受面板设置影响: %+v %v", r, err)
+	}
+}
+
+// 预览不删东西；正在清理时预览返回 ErrBusy
+func TestPreviewAndBusy(t *testing.T) {
+	p := newPruner(t)
+	old := addJob(t, p, 10, store.StatusSucceeded)
+	r, err := p.Preview(context.Background(), 5, 0)
+	if err != nil || !r.DryRun || len(r.Jobs) != 1 || r.Jobs[0].JobID != old.ID {
+		t.Fatalf("预览 = %+v %v", r, err)
+	}
+	if _, err := os.Stat(filepath.Join(p.Paths.Logs, fmt.Sprintf("%d.log", old.ID))); err != nil {
+		t.Fatal("预览删除了日志")
+	}
+	root, err := os.OpenRoot(p.Paths.Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	unlock, err := lock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Preview(context.Background(), 5, 0)
+	unlock()
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("拿不到清理锁时应返回 ErrBusy: %v", err)
+	}
+}
+
+// 预览到期就返回，目录统计也跟着停下并释放清理锁
+func TestPreviewStopsAtDeadline(t *testing.T) {
+	p := newPruner(t)
+	for i := 0; i < 3; i++ {
+		addJob(t, p, 120, store.StatusSucceeded)
+	}
+	expired, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+	if _, err := p.Preview(expired, 90, 0); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("到期后应返回 DeadlineExceeded: %v", err)
+	}
+	root, err := os.OpenRoot(p.Paths.Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := sizeOf(expired, root, "logs", p.Paths.Home, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("目录统计应检查 ctx: %v", err)
+	}
+	if _, err := canonicalOutputs(expired, []string{p.OutputRoot}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("解析输出目录应检查 ctx: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r, err := p.Preview(context.Background(), 90, 0)
+		if err == nil {
+			if len(r.Jobs) != 3 {
+				t.Fatalf("预览 = %+v", r)
+			}
+			break
+		}
+		if !errors.Is(err, ErrBusy) || time.Now().After(deadline) {
+			t.Fatalf("后台统计停下后应释放清理锁: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Kick 让 Run 马上再清理一次，并记下结果
+func TestRunKickAndLast(t *testing.T) {
+	p := newPruner(t)
+	keep := int64(90)
+	var mu sync.Mutex
+	p.Live = func() (int64, int64) { mu.Lock(); defer mu.Unlock(); return keep, 0 }
+	old := addJob(t, p, 40, store.StatusSucceeded)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitLast := func(want int) Status {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if st, ok := p.Last(); ok && st.Jobs == want {
+				return st
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		st, ok := p.Last()
+		t.Fatalf("等不到清理结果 %d: %+v %t", want, st, ok)
+		return st
+	}
+	waitLast(0)
+	mu.Lock()
+	keep = 30
+	mu.Unlock()
+	p.Kick()
+	if st := waitLast(1); st.Bytes == 0 || st.At == 0 {
+		t.Fatalf("清理结果不完整: %+v", st)
+	}
+	if got, _ := p.Store.GetJob(old.ID); got.PrunedAt == nil {
+		t.Fatal("Kick 之后应真的清理")
 	}
 }

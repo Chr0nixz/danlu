@@ -143,4 +143,69 @@ func TestTerminalEnabledByDefaultAndCanBeDisabled(t *testing.T) {
 	if err != nil || c.Terminal.Enabled {
 		t.Fatalf("应能通过配置关闭终端: %+v, %v", c, err)
 	}
+	// 旧配置的 [terminal] 段里没有 session_lifetime，照样是 15 分钟；写了 0 要拒绝
+	if c.Terminal.SessionLifetime.Duration != 15*time.Minute {
+		t.Fatalf("终端保留时长默认应是 15 分钟，实际 %s", c.Terminal.SessionLifetime)
+	}
+	if err := os.WriteFile(p.Config, []byte(base+"[terminal]\nsession_lifetime = '0s'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil {
+		t.Fatal("session_lifetime = 0 应被拒绝")
+	}
+}
+
+// 入口不能和面板自己的路径重名：入口地址一律被拦下来发 gate cookie，同名页面就打不开了
+func TestValidEntrance(t *testing.T) {
+	for _, s := range []string{"k3x9p2qa7m4z", "abcdef", strings.Repeat("a", 64)} {
+		if !ValidEntrance(s) {
+			t.Errorf("%q 应是有效入口", s)
+		}
+	}
+	for _, s := range []string{"", "abcde", strings.Repeat("a", 65), "ABCDEF", "abc-def", "settings", "terminal", "resources", "compare", "assets"} {
+		if ValidEntrance(s) {
+			t.Errorf("%q 不应是有效入口", s)
+		}
+	}
+	for range 100 {
+		if !ValidEntrance(RandomEntrance()) {
+			t.Fatal("随机生成的入口应总是有效")
+		}
+	}
+}
+
+// 写错的键不会让启动失败，但会记下来并给出警告；保存时不写回
+func TestLoadReportsUnknownKeys(t *testing.T) {
+	p := PathsFor(t.TempDir())
+	c := Default()
+	c.Server.Port, c.Server.Entrance = 17699, "abcdef"
+	if err := Save(p, c); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil || len(got.Unknown) != 0 {
+		t.Fatalf("正常配置不应有未知键: %v %v", got.Unknown, err)
+	}
+	b, err := os.ReadFile(p.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(b), "kill_grace", "kill_grac", 1) + "\n[typo]\nx = 1\n"
+	if err := os.WriteFile(p.Config, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got.Unknown, ",")
+	if !strings.Contains(joined, "runtime.kill_grac") || !strings.Contains(joined, "typo.x") {
+		t.Fatalf("应记下写错的键，实际 %v", got.Unknown)
+	}
+	if err := Save(p, got); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p.Config); strings.Contains(string(b), "Unknown") || strings.Contains(string(b), "typo") {
+		t.Fatalf("未知键不应写回配置文件:\n%s", b)
+	}
 }

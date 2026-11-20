@@ -41,7 +41,7 @@ type procEntry struct {
 // ProcResourceSource 从 /proc 和 /sys 读取资源详情。Query 只由 sample.Sampler 的一个 goroutine 调用。
 type ProcResourceSource struct {
 	runRoot   string
-	warnBytes uint64
+	warnBytes func() uint64 // 低余量提示线，每次采样时取；可以在面板上随时改
 	gpuStats  func() GPUStats
 	rootStat  diskStatFunc
 
@@ -84,7 +84,7 @@ type ProcResourceSource struct {
 	energyKnown bool
 }
 
-func NewResourceSource(runRoot string, warnBytes uint64, gpuStats func() GPUStats) ResourceSource {
+func NewResourceSource(runRoot string, warnBytes func() uint64, gpuStats func() GPUStats) ResourceSource {
 	return &ProcResourceSource{
 		runRoot:   runRoot,
 		warnBytes: warnBytes,
@@ -184,7 +184,10 @@ func (s *ProcResourceSource) Query(ctx context.Context) (ResourceSnapshot, error
 		root.ID = id
 		root.TotalBytes = total
 		root.AvailableBytes = available
-		root.Warn = s.warnBytes > 0 && available < s.warnBytes
+		if s.warnBytes != nil {
+			warn := s.warnBytes()
+			root.Warn = warn > 0 && available < warn
+		}
 	}
 
 	if s.nextProcAt.IsZero() || !now.Before(s.nextProcAt) {

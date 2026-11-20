@@ -359,7 +359,9 @@ func newHarness(t *testing.T, nGPU int) *harness {
 func (h *harness) manager() *Manager {
 	m := New(h.st, h.gpus, h.ex, Options{KillGrace: time.Hour, SnapshotTimeout: time.Second,
 		OutputRoot: filepath.Join(h.t.TempDir(), "outputs")})
-	m.snap = func(context.Context, *store.Job) (*snapshot.Meta, error) { return &snapshot.Meta{}, nil }
+	m.snap = func(context.Context, *store.Job, snapshot.Options) (*snapshot.Meta, error) {
+		return &snapshot.Meta{}, nil
+	}
 	return m
 }
 
@@ -733,7 +735,9 @@ func TestLoadEnvFailure(t *testing.T) {
 
 func TestSnapshotFailureStillStarts(t *testing.T) {
 	h := newHarness(t, 1)
-	h.m.snap = func(context.Context, *store.Job) (*snapshot.Meta, error) { return nil, errors.New("快照超时") }
+	h.m.snap = func(context.Context, *store.Job, snapshot.Options) (*snapshot.Meta, error) {
+		return nil, errors.New("快照超时")
+	}
 	a := h.add(0)
 	h.tick()
 	h.expect(a, store.StatusRunning)

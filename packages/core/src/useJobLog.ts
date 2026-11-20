@@ -42,12 +42,19 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
   const [windowLimited, setWindowLimited] = useState(false)
   const next = useRef(0)
   const buffered = useRef(0)
+  // 已加载的文本以 text 为准，raw 只是它的副本：截断时要同时改 start，
+  // 不能放进 setRaw 的更新函数里做（更新函数不能有副作用，StrictMode 下会执行两次）
+  const text = useRef('')
+  const put = useCallback((s: string) => {
+    text.current = s
+    setRaw(s)
+  }, [])
 
   useEffect(() => {
     let close: (() => void) | undefined
     let retry: ReturnType<typeof setTimeout> | undefined
     let closed = false
-    setRaw('')
+    put('')
     setStart(0)
     setError(null)
     setEnded(null)
@@ -64,14 +71,16 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
       close?.()
     }
 
-    const append = (t: string) =>
-      setRaw((r) => {
-        const s = r + t
-        if (s.length <= maxChars) return s
-        setStart(-1)
-        const cut = s.slice(s.length - maxChars * 0.7)
-        return cut.slice(cut.indexOf('\n') + 1)
-      })
+    const append = (t: string) => {
+      const s = text.current + t
+      if (s.length <= maxChars) {
+        put(s)
+        return
+      }
+      const cut = s.slice(s.length - maxChars * 0.7)
+      put(cut.slice(cut.indexOf('\n') + 1))
+      setStart(-1)
+    }
 
     const connect = () => {
       if (closed) return
@@ -85,7 +94,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
             let part = m.t.slice(0, remaining)
             if (/[\uD800-\uDBFF]$/.test(part)) part = part.slice(0, -1)
             buffered.current += part.length
-            setRaw((current) => current + part)
+            put(text.current + part)
             if (m.t.length >= remaining) pause()
           }
           next.current = m.n
@@ -105,7 +114,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
     initial
       .then((r) => {
         if (closed) return
-        setRaw(r.data)
+        put(r.data)
         buffered.current = r.data.length
         setStart(r.start)
         next.current = r.next
@@ -124,7 +133,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
       close?.()
       clearTimeout(retry)
     }
-  }, [api, jobId, tail, maxChars, offset])
+  }, [api, jobId, tail, maxChars, offset, put])
 
   const loadOlder = useCallback(async () => {
     if (start <= 0) return
@@ -136,7 +145,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
       const r = await api.log(jobId, { offset: from, limit: start - from })
       if (offset !== undefined && r.data.length + buffered.current > maxChars) return
       buffered.current += r.data.length
-      setRaw((cur) => r.data + cur)
+      put(r.data + text.current)
       setStart(r.start)
       setExactStart(false)
     } catch (e) {
@@ -144,7 +153,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
     } finally {
       setLoadingOlder(false)
     }
-  }, [api, jobId, start, tail, offset, maxChars])
+  }, [api, jobId, start, tail, offset, maxChars, put])
 
   return { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart, windowLimited }
 }

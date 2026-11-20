@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -18,6 +19,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"danlu/internal/atomicfile"
 )
 
 type Files struct{ CACert, CAKey, Cert, Key string }
@@ -97,7 +100,7 @@ func EnsureServer(dir string, ips []net.IP) error {
 	}
 	if cert, err := loadCert(f.Cert); err == nil {
 		fresh := time.Until(cert.NotAfter) > 30*24*time.Hour
-		if fresh && sameIPs(cert.IPAddresses, ips) {
+		if _, pairErr := tls.LoadX509KeyPair(f.Cert, f.Key); fresh && sameIPs(cert.IPAddresses, ips) && pairErr == nil {
 			return nil
 		}
 	}
@@ -136,12 +139,12 @@ func issueServerFor(f Files, ips []net.IP, validity time.Duration) error {
 		SerialNumber: serial(),
 		// CN 不能写成 IP：OpenSSL 会把像主机名的 CN 当作域名，拿去和 CA 的域名限制比对，导致校验失败。
 		// 浏览器只看 SAN 里的 IP。
-		Subject: pkix.Name{CommonName: "Danlu Server"},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(validity),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  ips,
+		Subject:     pkix.Name{CommonName: "Danlu Server"},
+		NotBefore:   now.Add(-time.Hour),
+		NotAfter:    now.Add(validity),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: ips,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
 	if err != nil {
@@ -150,10 +153,12 @@ func issueServerFor(f Files, ips []net.IP, validity time.Duration) error {
 	// 证书链：服务器证书 + CA，部分客户端需要完整链
 	chain := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	chain = append(chain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw})...)
-	if err := os.WriteFile(f.Cert, chain, 0o644); err != nil {
+	// 两个文件各自原子替换。先写私钥：两次改名之间断电时证书和私钥对不上，
+	// EnsureServer 下次检查时会发现并重新签发；运行中的 CertManager 也不会换上对不上的一对
+	if err := writeKey(f.Key, key); err != nil {
 		return err
 	}
-	return writeKey(f.Key, key)
+	return atomicfile.Write(f.Cert, chain, 0o644)
 }
 
 // Fingerprint 返回证书的 SHA-256 指纹（冒号分隔的十六进制）。
@@ -197,7 +202,7 @@ func serial() *big.Int {
 }
 
 func writePEM(path, typ string, der []byte, mode os.FileMode) error {
-	return os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), mode)
+	return atomicfile.Write(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), mode)
 }
 
 func writeKey(path string, key *ecdsa.PrivateKey) error {

@@ -256,6 +256,67 @@ func TestResourceMonitorKeepsLastGoodOnError(t *testing.T) {
 	}
 }
 
+// 自身占用进历史：注入 SelfBytes 时写点，未注入或统计不可用时为 null（不画假 0）。
+func TestResourceSelfBytesHistory(t *testing.T) {
+	mon := NewResourceMonitor(&resourceSequence{})
+	mon.Refresh(context.Background())
+	points, _, _, _ := mon.History(ResourceHistory)
+	if len(points) != 1 || points[0].DataBytes != nil || points[0].DBBytes != nil {
+		t.Fatalf("未注入 SelfBytes 时占用应为 null: %+v", points)
+	}
+
+	data, db := uint64(1000), uint64(200)
+	mon.SelfBytes = func() (uint64, uint64, bool) { return data, db, true }
+	mon.Refresh(context.Background())
+	data, db = 2000, 400
+	mon.Refresh(context.Background())
+	points, peaks, _, _ := mon.History(ResourceHistory)
+	if len(points) != 3 || points[1].DataBytes == nil || *points[1].DataBytes != 1000 ||
+		points[2].DBBytes == nil || *points[2].DBBytes != 400 {
+		t.Fatalf("占用没有写进历史: %+v", points)
+	}
+	if peaks.DataBytes == nil || *peaks.DataBytes != 2000 || peaks.DBBytes == nil || *peaks.DBBytes != 400 {
+		t.Fatalf("占用峰值错误: %+v", peaks)
+	}
+
+	mon.SelfBytes = func() (uint64, uint64, bool) { return 0, 0, false }
+	mon.Refresh(context.Background())
+	points, _, _, _ = mon.History(ResourceHistory)
+	if points[3].DataBytes != nil || points[3].DBBytes != nil {
+		t.Fatalf("统计不可用时应为 null: %+v", points[3])
+	}
+}
+
+// 降采样对占用取非 null 的平均；峰值取最大；全 null 的桶保持 null。
+func TestResourceSelfBytesDownsample(t *testing.T) {
+	points := make([]ResourcePoint, 400)
+	for i := range points {
+		points[i] = ResourcePoint{At: int64(i)}
+		if i%2 == 0 {
+			d, b := uint64(i), uint64(2*i)
+			points[i].DataBytes, points[i].DBBytes = &d, &b
+		}
+	}
+	got := downsampleResource(points, 100)
+	if len(got) != 100 {
+		t.Fatalf("降采样点数不对: %d", len(got))
+	}
+	for _, p := range got {
+		if p.DataBytes == nil || p.DBBytes == nil {
+			t.Fatalf("桶内有值时平均不应为 null: %+v", p)
+		}
+	}
+	peaks := resourcePeaks(points)
+	if peaks.DataBytes == nil || *peaks.DataBytes != 398 || peaks.DBBytes == nil || *peaks.DBBytes != 796 {
+		t.Fatalf("占用峰值错误: %+v", peaks)
+	}
+	for _, p := range downsampleResource(make([]ResourcePoint, 400), 100) {
+		if p.DataBytes != nil || p.DBBytes != nil {
+			t.Fatalf("全 null 的桶应保持 null: %+v", p)
+		}
+	}
+}
+
 type resourceFailAfter struct {
 	n         int
 	failAfter int

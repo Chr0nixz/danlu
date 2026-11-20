@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -239,7 +240,7 @@ func TestPasswordInDatabase(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	a := New(st, Options{Username: "admin"})
-	if a.CheckPassword("") {
+	if a.CheckPassword(context.Background(), "") {
 		t.Fatal("还没有密码时不能通过")
 	}
 	if _, err := ImportPasswordHash(st, ""); err == nil {
@@ -250,7 +251,7 @@ func TestPasswordInDatabase(t *testing.T) {
 	if imported, err := ImportPasswordHash(st, old); err != nil || !imported {
 		t.Fatalf("应该导入配置里的哈希: %v %v", imported, err)
 	}
-	if !a.CheckPassword("from-config") {
+	if !a.CheckPassword(context.Background(), "from-config") {
 		t.Fatal("导入后应该能用旧密码登录")
 	}
 	// 改过密码以后，配置里残留的旧哈希不再导入
@@ -260,7 +261,7 @@ func TestPasswordInDatabase(t *testing.T) {
 	if imported, _ := ImportPasswordHash(st, old); imported {
 		t.Fatal("库里已经有密码时不应该再导入")
 	}
-	if a.CheckPassword("from-config") || !a.CheckPassword("new-password") {
+	if a.CheckPassword(context.Background(), "from-config") || !a.CheckPassword(context.Background(), "new-password") {
 		t.Fatal("改密码应该立即生效，不用重启")
 	}
 }

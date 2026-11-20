@@ -31,6 +31,7 @@ import (
 	"danlu/internal/retention"
 	"danlu/internal/runner"
 	"danlu/internal/scheduler"
+	"danlu/internal/settings"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
 	"danlu/internal/system"
@@ -237,6 +238,10 @@ func cmdInit(args []string) error {
 	if err := setPassword(p, pw); err != nil {
 		return err
 	}
+	// 重新初始化时清掉面板上改过的安全设置和运行设置，不然新生成的入口和新配置会被库里的旧值盖住
+	if err := resetPanelSettings(p); err != nil {
+		return err
+	}
 	if err := config.Save(p, c); err != nil {
 		return err
 	}
@@ -330,13 +335,28 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 调度、告警和保留参数可能在面板上改过，存在库里；读不到就不启动，免得按配置文件里的旧值调度和清理。
+	// 用到它们的地方每次用时取 rt.Current()，面板上保存后几秒内生效
+	rt := settings.New(st, settings.Defaults(c))
+	if err := rt.Reload(); err != nil {
+		return fmt.Errorf("读取运行设置失败: %w", err)
+	}
+	if o := rt.Overridden(); len(o) > 0 {
+		log.Printf("这些设置在面板上改过，config.toml 里的同名项不生效：%s", strings.Join(o, "，"))
+	}
+	diskWarn := func() uint64 { return uint64(max(rt.Current().DiskWarnGB, 0)) << 30 }
 
-	mon := gpu.NewMonitor(gpu.NewSource(p.Run, c.Runtime.UnknownGPUMemoryMB))
+	mon := gpu.NewMonitor(gpu.NewLiveSource(p.Run, func() int { return rt.Current().UnknownGPUMemoryMB }))
 	go mon.Run(ctx)
 	host := system.NewMonitor(system.NewSource())
 	go host.Run(ctx)
-	disks := system.NewDiskMonitor(p.Home, outputRoot, func() ([]string, error) { return st.RecentWorkdirs(10) }, uint64(c.Runtime.DiskWarnGB)<<30)
+	disks := system.NewDiskMonitor(p.Home, outputRoot, func() ([]string, error) { return st.RecentWorkdirs(10) }, diskWarn)
 	go disks.Run(ctx)
+	self := system.NewSelfMonitor(p.Home, p.DB, func() (system.DBStats, error) {
+		s, err := st.DBStats()
+		return system.DBStats{PageCount: s.PageCount, PageSize: s.PageSize, FreePages: s.FreePages}, err
+	})
+	go self.Run(ctx)
 	gpuStats := func() system.GPUStats {
 		gpus, _, err := mon.Latest()
 		// ErrProcsUnknown 时卡本身的功耗和温度仍然有效，只有进程归属未知；
@@ -346,27 +366,46 @@ func cmdServe(args []string) error {
 		}
 		return resourceGPUStats(gpus)
 	}
-	resources := system.NewResourceMonitor(system.NewResourceSource(p.Run, uint64(c.Runtime.DiskWarnGB)<<30, gpuStats))
+	resources := system.NewResourceMonitor(system.NewResourceSource(p.Run, diskWarn, gpuStats))
+	// 自身占用每 30 秒统计一次，这里只读缓存，让 2 秒的主机采样把占用带进 1 小时历史。
+	resources.SelfBytes = func() (uint64, uint64, bool) {
+		u, _, err := self.Latest()
+		if err != nil || u.At == 0 {
+			return 0, 0, false
+		}
+		db := uint64(0)
+		if u.DB != nil {
+			db = u.DB.LogicalBytes
+		} else {
+			// 数据库统计读不到时退回文件字节和，曲线不断
+			for _, part := range u.Parts {
+				if part.Name == "db" {
+					db = part.Bytes
+				}
+			}
+		}
+		return u.TotalBytes, db, true
+	}
 	go resources.Run(ctx)
 
 	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, EnvRoot: p.Envs, CondaBase: c.Runtime.CondaBase}
 	terminals := terminal.NewManager()
+	terminals.SetLifetime(func() time.Duration { return rt.Current().TerminalLifetime })
 	defer terminals.Close()
+	live := schedulerLive(rt.Current())
 	mgr := scheduler.New(st, mon, run, scheduler.Options{
-		SnapshotDir: p.Snapshots,
-		RunRoot:     p.Run,
-		OutputRoot:  outputRoot,
-		Snapshot: snapshot.Options{
-			MaxFile:  int64(c.Runtime.SnapshotMaxFileMB) << 20,
-			MaxTotal: int64(c.Runtime.SnapshotMaxTotalMB) << 20,
-		},
+		SnapshotDir:     p.Snapshots,
+		RunRoot:         p.Run,
+		OutputRoot:      outputRoot,
+		Snapshot:        live.Snapshot,
 		SnapshotTimeout: 10 * time.Second,
-		KillGrace:       c.Runtime.KillGrace.Duration,
-		FailFast:        c.Runtime.FailFast.Duration,
-		SilenceAlert:    c.Runtime.SilenceAlert.Duration,
+		KillGrace:       live.KillGrace,
+		FailFast:        live.FailFast,
+		SilenceAlert:    live.SilenceAlert,
 		Disks:           disks,
-		DiskMinBytes:    uint64(c.Runtime.DiskMinGB) << 30,
+		DiskMinBytes:    live.DiskMinBytes,
 		ManifestTimeout: 10 * time.Second,
+		Live:            func() scheduler.LiveOptions { return schedulerLive(rt.Current()) },
 	})
 	// 先占住端口再接管任务：端口被占用时直接退出，不碰任何任务
 	ln, err := net.Listen("tcp", net.JoinHostPort(c.Server.Bind, strconv.Itoa(c.Server.Port)))
@@ -379,20 +418,34 @@ func cmdServe(args []string) error {
 	mgrDone := make(chan struct{})
 	go func() { mgr.Run(ctx); close(mgrDone) }()
 	defer func() { stop(); <-mgrDone }()
-	pruner := &retention.Pruner{Store: st, Paths: p, OutputRoot: outputRoot, Options: retention.Options{
-		KeepDays: c.Retention.KeepDays, MaxBytes: c.Retention.MaxTotalGB << 30,
-	}}
+	pruner := &retention.Pruner{Store: st, Paths: p, OutputRoot: outputRoot,
+		Live: func() (int64, int64) { v := rt.Current(); return v.KeepDays, v.MaxTotalGB << 30 }}
 	pruneDone := make(chan struct{})
 	go func() { pruner.Run(ctx); close(pruneDone) }()
-	defer func() { stop(); <-pruneDone }()
+	// 清理在目录项之间检查 ctx，通常马上停下；数据目录所在的存储卡住时，一次 lstat 都可能不返回，
+	// 这时最多等 10 秒，不让它拖住停服。已经认领的任务下次启动后接着清理
+	defer func() {
+		stop()
+		select {
+		case <-pruneDone:
+		case <-time.After(10 * time.Second):
+			log.Print("自动清理 10 秒内没有停下，存储可能卡住，不再等待")
+		}
+	}()
 
+	def := auth.SecurityDefaults(c)
 	au := auth.New(st, auth.Options{
-		Entrance: c.Server.Entrance, Secret: secret, Secure: c.TLS.Mode != config.TLSOff,
-		Username: c.Auth.Username, SessionTTL: c.Auth.SessionTTL.Duration,
-		MaxFailures: c.Auth.MaxFailures, Lockout: c.Auth.Lockout.Duration,
+		Entrance: def.Entrance, Secret: secret, Secure: c.TLS.Mode != config.TLSOff,
+		Username: c.Auth.Username, SessionTTL: def.SessionTTL,
+		MaxFailures: def.MaxFailures, Lockout: def.Lockout,
 	})
+	// 入口等安全设置可能在面板上改过，存在库里；读不到就不启动，免得拿配置文件里的旧入口顶上
+	if err := au.Reload(); err != nil {
+		return fmt.Errorf("读取安全设置失败: %w", err)
+	}
 	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, System: host, Auth: au, Runner: run, Terminal: terminals,
-		Static: webui.FS(), Version: version, Disks: disks, Resources: resources, Notify: notifier}
+		Static: webui.FS(), Version: version, Disks: disks, Resources: resources, Self: self, Notify: notifier,
+		Settings: rt, Pruner: pruner}
 
 	// 请求的 context 都从 base 派生：停止时先取消它，日志 SSE 这类长连接马上退出
 	base, cancelBase := context.WithCancel(context.Background())
@@ -410,7 +463,7 @@ func cmdServe(args []string) error {
 	}
 
 	log.Printf("danlu %s 启动，数据目录 %s", version, p.Home)
-	log.Printf("访问地址 %s", c.URL())
+	log.Printf("访问地址 %s/%s", c.BaseURL(), au.Security().Entrance)
 	serve := func() error { return httpSrv.Serve(ln) }
 	switch c.TLS.Mode {
 	case config.TLSLocalCA, config.TLSFile:
@@ -467,6 +520,56 @@ func loadForEdit() (config.Paths, *config.Config, error) {
 	return p, c, err
 }
 
+// loadEffective 读配置，再用数据库里的安全设置（面板上或 danlu entrance 改过的）盖住对应项，
+// 打印出来的访问地址才和正在运行的服务一致。返回的配置只用来显示，不能拿去 config.Save。
+func loadEffective() (config.Paths, *config.Config, error) {
+	p, c, err := loadForEdit()
+	if err != nil {
+		return p, c, err
+	}
+	_, err = overlayPanelSettings(p, c)
+	return p, c, err
+}
+
+// overlayPanelSettings 用库里面板上改过的设置（安全设置、调度与告警、数据保留）盖住 c 里的对应项，
+// 返回改过的运行设置，如 "fail_fast=关闭"。c 之后只能用来显示、体检和清理，不能拿去 config.Save。
+func overlayPanelSettings(p config.Paths, c *config.Config) ([]string, error) {
+	if _, err := os.Stat(p.DB); errors.Is(err, os.ErrNotExist) {
+		return nil, nil // 还没启动过，库里什么都没有
+	}
+	st, err := store.Open(p.DB)
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+	sec, err := auth.LoadSecurity(st, auth.SecurityDefaults(c))
+	if err != nil {
+		return nil, fmt.Errorf("读取安全设置失败: %w", err)
+	}
+	v, custom, err := settings.Load(st, settings.Defaults(c))
+	if err != nil {
+		return nil, fmt.Errorf("读取运行设置失败: %w", err)
+	}
+	c.Server.Entrance = sec.Entrance
+	c.Auth.SessionTTL.Duration, c.Auth.MaxFailures, c.Auth.Lockout.Duration = sec.SessionTTL, sec.MaxFailures, sec.Lockout
+	v.ApplyTo(c)
+	return settings.Overridden(v, custom), nil
+}
+
+// schedulerLive 把面板上的运行设置换成调度器用的单位。放在这里，settings 包就不用依赖调度器。
+func schedulerLive(v settings.Values) scheduler.LiveOptions {
+	return scheduler.LiveOptions{
+		KillGrace:    v.KillGrace,
+		FailFast:     v.FailFast,
+		SilenceAlert: v.SilenceAlert,
+		DiskMinBytes: uint64(max(v.DiskMinGB, 0)) << 30,
+		Snapshot: snapshot.Options{
+			MaxFile:  int64(v.SnapshotMaxFileMB) << 20,
+			MaxTotal: int64(v.SnapshotMaxTotalMB) << 20,
+		},
+	}
+}
+
 const restartHint = "重启服务后生效：systemctl --user restart danlu"
 
 func cmdInfo(args []string) error {
@@ -475,6 +578,10 @@ func cmdInfo(args []string) error {
 	noQR := fs.Bool("no-qr", false, "不打印访问二维码")
 	fs.Parse(args)
 	p, c, err := loadForEdit()
+	if err != nil {
+		return err
+	}
+	overridden, err := overlayPanelSettings(p, c)
 	if err != nil {
 		return err
 	}
@@ -493,6 +600,9 @@ func cmdInfo(args []string) error {
 	outputRoot, _ := config.ResolvePath(c.Runtime.OutputRoot)
 	fmt.Println("输出目录 ", outputRoot)
 	fmt.Println("数据目录 ", p.Home)
+	if len(overridden) > 0 {
+		fmt.Println("面板改过 ", strings.Join(overridden, "，"), "（config.toml 里的同名项不生效，在面板「设置」里恢复）")
+	}
 	if !*noQR {
 		return printAccessQR(c.URL())
 	}
@@ -718,6 +828,19 @@ func cmdTOTP(args []string) error {
 	return nil
 }
 
+// resetPanelSettings 清掉面板上改过的安全设置和运行设置，回到新配置文件的值。面板偏好（ui.*）保留。
+func resetPanelSettings(p config.Paths) error {
+	st, err := store.Open(p.DB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := auth.ResetSecurity(st); err != nil {
+		return err
+	}
+	return settings.Reset(st)
+}
+
 // setPassword 把密码存进数据库，并让所有已登录的会话失效。服务正在运行时也立即生效。
 func setPassword(p config.Paths, pw string) error {
 	st, err := store.Open(p.DB)
@@ -731,20 +854,34 @@ func setPassword(p config.Paths, pw string) error {
 	return st.DeleteSessionsExcept("")
 }
 
+// cmdEntrance 查看或重新生成安全入口。入口存在数据库里（面板上也能改），正在运行的服务几秒内跟上，不用重启。
+// 最后一行固定是"访问地址  <完整地址>"，脚本取最后一个字段。
 func cmdEntrance(args []string) error {
 	fs := flag.NewFlagSet("entrance", flag.ExitOnError)
 	reset := fs.Bool("reset", false, "重新生成安全入口")
 	fs.Parse(args)
-	p, c, err := loadForEdit()
-	if err != nil {
-		return err
-	}
 	if *reset {
-		c.Server.Entrance = config.RandomEntrance()
-		if err := config.Save(p, c); err != nil {
+		p, _, err := loadForEdit()
+		if err != nil {
 			return err
 		}
-		fmt.Println("已生成新的安全入口，旧入口失效。" + restartHint)
+		st, err := store.Open(p.DB)
+		if err != nil {
+			return err
+		}
+		err = auth.SetEntrance(st, config.RandomEntrance())
+		if err == nil {
+			st.Audit("cli", "security_change", "更换安全入口")
+		}
+		st.Close()
+		if err != nil {
+			return err
+		}
+		fmt.Println("已生成新的安全入口，旧入口立即失效，已经打开面板的设备需要用新地址重新打开一次。")
+	}
+	_, c, err := loadEffective()
+	if err != nil {
+		return err
 	}
 	fmt.Println("访问地址 ", c.URL())
 	return nil

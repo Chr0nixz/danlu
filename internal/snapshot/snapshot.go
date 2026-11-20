@@ -102,7 +102,7 @@ func Take(ctx context.Context, workdir, dir string, id int64, opt Options) (*Met
 	isGit, note := gitCheck(ctx, workdir)
 	meta.Note = note
 	if isGit {
-		meta.Git, diff = gitInfo(ctx, workdir)
+		meta.Git, diff = gitInfo(ctx, workdir, true)
 		files, err := gitFiles(ctx, workdir)
 		if err != nil {
 			return nil, err
@@ -262,7 +262,8 @@ func gitCheck(ctx context.Context, dir string) (bool, string) {
 
 const maxDiff = 5 << 20
 
-func gitInfo(ctx context.Context, dir string) (*GitInfo, []byte) {
+// gitInfo 读 commit、分支和工作区状态；withDiff 时再取未提交的改动（git diff HEAD，可能很慢）。
+func gitInfo(ctx context.Context, dir string, withDiff bool) (*GitInfo, []byte) {
 	g := &GitInfo{}
 	if out, err := git(ctx, dir, "rev-parse", "HEAD"); err == nil {
 		g.Commit = strings.TrimSpace(string(out))
@@ -278,7 +279,7 @@ func gitInfo(ctx context.Context, dir string) (*GitInfo, []byte) {
 		}
 	}
 	var diff []byte
-	if g.Commit != "" {
+	if withDiff && g.Commit != "" {
 		if out, err := git(ctx, dir, "diff", "HEAD", "--no-color", "--no-ext-diff", "--", "."); err == nil {
 			diff = out
 		}
@@ -338,7 +339,7 @@ func GitHead(ctx context.Context, dir string) (*GitInfo, bool) {
 	if !gitOK(ctx, dir) {
 		return nil, false
 	}
-	g, _ := gitInfo(ctx, dir)
+	g, _ := gitInfo(ctx, dir, false) // 只要 commit 和 dirty，不跑 diff
 	g.Status = ""
 	return g, true
 }

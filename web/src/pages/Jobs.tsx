@@ -8,6 +8,7 @@ import { StarError } from '../components/StarButton'
 import { Button, buttonClass, Card, ErrorBox, Input, Kbd, Segmented, SkeletonRows, StatusIcon, Empty } from '../components/ui'
 import { now, type Job, type JobStatus } from '@danlu/core'
 import { api } from '../lib/api'
+import { usePrefs } from '../lib/prefs'
 import { RECENT_SEC } from '../lib/queries'
 
 const filters: { value: '' | JobStatus; label: string }[] = [
@@ -19,9 +20,11 @@ const filters: { value: '' | JobStatus; label: string }[] = [
   { value: 'cancelled', label: '已取消' },
 ]
 
-const SIZE = 20
 
 export function Jobs() {
+  // 每页条数在「设置 → 面板偏好」里改，手机和电脑共用。等偏好到了再查，免得先按 20 条查一遍再换
+  const { prefs, ready: prefsReady } = usePrefs()
+  const SIZE = prefs.jobs_page_size
   const [params, setParams] = useSearchParams()
   const status = (params.get('status') ?? '') as '' | JobStatus
   const page = Number(params.get('page')) || 1
@@ -76,13 +79,13 @@ export function Jobs() {
   }, [])
 
   const res = useQuery({
-    queryKey: ['jobs', 'list', status, q, page, recent, starred, finishedFrom, finishedTo],
+    queryKey: ['jobs', 'list', status, q, page, SIZE, recent, starred, finishedFrom, finishedTo],
     queryFn: () => api.jobs({
       status, q, page, size: SIZE, starred: starred || undefined,
       ended_after: recent ? Math.floor(now() - RECENT_SEC) : undefined,
       finished_from_event: batch ? finishedFrom : undefined, finished_to_event: batch ? finishedTo : undefined,
     }),
-    enabled: !q.startsWith('/'),
+    enabled: prefsReady && !q.startsWith('/'),
     refetchInterval: 5000,
     placeholderData: (prev) => prev,
   })
@@ -201,7 +204,7 @@ export function Jobs() {
 
       <ErrorBox error={pathSearch ? trace.error : res.error} />
       <Card className="overflow-hidden">
-        {(pathSearch ? trace.isLoading : res.isLoading) ? (
+        {(pathSearch ? trace.isLoading : res.isLoading || !prefsReady) ? (
           <SkeletonRows rows={6} />
         ) : pathSearch ? (
           trace.error ? null : trace.data?.matches.length ? (

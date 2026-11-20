@@ -12,11 +12,13 @@ import {
   type ResourcePoint,
   type ResourceRange,
   type ResourceSnapshot,
+  type SelfUsagePart,
 } from '@danlu/core'
 import { ResourceChart, clock, nearestAt, type ChartSeries } from '../components/ResourceChart'
 import { gpuBusy, groupStray, shortName, strayLabel, strayTitle, useGpus } from '../components/GpuGrid'
 import { Alert, Button, Card, ErrorBox, Meter, Segmented, Skeleton, StatusIcon, buttonClass, cx } from '../components/ui'
 import { api } from '../lib/api'
+import { usePrefs } from '../lib/prefs'
 
 const RANGES: { value: ResourceRange; label: string }[] = [
   { value: '1m', label: '1 分钟' },
@@ -29,11 +31,12 @@ const RANGE_SECONDS: Record<ResourceRange, number> = { '1m': 60, '5m': 300, '15m
 const HISTORY_REFETCH: Record<ResourceRange, number> = { '1m': 3000, '5m': 5000, '15m': 10_000, '1h': 20_000 }
 const RANGE_KEY = 'danlu.resources.range'
 
-// 告警阈值：颜色只说状态（DESIGN.md）。CPU/内存 ≥90%、load 超过核数、GPU ≥83°C 才上琥珀。
-const CPU_WARN = 90
-const MEM_WARN = 90
-const SWAP_WARN = 50
-const GPU_TEMP_WARN = 83
+// 告警阈值：颜色只说状态（DESIGN.md）。默认 CPU/内存 ≥90%、交换区 ≥50%、GPU ≥83°C 才上琥珀，load 超过核数也是；
+// 前四个在「设置 → 面板偏好」里改，存在服务器上，手机和电脑共用
+function useWarnThresholds() {
+  const { prefs } = usePrefs()
+  return { cpu: prefs.warn_cpu_percent, mem: prefs.warn_mem_percent, swap: prefs.warn_swap_percent, gpuTemp: prefs.warn_gpu_temp_c }
+}
 
 function readStoredRange(): ResourceRange | null {
   try {
@@ -131,18 +134,20 @@ function Fact({ label, value, detail, warn, title }: { label: string; value: Rea
  * 这一行把磁盘、网络、功耗这些数也放进首屏。电脑上指标卡本来就在第一屏，不显示这一行。
  */
 function PhoneSummary({ data }: { data: ResourceSnapshot }) {
+  const warn = useWarnThresholds()
   const lowSpace = [...data.disks, ...(data.root_disk ? [data.root_disk] : [])].some((d) => d.warn)
   const spaceText = lowSpace ? '偏低' : data.disks_error ? '读取失败' : null
   const ready = data.samples >= 2
   const items: { label: string; value: string; warn?: boolean }[] = [
-    { label: 'CPU', value: data.cpu.percent == null ? '采样中' : `${data.cpu.percent}%`, warn: data.cpu.percent != null && data.cpu.percent >= CPU_WARN },
-    { label: '内存', value: `${data.memory.percent}%`, warn: data.memory.percent >= MEM_WARN },
+    { label: 'CPU', value: data.cpu.percent == null ? '采样中' : `${data.cpu.percent}%`, warn: data.cpu.percent != null && data.cpu.percent >= warn.cpu },
+    { label: '内存', value: `${data.memory.percent}%`, warn: data.memory.percent >= warn.mem },
     { label: '负载', value: fmtLoad(data.cpu), warn: data.cpu.load_1 > data.host.cpu_cores },
-    { label: '交换', value: data.memory.swap_total_bytes === 0 ? '无' : `${data.memory.swap_percent}%`, warn: data.memory.swap_total_bytes > 0 && data.memory.swap_percent >= SWAP_WARN },
+    { label: '交换', value: data.memory.swap_total_bytes === 0 ? '无' : `${data.memory.swap_percent}%`, warn: data.memory.swap_total_bytes > 0 && data.memory.swap_percent >= warn.swap },
     { label: data.cpu.power_w == null && data.gpu_power_w != null ? 'GPU 功耗' : '功耗', value: data.power_w == null ? '—' : fmtWatts(data.power_w) },
     ...(data.network.length ? [{ label: '网络', value: ready ? `↓ ${fmtRate(data.net_rx_bps)} ↑ ${fmtRate(data.net_tx_bps)}` : '采样中' }] : []),
     ...(data.disk_io.length ? [{ label: '磁盘', value: ready ? `读 ${fmtRate(data.disk_read_bps)} 写 ${fmtRate(data.disk_write_bps)}` : '采样中' }] : []),
     ...(spaceText ? [{ label: '磁盘空间', value: spaceText, warn: true }] : []),
+    ...(data.self ? [{ label: '丹炉', value: bytes(data.self.total_bytes) }] : []),
   ]
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs sm:hidden">
@@ -219,6 +224,7 @@ function MetricTile({ title, context, hoverAt, primary, secondary, stats, chart,
 }
 
 function MetricWall({ data, history, gpus, from, to }: { data: ResourceSnapshot; history?: ResourceHistory; gpus: GPU[]; from: number; to: number }) {
+  const warn = useWarnThresholds()
   const [hover, setHover] = useState<number | null>(null)
   const points = history?.points ?? []
   // 悬停吸到最近的采样点；落在采样空档里就当没有悬停
@@ -269,7 +275,7 @@ function MetricWall({ data, history, gpus, from, to }: { data: ResourceSnapshot;
         context={`${data.host.cpu_cores} 核`}
         hoverAt={at}
         className="md:col-span-2 xl:col-span-1"
-        primary={{ text: cpuNow == null ? '—' : `${cpuNow}%`, warn: cpuNow != null && cpuNow >= CPU_WARN }}
+        primary={{ text: cpuNow == null ? '—' : `${cpuNow}%`, warn: cpuNow != null && cpuNow >= warn.cpu }}
         secondary={{ label: '负载', text: fmtLoad(data.cpu), warn: loadWarn, title: '1 / 5 / 15 分钟 load average；超过核数说明有进程在排队等 CPU' }}
         stats={[`平均 ${cpuAvg == null ? '—' : fmtPercent(cpuAvg)}`, `峰值 ${peaks?.cpu_percent == null ? '—' : `${peaks.cpu_percent}%`}`]}
         from={from}
@@ -281,12 +287,12 @@ function MetricWall({ data, history, gpus, from, to }: { data: ResourceSnapshot;
         context={bytes(data.memory.total_bytes)}
         hoverAt={at}
         className="md:col-span-2 xl:col-span-1"
-        primary={{ label: '已用', mark: true, text: `${memNow}%`, warn: memNow >= MEM_WARN, title: `${bytes(data.memory.used_bytes)} / ${bytes(data.memory.total_bytes)}` }}
+        primary={{ label: '已用', mark: true, text: `${memNow}%`, warn: memNow >= warn.mem, title: `${bytes(data.memory.used_bytes)} / ${bytes(data.memory.total_bytes)}` }}
         secondary={{
           label: '交换',
           mark: data.memory.swap_total_bytes > 0,
           text: data.memory.swap_total_bytes === 0 ? '未启用' : `${swapNow}%${hp ? '' : ` · ${bytes(data.memory.swap_used_bytes)}`}`,
-          warn: data.memory.swap_total_bytes > 0 && swapNow >= SWAP_WARN,
+          warn: data.memory.swap_total_bytes > 0 && swapNow >= warn.swap,
         }}
         stats={[`平均 ${memAvg == null ? '—' : fmtPercent(memAvg)}`, `峰值 ${peaks ? `${peaks.memory_percent}%` : '—'}`]}
         from={from}
@@ -499,7 +505,8 @@ function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
 
 /** ≥1024px：每张卡一行，列和列头对齐 */
 function GpuLine({ g, mixed, procsKnown, columns }: { g: GPU; mixed: boolean; procsKnown: boolean; columns: string }) {
-  const tempWarn = g.temp_c >= GPU_TEMP_WARN
+  const warn = useWarnThresholds()
+  const tempWarn = g.temp_c >= warn.gpuTemp
   return (
     <div className="hidden min-h-9 items-center gap-3 px-3 py-1.5 text-ui sm:px-4 lg:grid" style={{ gridTemplateColumns: columns }}>
       <div className="min-w-0">
@@ -526,8 +533,9 @@ function GpuLine({ g, mixed, procsKnown, columns }: { g: GPU; mixed: boolean; pr
 
 /** <1024px：每张卡两行，第一行卡号和占卡者，第二行利用率细条和指标 */
 function GpuStack({ g, mixed, procsKnown }: { g: GPU; mixed: boolean; procsKnown: boolean }) {
+  const warn = useWarnThresholds()
   const metrics: { text: string; warn?: boolean }[] = []
-  if (g.temp_c > 0) metrics.push({ text: `${g.temp_c}°C`, warn: g.temp_c >= GPU_TEMP_WARN })
+  if (g.temp_c > 0) metrics.push({ text: `${g.temp_c}°C`, warn: g.temp_c >= warn.gpuTemp })
   if (g.power_w > 0) metrics.push({ text: gpuPower(g) })
   if (g.fan_percent && g.fan_percent > 0) metrics.push({ text: `风扇 ${g.fan_percent}%` })
   if (g.clock_graphics_mhz) metrics.push({ text: `${(g.clock_graphics_mhz / 1000).toFixed(2)} GHz` })
@@ -607,6 +615,7 @@ function CpuDetail({ data }: { data: ResourceSnapshot }) {
 }
 
 function MemoryDetail({ data }: { data: ResourceSnapshot }) {
+  const warn = useWarnThresholds()
   const m = data.memory
   // 已用 = 总量 − 可用；可回收 = 可用 − 空闲（页缓存等内核随时能收回的部分）；三段正好加满总量
   const reclaim = Math.max(0, m.available_bytes - m.free_bytes)
@@ -616,7 +625,7 @@ function MemoryDetail({ data }: { data: ResourceSnapshot }) {
     { label: '可回收', value: reclaim, swatch: 'bg-fg-4', title: '页缓存等内核随时能收回的内存（可用 − 空闲）' },
     { label: '空闲', value: m.free_bytes, swatch: 'bg-hover ring-1 ring-inset ring-line-strong' },
   ]
-  const swapWarn = m.swap_total_bytes > 0 && m.swap_percent >= SWAP_WARN
+  const swapWarn = m.swap_total_bytes > 0 && m.swap_percent >= warn.swap
   return (
     <Panel title="内存构成" className="h-full" extra={<span>共 {bytes(m.total_bytes)}</span>}>
       <div className="space-y-3 p-3 sm:p-4">
@@ -657,11 +666,12 @@ function MemoryDetail({ data }: { data: ResourceSnapshot }) {
 }
 
 function PowerDetail({ data, history, gpus }: { data: ResourceSnapshot; history?: ResourceHistory; gpus: GPU[] }) {
+  const warn = useWarnThresholds()
   const points = history?.points ?? []
   const avgCPU = average(points, (p) => p.cpu_power_w)
   const avgGPU = average(points, (p) => p.gpu_power_w)
   const limit = gpus.reduce((sum, g) => sum + (g.power_limit_w ?? 0), 0)
-  const tempWarn = data.gpu_temp_max_c != null && data.gpu_temp_max_c >= GPU_TEMP_WARN
+  const tempWarn = data.gpu_temp_max_c != null && data.gpu_temp_max_c >= warn.gpuTemp
   return (
     <Panel title="功耗与温度" className="h-full">
       <div className="space-y-3 p-3 sm:p-4">
@@ -748,6 +758,106 @@ function DiskRow({ disk }: { disk: Disk }) {
         </div>
       )}
     </div>
+  )
+}
+
+// ───────────────────────── 丹炉自身占用 ─────────────────────────
+
+const SELF_LABELS: Record<string, string> = {
+  db: '数据库', logs: '日志', snapshots: '代码快照', run: '运行目录', envs: '环境记录', backup: '升级备份', other: '其他',
+}
+
+function SelfPartRow({ part, total }: { part: SelfUsagePart; total: number }) {
+  const percent = total ? Math.round((part.bytes / total) * 100) : 0
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 sm:px-4">
+      {/* 手机上名称独占一行，和 DiskRow 同一套排法 */}
+      <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 max-sm:basis-full">
+        <span className="shrink-0 text-xs">{SELF_LABELS[part.name] ?? part.name}</span>
+        <span className="shrink-0 text-[11px] text-fg-3 tabular-nums">{part.files} 个文件</span>
+        {part.error && <span className="min-w-0 truncate text-xs text-warn" title={part.error}>{part.error}</span>}
+      </div>
+      <div className="flex items-center gap-2 max-sm:w-full sm:w-60" title={`占总量 ${percent}%`}>
+        <div className="flex-1"><Meter value={percent} className="bg-fg-3" /></div>
+        <span className="shrink-0 text-xs tabular-nums">{bytes(part.bytes)}</span>
+      </div>
+    </div>
+  )
+}
+
+/** 丹炉自己吃多少磁盘：数据目录分类占用 + 数据库大小 + 最近 1 小时趋势。每 30 秒统计一次。 */
+function SelfUsagePanel({ data, history, from, to }: { data: ResourceSnapshot; history?: ResourceHistory; from: number; to: number }) {
+  const self = data.self
+  const points = history?.points ?? []
+  const selfAge = data.self_updated_at ? ago(data.self_updated_at) : null
+  const withSeconds = to - from <= 300
+  const series: ChartSeries[] = [
+    { label: '数据目录', points: pointsOf(points, (p) => p.data_bytes) },
+    { label: '数据库', points: pointsOf(points, (p) => p.db_bytes), dashed: true },
+  ]
+  return (
+    <Panel
+      title="丹炉占用"
+      extra={
+        <>
+          {self && <span className="text-fg">共 <b className="font-semibold tabular-nums">{bytes(self.total_bytes)}</b></span>}
+          {data.self_error
+            ? <span className="text-warn">统计失败</span>
+            : selfAge != null && <span>{selfAge} 秒前 · 每 30 秒统计</span>}
+        </>
+      }
+    >
+      {data.self_error && <Alert tone="warn" role="alert" className="m-3 sm:m-4">丹炉占用统计失败：{data.self_error}</Alert>}
+      {!self ? (
+        <p className="px-3 py-4 text-ui text-fg-3 sm:px-4">{data.self_error ? '还没有成功的统计，原因见上方。' : '正在统计数据目录…'}</p>
+      ) : (
+        <>
+          <div className="grid gap-0 divide-y divide-line lg:grid-cols-2 lg:divide-x lg:divide-y-0">
+            <div className="min-w-0">
+              <ColHead className="flex">
+                <span className="font-medium text-fg-2">数据目录构成</span>
+                <span className="ml-auto tabular-nums">{self.files} 个文件</span>
+              </ColHead>
+              <div className="divide-y divide-line">
+                {self.parts.map((p) => <SelfPartRow key={p.name} part={p} total={self.total_bytes} />)}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <ColHead className="flex">
+                <span className="font-medium text-fg-2">数据库</span>
+                {self.db && <span className="ml-auto tabular-nums">{self.db.page_count} 页 × {bytes(self.db.page_size)}</span>}
+              </ColHead>
+              <div className="space-y-3 p-3 sm:p-4">
+                {self.db_error && <p role="alert" className="text-xs text-warn">数据库大小读取失败：{self.db_error}</p>}
+                {self.db ? (
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+                    <Fact label="逻辑大小" value={bytes(self.db.logical_bytes)} title="页数 × 页大小，含空闲页" />
+                    <Fact label="空闲页" value={bytes(self.db.free_bytes)} title="VACUUM 可回收的部分" />
+                    <Fact label="WAL" value={bytes(self.db.wal_bytes)} title="预写日志，检查点后回落" />
+                    <Fact label="主文件" value={bytes(self.db.file_bytes)} />
+                  </dl>
+                ) : !self.db_error && <p className="text-xs text-fg-3">没有读到数据库统计</p>}
+                <div>
+                  <ResourceChart series={series} from={from} to={to} format={bytes} binary className="h-16" label="数据目录与数据库大小历史曲线" />
+                  <div className="mt-1 flex justify-between text-[11px] leading-none text-fg-3 tabular-nums" aria-hidden>
+                    <span>{clock(from, withSeconds)}</span>
+                    <span>{clock(to, withSeconds)}</span>
+                  </div>
+                  <p className="mt-1.5 flex flex-wrap items-center gap-x-3 text-[11px] text-fg-3">
+                    <span className="inline-flex items-center gap-1"><SeriesMark />数据目录</span>
+                    <span className="inline-flex items-center gap-1"><SeriesMark dashed />数据库</span>
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p className="border-t border-line px-3 py-2 text-[11px] leading-relaxed text-fg-3 sm:px-4">
+            <span className="font-mono [overflow-wrap:anywhere]" title={self.path}>{self.path}</span>
+            ：硬链接只计一次，不跟随符号链接；任务写在运行目录里的产物也计入。数据库大小按页数×页大小，WAL 另计。
+          </p>
+        </>
+      )}
+    </Panel>
   )
 }
 
@@ -995,6 +1105,7 @@ export function Resources() {
               <StoragePanel data={data} />
               <NetworkPanel data={data} />
             </div>
+            <SelfUsagePanel data={data} history={history.data} from={from} to={to} />
           </div>
           <ProcessPanel data={data} />
           <p className="text-[11px] text-fg-3">历史每 1 小时滚动一次，服务重启后清零；CPU/GPU 功耗为可用来源的估算值（CPU 来自 Intel RAPL 或 amd_energy），电量按本次服务启动以来的采样积分。曲线是区间桶均值，"平均"按曲线算，"峰值"按原始采样点算；在任一张曲线上悬停或横向拖动，所有指标卡一起显示那一刻的数值。</p>

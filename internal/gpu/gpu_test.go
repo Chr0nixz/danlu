@@ -386,3 +386,19 @@ func TestCloneGPUsProcsNotNull(t *testing.T) {
 		t.Fatal("克隆应深拷贝进程列表，改副本不能影响原件")
 	}
 }
+
+// 未知显存阈值可以在面板上随时改：每次查询取一次，取不到时退回配置值，再退回 1 GiB
+func TestUnknownThresholdLive(t *testing.T) {
+	n := 0
+	s := &SMI{UnknownMemoryThresholdMB: 512, Threshold: func() int { return n }}
+	if got := s.unknownThreshold(); got != 512 {
+		t.Fatalf("Threshold 返回 0 时应用配置值，实际 %d", got)
+	}
+	n = 2048
+	if got := s.unknownThreshold(); got != 2048 {
+		t.Fatalf("应取最新的阈值，实际 %d", got)
+	}
+	if got := (&SMI{}).unknownThreshold(); got != 1024 {
+		t.Fatalf("都没有时应是 1024，实际 %d", got)
+	}
+}

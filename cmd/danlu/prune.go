@@ -27,6 +27,10 @@ func cmdPrune(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 保留天数和总量上限可能在面板上改过，以库里的为准
+	if _, err := overlayPanelSettings(p, c); err != nil {
+		return err
+	}
 	output, err := config.ResolvePath(c.Runtime.OutputRoot)
 	if err != nil {
 		return err

@@ -3,6 +3,7 @@ import { useMutation } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Download, Search, WrapText } from 'lucide-react'
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { api } from '../lib/api'
+import { usePrefs } from '../lib/prefs'
 import { LogSearchDialog } from './LogSearchDialog'
 import { cx, ErrorBox, Spinner } from './ui'
 
@@ -63,7 +64,11 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
 }) {
   const { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart, windowLimited } = useJobLog(api, jobId, { offset })
   const [follow, setFollow] = useState(offset === undefined)
-  const [wrap, setWrap] = useState(true)
+  // 打开时换不换行在「设置 → 面板偏好」里改；这里随时切换，只管这一次。
+  // 直接打开任务页时偏好可能还没到：到了之后，只要还没手动切换过就跟上
+  const { prefs } = usePrefs()
+  const [wrapState, setWrap] = useState<boolean | null>(null)
+  const wrap = wrapState ?? prefs.log_wrap
   const pre = useRef<HTMLPreElement>(null)
 
   // 从文件中间开始读时，第一行是半截的，丢掉
@@ -164,7 +169,7 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
             <span className="hidden sm:inline">加载更早</span>
           </button>
         )}
-        <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title="自动换行" onClick={() => setWrap((w) => !w)}>
+        <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title="自动换行" onClick={() => setWrap(!wrap)}>
           <WrapText />
           <span className={label}>换行</span>
         </button>

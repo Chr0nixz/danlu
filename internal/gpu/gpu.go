@@ -72,6 +72,11 @@ func NewSource(runRoot string, thresholds ...int) Source {
 	if len(thresholds) > 0 && thresholds[0] > 0 {
 		unknownMemoryThresholdMB = thresholds[0]
 	}
+	return NewLiveSource(runRoot, func() int { return unknownMemoryThresholdMB })
+}
+
+// NewLiveSource 和 NewSource 一样，只是未知显存阈值每次查询时取一次：面板上可以随时改。
+func NewLiveSource(runRoot string, threshold func() int) Source {
 	if n, _ := strconv.Atoi(os.Getenv("DANLU_FAKE_GPUS")); n > 0 {
 		busy := map[int]bool{}
 		for _, s := range strings.Split(os.Getenv("DANLU_FAKE_BUSY"), ",") {
@@ -81,7 +86,7 @@ func NewSource(runRoot string, thresholds ...int) Source {
 		}
 		return &Fake{N: n, Busy: busy}
 	}
-	return &SMI{RunRoot: runRoot, UnknownMemoryThresholdMB: unknownMemoryThresholdMB, query: smi}
+	return &SMI{RunRoot: runRoot, Threshold: threshold, query: smi}
 }
 
 // ---------- nvidia-smi ----------
@@ -92,6 +97,8 @@ func NewSource(runRoot string, thresholds ...int) Source {
 type SMI struct {
 	RunRoot                  string // 见 NewSource
 	UnknownMemoryThresholdMB int
+	// Threshold 不为 nil 且返回值大于 0 时代替 UnknownMemoryThresholdMB，每次查询取一次
+	Threshold func() int
 
 	nextExtrasAt atomic.Int64                                     // UnixNano；在此之前只用基本查询
 	extrasLog    sync.Once                                        // 降级日志只打印一次
@@ -212,18 +219,32 @@ func (s *SMI) Query(ctx context.Context) ([]GPU, error) {
 		p := Proc{PID: a.PID, UsedMemMB: a.UsedMemMB, User: procfs.Owner(a.PID), JobID: procfs.JobOf(a.PID, s.RunRoot)}
 		gpus[i].Procs = append(gpus[i].Procs, p)
 	}
+	threshold := s.unknownThreshold()
 	if hasUnaccounted(gpus) {
 		// 显存对不上时多查一次全部进程。查不到不算错：这部分显存照旧算未知占用
 		pctx, cancel := context.WithTimeout(ctx, pidsTimeout)
 		out, err := execx.Output(execx.Command(pctx, "nvidia-smi", "-q", "-d", "PIDS"))
 		cancel()
 		if err == nil {
-			addOtherProcs(gpus, ParsePIDs(string(out)), s.UnknownMemoryThresholdMB,
+			addOtherProcs(gpus, ParsePIDs(string(out)), threshold,
 				func(pid int) int64 { return procfs.JobOf(pid, s.RunRoot) }, procfs.Owner)
 		}
 	}
-	markUnknownMemory(gpus, s.UnknownMemoryThresholdMB)
+	markUnknownMemory(gpus, threshold)
 	return gpus, nil
+}
+
+// unknownThreshold 是这一轮查询用的未知显存阈值，同一轮里前后一致。
+func (s *SMI) unknownThreshold() int {
+	if s.Threshold != nil {
+		if n := s.Threshold(); n > 0 {
+			return n
+		}
+	}
+	if s.UnknownMemoryThresholdMB > 0 {
+		return s.UnknownMemoryThresholdMB
+	}
+	return 1024
 }
 
 // hasUnaccounted 判断有没有卡的已用显存比列出的进程加起来多。

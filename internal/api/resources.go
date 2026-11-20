@@ -9,11 +9,14 @@ import (
 
 type resourceResponse struct {
 	*system.ResourceSnapshot
-	UpdatedAt      int64         `json:"updated_at"`
-	Disks          []system.Disk `json:"disks"`
-	DisksUpdatedAt int64         `json:"disks_updated_at"`
-	DisksError     string        `json:"disks_error,omitempty"`
-	Error          string        `json:"error,omitempty"`
+	UpdatedAt      int64             `json:"updated_at"`
+	Disks          []system.Disk     `json:"disks"`
+	DisksUpdatedAt int64             `json:"disks_updated_at"`
+	DisksError     string            `json:"disks_error,omitempty"`
+	Self           *system.SelfUsage `json:"self,omitempty"`
+	SelfUpdatedAt  int64             `json:"self_updated_at,omitempty"`
+	SelfError      string            `json:"self_error,omitempty"`
+	Error          string            `json:"error,omitempty"`
 }
 
 func (s *Server) resources(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +78,17 @@ func (s *Server) resources(w http.ResponseWriter, r *http.Request) {
 		Disks:            disks,
 		DisksUpdatedAt:   unixOrZero(disksAt),
 		DisksError:       disksErr,
+	}
+	if s.Self != nil {
+		self, _, selfErr := s.Self.Latest()
+		// 与 updated_at 同一逻辑：只输出真正统计成功过的快照，零值不带新鲜时间戳进接口。
+		if self.At > 0 {
+			resp.Self = &self
+			resp.SelfUpdatedAt = self.At
+		}
+		if selfErr != nil {
+			resp.SelfError = selfErr.Error()
+		}
 	}
 	if err != nil {
 		resp.Error = err.Error()

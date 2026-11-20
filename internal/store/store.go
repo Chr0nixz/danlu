@@ -223,6 +223,31 @@ func (s *Store) GetSetting(key string) (string, error) {
 	return v, err
 }
 
+// GetSettings 一次读几项运行时设置，库里没有的项不出现在结果里。
+func (s *Store) GetSettings(keys ...string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		args[i] = k
+	}
+	rows, err := s.db.Query("SELECT key, value FROM settings WHERE key IN (?"+strings.Repeat(",?", len(keys)-1)+")", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO settings (key, value, updated_at) VALUES (?,?,?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, key, value, time.Now().Unix())
@@ -699,6 +724,104 @@ func (s *Store) DeleteSessionsExcept(keepHash string) error {
 func (s *Store) PurgeExpiredSessions() error {
 	_, err := s.db.Exec("DELETE FROM sessions WHERE expires_at<=?", time.Now().Unix())
 	return err
+}
+
+// SaveSecurity 在一个事务里写入安全设置；clampTTL > 0 时同时让已有会话不超过这个时长：
+// 其他会话从登录时算起，keepHash（发起修改的当前会话）从现在算起，只会提前到期，不会延长。
+// 两步要么都生效，要么都不生效：不会出现新有效期已经生效、已有会话却还按旧期限的情况。
+func (s *Store) SaveSecurity(values map[string]string, clampTTL time.Duration, keepHash string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range values {
+		if key == "" {
+			return errors.New("运行状态键不能为空")
+		}
+		if err := setSetting(tx, key, value); err != nil {
+			return err
+		}
+	}
+	if clampTTL > 0 {
+		sec := int64(clampTTL / time.Second)
+		if _, err := tx.Exec(`UPDATE sessions SET expires_at = MIN(expires_at,
+			CASE WHEN token_hash = ? THEN ? ELSE created_at + ? END)`, keepHash, time.Now().Unix()+sec, sec); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// sessionIDLen 是会话 id 的长度：取令牌哈希的前 16 位十六进制。会话令牌本身不出库，哈希也只露出一截。
+const sessionIDLen = 16
+
+// Session 是一个用密码登录的浏览器会话，面板「登录会话」里列出来。
+type Session struct {
+	ID        string `json:"id"`
+	CreatedAt int64  `json:"created_at"`
+	ExpiresAt int64  `json:"expires_at"`
+	IP        string `json:"ip"`
+	UserAgent string `json:"user_agent"`
+	Current   bool   `json:"current"`
+}
+
+// ListSessions 列出还没过期的会话，最近登录的在前；currentHash 对应的那个标为当前会话。
+func (s *Store) ListSessions(currentHash string) ([]Session, error) {
+	rows, err := s.db.Query(`SELECT token_hash, created_at, expires_at, ip, user_agent FROM sessions
+		WHERE expires_at > ? ORDER BY created_at DESC, token_hash`, time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Session{}
+	for rows.Next() {
+		var (
+			hash string
+			v    Session
+		)
+		if err := rows.Scan(&hash, &v.CreatedAt, &v.ExpiresAt, &v.IP, &v.UserAgent); err != nil {
+			return nil, err
+		}
+		v.ID = SessionID(hash)
+		v.Current = currentHash != "" && hash == currentHash
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// SessionID 是会话在接口里的 id。
+func SessionID(tokenHash string) string {
+	if len(tokenHash) > sessionIDLen {
+		return tokenHash[:sessionIDLen]
+	}
+	return tokenHash
+}
+
+// DeleteSessionByID 注销一个会话；没有这个会话时返回 ErrNotFound。
+func (s *Store) DeleteSessionByID(id string) error {
+	if len(id) != sessionIDLen {
+		return ErrNotFound
+	}
+	res, err := s.db.Exec("DELETE FROM sessions WHERE substr(token_hash, 1, ?) = ?", sessionIDLen, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteSessionsExceptCount 注销 keepHash 以外的所有会话，返回注销了几个。
+func (s *Store) DeleteSessionsExceptCount(keepHash string) (int64, error) {
+	res, err := s.db.Exec("DELETE FROM sessions WHERE token_hash<>? AND expires_at>?", keepHash, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ---------- 设备令牌 ----------

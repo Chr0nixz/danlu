@@ -110,6 +110,7 @@ type Manager struct {
 	pending  int
 	closed   bool
 	now      func() time.Time
+	lifetime func() time.Duration // 断开后保留多久，见 SetLifetime；受 mu 保护
 	stop     chan struct{}
 	reaper   sync.WaitGroup
 	workers  sync.WaitGroup
@@ -262,12 +263,33 @@ func (m *Manager) reapLoop() {
 	}
 }
 
+// SetLifetime 让页面断开后终端保留多久每次清理时取一次（面板上可以随时改）。
+// 为 nil 或返回值不大于 0 时用 SessionLifetime。改短后，已经断开超过新时长的终端在下一次清理（15 秒内）关闭。
+func (m *Manager) SetLifetime(f func() time.Duration) {
+	m.mu.Lock()
+	m.lifetime = f
+	m.mu.Unlock()
+}
+
+func (m *Manager) currentLifetime() time.Duration {
+	m.mu.Lock()
+	f := m.lifetime
+	m.mu.Unlock()
+	if f != nil {
+		if d := f(); d > 0 {
+			return d
+		}
+	}
+	return SessionLifetime
+}
+
 func (m *Manager) reapExpired() {
+	lifetime := m.currentLifetime() // 在锁外取：它可能要读库
 	now := m.now()
 	m.mu.Lock()
 	var expired []*session
 	for id, s := range m.sessions {
-		if !s.info.Attached && now.Sub(s.lastDetached) >= SessionLifetime {
+		if !s.info.Attached && now.Sub(s.lastDetached) >= lifetime {
 			delete(m.sessions, id)
 			expired = append(expired, s)
 		}

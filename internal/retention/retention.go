@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"danlu/internal/config"
@@ -44,11 +45,54 @@ type Report struct {
 	Errors     []string `json:"errors"`
 }
 
+// ErrBusy 表示另一次清理（自动清理、danlu prune 或预览）正拿着清理锁。
+var ErrBusy = errors.New("另一个清理正在运行")
+
 type Pruner struct {
 	Store      *store.Store
 	Paths      config.Paths
 	OutputRoot string
 	Options    Options
+	// Live 不为 nil 时，每次清理前取一次保留天数和总量上限（字节），盖住 Options 里的同名项：
+	// 面板上可以随时改。按 OlderThan 手动清理时不用它。
+	Live func() (keepDays, maxBytes int64)
+
+	kickOnce sync.Once
+	kick     chan struct{}
+	mu       sync.Mutex
+	last     *Status
+}
+
+// Status 是最近一次自动清理的结果，设置页「数据保留」里显示。
+type Status struct {
+	At    int64  `json:"at"`
+	Jobs  int    `json:"jobs"`
+	Envs  int    `json:"envs"`
+	Bytes int64  `json:"bytes"`
+	Error string `json:"error,omitempty"`
+}
+
+func (p *Pruner) kickCh() chan struct{} {
+	p.kickOnce.Do(func() { p.kick = make(chan struct{}, 1) })
+	return p.kick
+}
+
+// Kick 让 Run 马上再清理一次，不等 6 小时。面板上收紧保留策略后调用。
+func (p *Pruner) Kick() {
+	select {
+	case p.kickCh() <- struct{}{}:
+	default:
+	}
+}
+
+// Last 返回最近一次自动清理的结果；服务启动后还没清理过（或策略关闭）时 ok 为 false。
+func (p *Pruner) Last() (Status, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last == nil {
+		return Status{}, false
+	}
+	return *p.last, true
 }
 
 func (p *Pruner) Run(ctx context.Context) {
@@ -58,17 +102,60 @@ func (p *Pruner) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		r, err := p.Prune(ctx)
-		if err != nil {
-			log.Printf("自动清理失败: %v", err)
-		} else if r.Bytes > 0 {
-			log.Printf("自动清理完成：%d 个任务，%d 字节", len(r.Jobs), r.Bytes)
+		opt := p.effective()
+		if opt.KeepDays != 0 || opt.MaxBytes != 0 {
+			r, err := p.prune(ctx, opt)
+			st := Status{At: time.Now().Unix(), Jobs: len(r.Jobs), Envs: len(r.Envs), Bytes: r.Bytes}
+			if err != nil {
+				st.Error = err.Error()
+				log.Printf("自动清理失败: %v", err)
+			} else if r.Bytes > 0 {
+				log.Printf("自动清理完成：%d 个任务，%d 字节", len(r.Jobs), r.Bytes)
+			}
+			if ctx.Err() == nil {
+				p.mu.Lock()
+				p.last = &st
+				p.mu.Unlock()
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-p.kickCh():
 		}
+	}
+}
+
+// effective 是这一次清理实际用的选项。
+func (p *Pruner) effective() Options {
+	opt := p.Options
+	if p.Live != nil && opt.OlderThan == nil {
+		opt.KeepDays, opt.MaxBytes = p.Live()
+	}
+	return opt
+}
+
+// Preview 按给定的保留天数和总量上限（字节）算一遍会清理什么，不删任何东西。
+// 和自动清理共用清理锁，正在清理时返回 ErrBusy。
+//
+// ctx 结束时立即返回 ctx.Err()，不等统计做完：存储卡住时，一次 lstat 也可能迟迟不返回，
+// ctx 打断不了它。统计在后台遇到下一个检查点就停下，然后释放清理锁；预览不删东西，丢下不管是安全的。
+func (p *Pruner) Preview(ctx context.Context, keepDays, maxBytes int64) (Report, error) {
+	type result struct {
+		r   Report
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		r, err := p.prune(ctx, Options{KeepDays: keepDays, MaxBytes: maxBytes, DryRun: true})
+		done <- result{r, err}
+	}()
+	select {
+	case res := <-done:
+		return res.r, res.err
+	case <-ctx.Done():
+		return Report{DryRun: true, Jobs: []Entry{}, Envs: []string{}, Errors: []string{}}, ctx.Err()
 	}
 }
 
@@ -102,7 +189,7 @@ func restoredFiles(root *os.Root, id int64) []string {
 // pruneRun 清理（dryRun 时只统计）一个任务的运行目录，返回其中由丹炉管理的字节数。
 // 快照重跑的 code/ 里有恢复出来的代码、指回原工作目录的链接，还有任务用相对路径写出的产物
 // （checkpoints/ 之类）。只删前两种；产物和装着产物的目录留下，也不计入总量。
-func pruneRun(root *os.Root, id int64, workdir, home string, protected []string, dryRun bool) (int64, error) {
+func pruneRun(ctx context.Context, root *os.Root, id int64, workdir, home string, protected []string, dryRun bool) (int64, error) {
 	name := runPath(id)
 	code := name + "/code"
 	fi, err := root.Lstat(name)
@@ -121,7 +208,7 @@ func pruneRun(root *os.Root, id int64, workdir, home string, protected []string,
 		whole = err != nil || !ci.IsDir() // 不是快照重跑：整个运行目录都是丹炉写的
 	}
 	if whole {
-		size, err := sizeOf(root, name, home, protected)
+		size, err := sizeOf(ctx, root, name, home, protected)
 		if err != nil || dryRun {
 			return size, err
 		}
@@ -138,7 +225,7 @@ func pruneRun(root *os.Root, id int64, workdir, home string, protected []string,
 			continue
 		}
 		child := name + "/" + e.Name()
-		n, err := sizeOf(root, child, home, protected)
+		n, err := sizeOf(ctx, root, child, home, protected)
 		if err != nil {
 			return size, err
 		}
@@ -149,14 +236,18 @@ func pruneRun(root *os.Root, id int64, workdir, home string, protected []string,
 			}
 		}
 	}
+	checked := map[string]bool{}
 	for _, rel := range restoredFiles(root, id) {
+		if err := ctx.Err(); err != nil {
+			return size, err
+		}
 		p := code + "/" + rel
-		if isProtected(home, p, protected) {
+		if isProtected(home, p, protected) || !realParents(root, code, rel, checked) {
 			continue
 		}
 		fi, err := root.Lstat(p)
 		if err != nil || !fi.Mode().IsRegular() {
-			continue // 已经不在、被任务换成了别的，或者路径经过链接：都留下
+			continue // 已经不在，或者被任务换成了别的：都留下
 		}
 		size += fi.Size()
 		if !dryRun {
@@ -196,6 +287,66 @@ func pruneRun(root *os.Root, id int64, workdir, home string, protected []string,
 	}
 	_ = root.Remove(name)
 	return size, nil
+}
+
+// realParents 从 code 往下逐级确认 rel 的每一级父目录都是真目录，不是链接。
+// Root 只拦住逃出数据目录的链接，数据目录里面的相对链接照样跟随：任务把 code/cfg 换成
+// ../../<另一个任务>/code/cfg 时，不先确认就会删到另一个任务的文件。checked 记下查过的目录及结果。
+func realParents(root *os.Root, code, rel string, checked map[string]bool) bool {
+	dir := code
+	parts := strings.Split(rel, "/")
+	for _, part := range parts[:len(parts)-1] {
+		dir += "/" + part
+		ok, seen := checked[dir]
+		if !seen {
+			fi, err := root.Lstat(dir) // 上一级已经确认是真目录，这里只看这一级本身
+			ok = err == nil && fi.IsDir()
+			checked[dir] = ok
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// outputCheckTimeout 限制解析输出目录的时间。
+const outputCheckTimeout = 30 * time.Second
+
+// canonicalOutputs 解析各输出目录里的符号链接，跳过空路径。输出目录常在网络存储上，
+// 存储卡住时 lstat 不会返回，ctx 也打断不了，所以放在单独的 goroutine 里，最多等
+// outputCheckTimeout，ctx 结束也不再等：清理锁照常释放，停止服务也不会被它拖住。
+func canonicalOutputs(ctx context.Context, paths []string) ([]string, error) {
+	type result struct {
+		paths []string
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var out []string
+		for _, path := range paths {
+			if path == "" {
+				continue
+			}
+			c, err := canonical(path)
+			if err != nil {
+				done <- result{err: fmt.Errorf("核对输出目录失败: %w", err)}
+				return
+			}
+			out = append(out, c)
+		}
+		done <- result{paths: out}
+	}()
+	timer := time.NewTimer(outputCheckTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.paths, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, fmt.Errorf("核对输出目录超过 %d 秒没有完成，存储可能卡住", int(outputCheckTimeout/time.Second))
+	}
 }
 
 // canonical 也支持尚未创建或已经清掉的路径；解析最近的现有父目录里的符号链接。
@@ -241,20 +392,23 @@ func checkProtected(home, rel string, protected []string) error {
 }
 
 // runTotal 统计 run/ 里由丹炉管理的字节数，快照重跑写在 code/ 里的产物不算
-func runTotal(root *os.Root, home string, protected []string) (int64, error) {
+func runTotal(ctx context.Context, root *os.Root, home string, protected []string) (int64, error) {
 	entries, err := fs.ReadDir(root.FS(), "run")
 	if err != nil {
 		return 0, err
 	}
 	var total int64
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
 		name := "run/" + e.Name()
 		id, parseErr := strconv.ParseInt(e.Name(), 10, 64)
 		var n int64
 		if parseErr == nil && runPath(id) == name {
-			n, err = pruneRun(root, id, "", home, protected, true)
+			n, err = pruneRun(ctx, root, id, "", home, protected, true)
 		} else {
-			n, err = sizeOf(root, name, home, protected)
+			n, err = sizeOf(ctx, root, name, home, protected)
 		}
 		if err != nil {
 			return total, err
@@ -275,7 +429,9 @@ func isProtected(home, rel string, protected []string) bool {
 	return false
 }
 
-func sizeOf(root *os.Root, name, home string, protected []string) (int64, error) {
+// sizeOf 统计 name 里不在输出目录内的字节数。每个目录项都检查一次 ctx：
+// 目录很大或存储很慢时，预览超时和停止服务都能让它停下。
+func sizeOf(ctx context.Context, root *os.Root, name, home string, protected []string) (int64, error) {
 	excluded := func(rel string) bool { return isProtected(home, rel, protected) }
 	if excluded(name) {
 		return 0, nil
@@ -292,6 +448,9 @@ func sizeOf(root *os.Root, name, home string, protected []string) (int64, error)
 	}
 	var size int64
 	err = fs.WalkDir(root.FS(), name, func(rel string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if os.IsNotExist(err) {
 			return fs.SkipDir
 		}
@@ -316,9 +475,11 @@ func sizeOf(root *os.Root, name, home string, protected []string) (int64, error)
 	return size, err
 }
 
-func (p *Pruner) Prune(ctx context.Context) (Report, error) {
-	r := Report{DryRun: p.Options.DryRun, Jobs: []Entry{}, Envs: []string{}, Errors: []string{}}
-	if p.Options.KeepDays == 0 && p.Options.MaxBytes == 0 && p.Options.OlderThan == nil {
+func (p *Pruner) Prune(ctx context.Context) (Report, error) { return p.prune(ctx, p.effective()) }
+
+func (p *Pruner) prune(ctx context.Context, opt Options) (Report, error) {
+	r := Report{DryRun: opt.DryRun, Jobs: []Entry{}, Envs: []string{}, Errors: []string{}}
+	if opt.KeepDays == 0 && opt.MaxBytes == 0 && opt.OlderThan == nil {
 		return r, nil
 	}
 	root, err := os.OpenRoot(p.Paths.Home)
@@ -350,20 +511,20 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 			outputs = append(outputs, j.OutputDir)
 		}
 	}
-	for _, path := range outputs {
-		if path == "" {
-			continue
-		}
-		path, err := canonical(path)
-		if err != nil {
-			return r, fmt.Errorf("核对输出目录失败: %w", err)
-		}
+	resolved, err := canonicalOutputs(ctx, outputs)
+	if err != nil {
+		return r, err
+	}
+	for _, path := range resolved {
 		if inside(path, home) || inside(home, path) {
 			protected = append(protected, path)
 		}
 	}
 	// 拒绝跟随管理目录自身的符号链接；Root 再约束每一次文件操作。
 	for _, dir := range []string{"logs", "snapshots", "run", "envs"} {
+		if err := ctx.Err(); err != nil {
+			return r, err
+		}
 		fi, err := root.Lstat(dir)
 		if os.IsNotExist(err) {
 			continue
@@ -376,9 +537,9 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 		}
 		var n int64
 		if dir == "run" {
-			n, err = runTotal(root, home, protected)
+			n, err = runTotal(ctx, root, home, protected)
 		} else {
-			n, err = sizeOf(root, dir, home, protected)
+			n, err = sizeOf(ctx, root, dir, home, protected)
 		}
 		if err != nil {
 			return r, err
@@ -387,11 +548,11 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 	}
 	now := time.Now()
 	var cutoff *int64
-	if p.Options.OlderThan != nil {
-		v := now.Add(-*p.Options.OlderThan).Unix()
+	if opt.OlderThan != nil {
+		v := now.Add(-*opt.OlderThan).Unix()
 		cutoff = &v
-	} else if p.Options.KeepDays > 0 {
-		v := now.Add(-time.Duration(p.Options.KeepDays) * 24 * time.Hour).Unix()
+	} else if opt.KeepDays > 0 {
+		v := now.Add(-time.Duration(opt.KeepDays) * 24 * time.Hour).Unix()
 		cutoff = &v
 	}
 	remaining := r.TotalBytes
@@ -407,7 +568,7 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 			reason = "继续上次中断的清理"
 		} else if cutoff != nil && *j.EndedAt <= *cutoff {
 			reason = "超过保留时长"
-		} else if p.Options.OlderThan == nil && p.Options.MaxBytes > 0 && remaining > p.Options.MaxBytes {
+		} else if opt.OlderThan == nil && opt.MaxBytes > 0 && remaining > opt.MaxBytes {
 			reason = "总大小超过上限"
 		}
 		if reason == "" {
@@ -423,9 +584,9 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 			var n int64
 			var err error
 			if name == runPath(j.ID) {
-				n, err = pruneRun(root, j.ID, j.Workdir, home, protected, true)
+				n, err = pruneRun(ctx, root, j.ID, j.Workdir, home, protected, true)
 			} else {
-				n, err = sizeOf(root, name, home, protected)
+				n, err = sizeOf(ctx, root, name, home, protected)
 			}
 			if err != nil {
 				targetErr = err
@@ -433,12 +594,15 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 			}
 			size += n
 		}
+		if ctx.Err() != nil {
+			return r, ctx.Err()
+		}
 		if targetErr != nil {
 			r.Errors = append(r.Errors, fmt.Sprintf("任务 #%d: %v", j.ID, targetErr))
 			continue
 		}
 		e := Entry{JobID: j.ID, Name: j.Name, Bytes: size, Reason: reason}
-		if !p.Options.DryRun {
+		if !opt.DryRun {
 			claimed, err := p.Store.ClaimPrune(j.ID)
 			if err != nil {
 				return r, err
@@ -446,8 +610,9 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 			if !claimed {
 				continue
 			}
-			// 运行目录先清：分辨 code/ 里恢复出来的文件要用快照清单，清单要留到最后再删
-			if _, err := pruneRun(root, j.ID, j.Workdir, home, protected, false); err != nil {
+			// 运行目录先清：分辨 code/ 里恢复出来的文件要用快照清单，清单要留到最后再删。
+			// 已经认领的任务清完再停，ctx 只在任务之间检查
+			if _, err := pruneRun(context.WithoutCancel(ctx), root, j.ID, j.Workdir, home, protected, false); err != nil {
 				targetErr = err
 			}
 			for _, name := range pathsFor(j.ID) {
@@ -504,7 +669,7 @@ func (p *Pruner) Prune(ctx context.Context) (Report, error) {
 		if err != nil {
 			return r, err
 		}
-		if !p.Options.DryRun {
+		if !opt.DryRun {
 			removed, err := p.Store.RemoveUnusedEnv(hash, func() error { return root.Remove(name) })
 			if err != nil {
 				return r, err

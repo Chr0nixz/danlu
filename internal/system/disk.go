@@ -33,7 +33,8 @@ var boundedDoctorDiskStats = boundedStat(diskStats, statTimeout)
 
 type DiskMonitor = sample.Sampler[[]Disk]
 
-func NewDiskMonitor(dataDir, outputRoot string, recent func() ([]string, error), warnBytes uint64) *DiskMonitor {
+// warnBytes 每次采样时取一次：低余量提示线可以在面板上随时改。为 nil 或返回 0 时不提示。
+func NewDiskMonitor(dataDir, outputRoot string, recent func() ([]string, error), warnBytes func() uint64) *DiskMonitor {
 	stat := boundedStat(diskStats, statTimeout)
 	query := func(context.Context) ([]Disk, error) {
 		paths := []string{dataDir, outputRoot}
@@ -42,7 +43,11 @@ func NewDiskMonitor(dataDir, outputRoot string, recent func() ([]string, error),
 			return nil, fmt.Errorf("读取磁盘监测目录失败: %w", err)
 		}
 		paths = append(paths, dirs...)
-		return collectDisks(paths, warnBytes, stat), nil
+		var warn uint64
+		if warnBytes != nil {
+			warn = warnBytes()
+		}
+		return collectDisks(paths, warn, stat), nil
 	}
 	return &DiskMonitor{Name: "磁盘数据", Every: time.Minute, Stale: 3 * time.Minute, Query: query, Clone: cloneDisks}
 }

@@ -172,6 +172,10 @@ check "资源接口返回进程列表" [ "$(api "$BASE/api/resources" | json "le
 check "资源历史有数据点" wait_until 10 history_ready
 check "资源历史包含功耗字段" [ "$(api "$BASE/api/resources/history?range=1m" | json "'cpu_power_w' in d['points'][0] and 'gpu_power_w' in d['points'][0]")" = True ]
 check "非法资源范围返回 400" [ "$(code "$BASE/api/resources/history?range=3h")" = 400 ]
+self_ready() { [ "$(api "$BASE/api/resources" | json "d.get('self', {}).get('total_bytes', 0) > 0 and d['self']['db']['logical_bytes'] > 0 and d.get('self_updated_at', 0) > 0")" = True ]; }
+check "资源接口返回丹炉自身占用和数据库大小" wait_until 15 self_ready
+check "自身占用按固定类别细分" [ "$(api "$BASE/api/resources" | json "[p['name'] for p in d['self']['parts']]")" = "['db', 'logs', 'snapshots', 'run', 'envs', 'backup', 'other']" ]
+check "资源历史包含自身占用字段" [ "$(api "$BASE/api/resources/history?range=1m" | json "'data_bytes' in d['points'][0] and 'db_bytes' in d['points'][0]")" = True ]
 
 echo "== 调度 =="
 A=$(submit "{\"name\":\"A\",\"workdir\":\"$W\",\"cmd\":\"echo hello; python3 train.py; sleep 4\",\"gpus\":2,\"conda_env\":\"myenv\"}")
@@ -207,6 +211,9 @@ check "命令路径片段列出可能任务 A" [ "$(echo "$TRACE_GUESS" | json "
 TRACE_CLI=$(HOME="$T/userhome" "$BIN" trace "$OUTDIR/checkpoints/latest.pt")
 check "danlu trace 输出任务和面板链接" bash -c "printf '%s' '$TRACE_CLI' | grep -Fq '$BASE/jobs/$D'"
 check "B 的日志里 CUDA_VISIBLE_DEVICES=2" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$B/log?tail=10000' | grep -q '\"data\":\"[^\"]*\\\\n2\\\\n'"
+# 自身占用每 30 秒统计一次，等下一轮把刚写出的日志计进去
+self_logs_grown() { [ "$(api "$BASE/api/resources" | json "next(p['bytes'] for p in d['self']['parts'] if p['name']=='logs') > 0")" = True ]; }
+check "任务日志计入丹炉占用" wait_until 40 self_logs_grown
 
 echo "== 改名 =="
 check "改名返回去掉首尾空白的新名字" [ "$(api -X POST "$BASE/api/jobs/$D/rename" -d '{"name":"  D-改名  "}' | json "d['name']")" = "D-改名" ]
@@ -345,10 +352,8 @@ check "自动暂停重启后仍不启动后续任务" [ "$(job "$FN" "d['status'
 check "自动暂停可通过面板接口手动恢复" [ "$(api -X POST "$BASE/api/queue/resume" -d '{}' | json "d['paused']")" = False ]
 check "手动继续后后续任务成功" wait_status "$FN" succeeded 10
 
-echo "== 关闭快速失败自动暂停 =="
-kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
-sed -i 's/fail_fast = .*/fail_fast = "0s"/' "$DANLU_HOME/config.toml"
-start_server
+echo "== 关闭快速失败自动暂停（面板上改，不重启）=="
+check "面板上关闭快速失败暂停" [ "$(api -X POST "$BASE/api/settings/runtime" -d '{"fail_fast":0}' | json "d['runtime']['fail_fast']['value']==0 and d['runtime']['fail_fast']['custom']")" = True ]
 F0=$(submit "{\"name\":\"fail-fast-disabled\",\"workdir\":\"$W\",\"cmd\":\"while [ ! -f $T/finish-disabled ]; do sleep 0.1; done; exit 8\",\"gpus\":3}")
 check "关闭后测试任务已启动" wait_started "$F0" 10
 N0=$(submit "{\"name\":\"after-failure-disabled\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
@@ -357,9 +362,31 @@ touch "$T/finish-disabled"
 check "关闭后失败状态仍正常记录" wait_status "$F0" failed 10
 check "关闭后队列照常执行后续任务" wait_status "$N0" succeeded 10
 check "关闭后不会暂停队列" [ "$(api "$BASE/api/queue" | json "d['paused']")" = False ]
-kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
-sed -i 's/fail_fast = .*/fail_fast = "2m"/' "$DANLU_HOME/config.toml"
-start_server
+# 恢复成配置文件里的值：后面几节还要改 config.toml，库里留着的值会把它盖住
+check "恢复后快速失败暂停回到配置文件里的 2 分钟" [ "$(api -X POST "$BASE/api/settings/runtime" -d '{"fail_fast":null}' | json "d['runtime']['fail_fast']['value']==120 and not d['runtime']['fail_fast']['custom']")" = True ]
+
+echo "== 面板运行设置 =="
+rt() { api "$BASE/api/settings" | json "$1"; }
+check "运行设置默认取 config.toml 的值" [ "$(rt "d['runtime']['kill_grace']['value']==3 and not d['runtime']['kill_grace']['custom'] and d['retention']['keep_days']['value']==90")" = True ]
+check "保存后立即生效并标为面板改过" [ "$(api -X POST "$BASE/api/settings/runtime" -d '{"kill_grace":5}' | json "d['runtime']['kill_grace']['value']==5 and d['runtime']['kill_grace']['custom']")" = True ]
+check "改运行设置记审计日志" [ "$(api "$BASE/api/audit" | json "d['entries'][0]['action']=='settings_change' and '取消后强杀等待 3 秒 → 5 秒' in d['entries'][0]['detail']")" = True ]
+check "超出面板范围的值被拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"kill_grace":0}' "$BASE/api/settings/runtime")" = 400 ]
+check "未知设置项被拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"port":1}' "$BASE/api/settings/runtime")" = 400 ]
+check "暂停线不能高于提示线" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"disk_min_gb":50}' "$BASE/api/settings/runtime")" = 400 ]
+# 提示线调到面板允许的最大值，哪块盘都会低于它
+api -X POST "$BASE/api/settings/runtime" -d '{"disk_warn_gb":100000}' >/dev/null
+check "danlu info 列出面板改过的项" grep -q 'disk_warn_gb=100000 GB' <("$BIN" info --no-qr)
+check "danlu doctor 按面板上的提示线体检" [ "$("$BIN" doctor --json | json "[c['level'] for c in d['checks'] if c['id']=='data_disk'] == ['warn']")" = True ]
+check "面板上的体检也按面板上的值" [ "$(api "$BASE/api/doctor" | json "[c['level'] for c in d['checks'] if c['id']=='data_disk'] == ['warn']")" = True ]
+check "null 恢复成配置文件里的值" [ "$(api -X POST "$BASE/api/settings/runtime" -d '{"kill_grace":null,"disk_warn_gb":null}' | json "d['runtime']['kill_grace']['value']==3 and not d['runtime']['disk_warn_gb']['custom']")" = True ]
+check "恢复后 danlu info 不再列出" [ "$("$BIN" info --no-qr | grep -c '面板改过' || true)" = 0 ]
+check "保留策略预览不保存" [ "$(api -X POST "$BASE/api/settings/retention/preview" -d '{"keep_days":1}' | json "'jobs' in d and 'total_bytes' in d")" = True ]
+check "预览后保留天数不变" [ "$(rt "d['retention']['keep_days']['value']")" = 90 ]
+check "保留策略的坏值被拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"keep_days":-1}' "$BASE/api/settings/retention/preview")" = 400 ]
+check "面板偏好保存" [ "$(api -X POST "$BASE/api/settings/prefs" -d '{"jobs_page_size":50,"log_wrap":false}' | json "d['prefs']['jobs_page_size']==50 and d['prefs']['log_wrap'] is False")" = True ]
+check "面板偏好随设置返回" [ "$(rt "d['prefs']['jobs_page_size']")" = 50 ]
+check "面板偏好的坏值被拒绝" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"jobs_page_size":33}' "$BASE/api/settings/prefs")" = 400 ]
+check "面板偏好恢复默认" [ "$(api -X POST "$BASE/api/settings/prefs" -d '{"jobs_page_size":null,"log_wrap":null}' | json "d['prefs']['jobs_page_size']==20 and d['prefs']['log_wrap'] is True")" = True ]
 
 echo "== 任务状态事件 =="
 check "任务可标星" [ "$(api -X POST "$BASE/api/jobs/$A/star" -d '{"starred":true}' | json "d['starred']")" = True ]
@@ -579,12 +606,15 @@ check "磁盘低余量标为告警" [ "$(api "$BASE/api/system" | json "any(x['d
 DP=$(submit "{\"name\":\"disk-pending\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
 check "磁盘保护也阻止不用 GPU 的新任务" [ "$(job "$DP" "d['status']")" = queued ]
 check "磁盘仍不足时不能人工绕过保护" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/queue/resume")" = 409 ]
-kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
-sed -i 's/disk_min_gb = .*/disk_min_gb = 1/; s/disk_warn_gb = .*/disk_warn_gb = 20/' "$DANLU_HOME/config.toml"
-start_server
+# 在面板上调低暂停线，不重启：config.toml 里超出面板范围的旧值不妨碍保存
+check "面板上调低暂停线" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"disk_min_gb":1,"disk_warn_gb":20}' "$BASE/api/settings/runtime")" = 200 ]
 check "空间达到恢复线后自动恢复调度" wait_status "$DP" succeeded 10
 check "磁盘恢复后清除暂停状态" [ "$(api "$BASE/api/queue" | json "d['paused']")" = False ]
 kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=
+check "重启后仍按面板上的值" grep -q 'disk_min_gb=1 GB' <("$BIN" info --no-qr)
+# init --force 重新生成配置时清掉面板上改过的运行设置
+"$BIN" init --force --yes --tls off --port "$DISK_PORT" --password testpass123 --public-ip 127.0.0.1 --no-qr >/dev/null
+check "init --force 清掉面板上改过的运行设置" [ "$("$BIN" info --no-qr | grep -c '面板改过' || true)" = 0 ]
 export DANLU_HOME=$MAIN_HOME
 
 echo "== GPU 数据不可信时暂停分卡（假 nvidia-smi）=="

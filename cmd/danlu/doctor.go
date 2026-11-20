@@ -29,6 +29,13 @@ func cmdDoctor(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 磁盘提示线等可能在面板上改过；读不到库也照样体检（体检本身会检查数据库）
+	if _, err := overlayPanelSettings(p, c); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ 读取面板上的设置失败，按 config.toml 体检: %v\n", err)
+		if c, err = config.Load(p); err != nil {
+			return err
+		}
+	}
 	report := doctor.Run(context.Background(), c, p, version, api.APIVersion)
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(report)

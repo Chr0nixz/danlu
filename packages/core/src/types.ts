@@ -263,6 +263,37 @@ export interface ResourceProcess {
   job_name?: string
 }
 
+/** 丹炉自身占用的一类文件（db/logs/snapshots/run/envs/backup/other） */
+export interface SelfUsagePart {
+  name: string
+  bytes: number
+  files: number
+  error?: string
+}
+
+/** 数据库大小：逻辑大小按页数×页大小（含空闲页），文件字节另计 WAL/SHM */
+export interface SelfDB {
+  file_bytes: number
+  wal_bytes: number
+  shm_bytes: number
+  logical_bytes: number
+  free_bytes: number
+  page_size: number
+  page_count: number
+  free_pages: number
+}
+
+/** 数据目录自身占用，每 30 秒统计一次 */
+export interface SelfUsage {
+  path: string
+  total_bytes: number
+  files: number
+  parts: SelfUsagePart[]
+  db?: SelfDB
+  error?: string
+  db_error?: string
+}
+
 export interface ResourceSnapshot {
   /** 最近一次成功采样的时间；0 表示还没有成功过，这时其它字段都是零值 */
   updated_at: number
@@ -288,6 +319,10 @@ export interface ResourceSnapshot {
   disks: Disk[]
   disks_updated_at?: number
   disks_error?: string
+  /** 丹炉自身占用；还没有成功统计过时没有 */
+  self?: SelfUsage
+  self_updated_at?: number
+  self_error?: string
   error?: string
   network_error?: string
   disk_io_error?: string
@@ -305,6 +340,9 @@ export interface ResourcePoint {
   disk_write_bps: number
   cpu_power_w: number | null
   gpu_power_w: number | null
+  /** 丹炉数据目录总量和数据库逻辑大小；自身统计不可用时为 null。旧版服务器没有这两个字段 */
+  data_bytes?: number | null
+  db_bytes?: number | null
 }
 
 export interface ResourcePeaks {
@@ -317,6 +355,8 @@ export interface ResourcePeaks {
   disk_write_bps: number
   cpu_power_w: number | null
   gpu_power_w: number | null
+  data_bytes?: number | null
+  db_bytes?: number | null
 }
 
 export interface ResourceHistory {
@@ -360,6 +400,120 @@ export interface Settings {
   totp_enabled?: boolean
   ca_fingerprint?: string
   notify?: NotifyStatus
+  /** 旧版服务器没有这个字段 */
+  security?: SecuritySettings
+  /** 面板上能改的调度与告警设置。旧版服务器没有这个字段 */
+  runtime?: RuntimeSettings
+  /** 面板上能改的数据保留设置。旧版服务器没有这个字段 */
+  retention?: RetentionSettings
+  /** 服务启动后最近一次自动清理；还没清理过（或保留策略关闭）时没有 */
+  prune?: PruneStatus
+  /** 手机和电脑共用的面板偏好。旧版服务器没有这个字段 */
+  prefs?: Partial<Prefs>
+}
+
+/**
+ * 面板上能改的一项运行设置。时长以秒为单位，大小以 GB 或 MB 为单位，见 unit。
+ * custom 表示面板上改过（存在数据库里），这时 config.toml 里的同名项不生效；恢复后取 default。
+ */
+export interface SettingItem {
+  value: number
+  default: number
+  custom: boolean
+  min: number
+  max: number
+  /** 0 表示关闭 */
+  zero_off: boolean
+  unit: 's' | 'GB' | 'MB' | 'day'
+}
+
+export type RuntimeKey =
+  | 'fail_fast'
+  | 'kill_grace'
+  | 'unknown_gpu_memory_mb'
+  | 'disk_min_gb'
+  | 'disk_warn_gb'
+  | 'silence_alert'
+  | 'snapshot_max_file_mb'
+  | 'snapshot_max_total_mb'
+  | 'terminal_session_lifetime'
+export type RetentionKey = 'keep_days' | 'max_total_gb'
+export type RuntimeSettings = Record<RuntimeKey, SettingItem>
+export type RetentionSettings = Record<RetentionKey, SettingItem>
+
+/** 要改的运行设置，只传改了的项；null 恢复成 config.toml 里的值 */
+export type SettingsPatch<K extends string> = Partial<Record<K, number | null>>
+
+export interface PruneStatus {
+  at: number
+  jobs: number
+  envs: number
+  bytes: number
+  error?: string
+}
+
+export interface RetentionPreviewItem {
+  job_id: number
+  name: string
+  bytes: number
+  reason: string
+}
+
+/** 按新的保留策略会清理什么；不删任何东西 */
+export interface RetentionPreview {
+  jobs: number
+  envs: number
+  bytes: number
+  /** 当前任务文件总量 */
+  total_bytes: number
+  /** 最多 50 条 */
+  items: RetentionPreviewItem[]
+  errors: string[]
+}
+
+/** 面板偏好：存在服务器上，手机和电脑共用 */
+export interface Prefs {
+  new_job_gpus: number
+  new_job_bashrc: boolean
+  new_job_notify_done: boolean
+  /** auto：自动选第一个非 base 环境；none：不预选 */
+  new_job_conda: 'auto' | 'none'
+  jobs_page_size: 20 | 50 | 100
+  log_wrap: boolean
+  warn_cpu_percent: number
+  warn_mem_percent: number
+  warn_swap_percent: number
+  warn_gpu_temp_c: number
+}
+
+/** 要改的面板偏好，只传改了的项；null 恢复默认 */
+export type PrefsPatch = { [K in keyof Prefs]?: Prefs[K] | null }
+
+/** 面板上能改的安全设置，保存后立即生效。时长都以秒为单位 */
+export interface SecuritySettings {
+  entrance: string
+  /** 不带入口的地址，如 https://203.0.113.10:28457 */
+  base_url: string
+  /** 带安全入口的完整访问地址 */
+  url: string
+  session_ttl: number
+  max_failures: number
+  lockout: number
+}
+
+/** 要改的安全设置，只传改了的项 */
+export type SecurityPatch = Partial<Pick<SecuritySettings, 'entrance' | 'session_ttl' | 'max_failures' | 'lockout'>>
+
+/** 用密码登录的浏览器会话。设备令牌不在这里 */
+export interface LoginSession {
+  /** 令牌哈希的前 16 位，只用来注销 */
+  id: string
+  created_at: number
+  expires_at: number
+  ip: string
+  user_agent: string
+  /** 是不是发起这次请求的浏览器 */
+  current: boolean
 }
 
 export interface DoctorCheck {

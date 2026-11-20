@@ -13,7 +13,7 @@ func lock(root *os.Root) (func(), error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("另一个清理进程正在运行: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrBusy, err)
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }

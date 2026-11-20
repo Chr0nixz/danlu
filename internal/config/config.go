@@ -6,12 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"danlu/internal/atomicfile"
 
 	"github.com/BurntSushi/toml"
 )
@@ -38,10 +41,15 @@ type Config struct {
 	Retention Retention `toml:"retention"`
 	Notify    Notify    `toml:"notify"`
 	Terminal  Terminal  `toml:"terminal"`
+
+	// Unknown 是配置文件里无法识别的键（多半是拼错了），Load 时记下并给出警告。不写回文件。
+	Unknown []string `toml:"-"`
 }
 
 type Terminal struct {
 	Enabled bool `toml:"enabled"`
+	// SessionLifetime 是页面断开后 shell 还保留多久，回来能接着用。面板上改过后以数据库为准。
+	SessionLifetime Duration `toml:"session_lifetime"`
 }
 
 type Server struct {
@@ -114,7 +122,7 @@ func Default() *Config {
 			SnapshotMaxTotalMB: 50,
 		},
 		Retention: Retention{KeepDays: 90, MaxTotalGB: 50},
-		Terminal:  Terminal{Enabled: true},
+		Terminal:  Terminal{Enabled: true, SessionLifetime: Duration{15 * time.Minute}},
 		Notify:    Notify{QueueDrained: true},
 	}
 }
@@ -193,11 +201,19 @@ func Exists(p Paths) bool {
 
 func Load(p Paths) (*Config, error) {
 	c := Default()
-	if _, err := toml.DecodeFile(p.Config, c); err != nil {
+	md, err := toml.DecodeFile(p.Config, c)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("还没有初始化，请先运行 danlu init（数据目录 %s）", p.Home)
 		}
 		return nil, fmt.Errorf("读取配置 %s 失败: %w", p.Config, err)
+	}
+	// 写错的键 TOML 会静默忽略，配置看上去改了却不生效：在启动日志和命令行里提醒一下
+	for _, k := range md.Undecoded() {
+		c.Unknown = append(c.Unknown, k.String())
+	}
+	if len(c.Unknown) > 0 {
+		log.Printf("警告：配置 %s 里有无法识别的键，已忽略（是不是拼错了？）：%s", p.Config, strings.Join(c.Unknown, "、"))
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("配置 %s 有误: %w", p.Config, err)
@@ -214,11 +230,7 @@ func Save(p Paths, c *Config) error {
 	if err := toml.NewEncoder(&sb).Encode(c); err != nil {
 		return err
 	}
-	tmp := p.Config + ".tmp"
-	if err := os.WriteFile(tmp, []byte(sb.String()), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p.Config)
+	return atomicfile.Write(p.Config, []byte(sb.String()), 0o600)
 }
 
 func (c *Config) Validate() error {
@@ -253,7 +265,7 @@ func (c *Config) Validate() error {
 	}
 	for name, d := range map[string]time.Duration{
 		"auth.session_ttl": c.Auth.SessionTTL.Duration, "auth.lockout": c.Auth.Lockout.Duration,
-		"runtime.kill_grace": c.Runtime.KillGrace.Duration,
+		"runtime.kill_grace": c.Runtime.KillGrace.Duration, "terminal.session_lifetime": c.Terminal.SessionLifetime.Duration,
 	} {
 		if d <= 0 {
 			return fmt.Errorf("%s 必须大于 0", name)
@@ -310,8 +322,12 @@ func ValidEntrance(s string) bool {
 			return false
 		}
 	}
-	// 不能和内部路径撞名
-	return s != "api" && s != "assets" && s != "login"
+	// 不能和内部路径、面板页面撞名：入口地址一律被拦下来发 gate cookie，同名的页面就打不开了
+	switch s {
+	case "api", "assets", "login", "compare", "resources", "settings", "terminal":
+		return false
+	}
+	return true
 }
 
 const (
@@ -357,7 +373,7 @@ func EnsureSecret(p Paths) ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(p.Secret, []byte(hex.EncodeToString(key)), 0o600); err != nil {
+	if err := atomicfile.Write(p.Secret, []byte(hex.EncodeToString(key)), 0o600); err != nil {
 		return nil, err
 	}
 	return key, nil

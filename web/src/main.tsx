@@ -13,7 +13,7 @@ import { Spinner } from './components/ui'
 const Jobs = lazy(() => import('./pages/Jobs').then((m) => ({ default: m.Jobs })))
 const JobDetail = lazy(() => import('./pages/JobDetail').then((m) => ({ default: m.JobDetail })))
 const NewJob = lazy(() => import('./pages/NewJob').then((m) => ({ default: m.NewJob })))
-const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m.Settings })))
+const Settings = lazy(() => import('./pages/settings/SettingsLayout').then((m) => ({ default: m.SettingsLayout })))
 const NotFound = lazy(() => import('./pages/NotFound').then((m) => ({ default: m.NotFound })))
 const Terminal = lazy(() => import('./pages/Terminal').then((m) => ({ default: m.Terminal })))
 const Compare = lazy(() => import('./pages/Compare').then((m) => ({ default: m.Compare })))
@@ -46,6 +46,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/resources" element={<Suspense fallback={pageFallback}><Resources /></Suspense>} />
               <Route path="/new" element={<Suspense fallback={pageFallback}><NewJob /></Suspense>} />
               <Route path="/settings" element={<Suspense fallback={pageFallback}><Settings /></Suspense>} />
+              <Route path="/settings/:group" element={<Suspense fallback={pageFallback}><Settings /></Suspense>} />
               <Route path="/terminal" element={<Suspense fallback={pageFallback}><Terminal /></Suspense>} />
               <Route path="*" element={<Suspense fallback={pageFallback}><NotFound /></Suspense>} />
             </Route>

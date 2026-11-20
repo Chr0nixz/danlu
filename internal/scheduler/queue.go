@@ -67,8 +67,10 @@ func (m *Manager) pauseQueueLocked(kind, reason string, jobID *int64) (QueueStat
 }
 
 func (m *Manager) ResumeQueue() (QueueState, bool, error) {
+	live := m.liveOptions()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.applyLiveLocked(live)
 	current, err := m.queueStateLocked()
 	if err != nil || !current.Paused {
 		return current, false, err

@@ -48,6 +48,14 @@ func (m *Manager) sampleLogs(ctx context.Context) {
 	}
 }
 
+// silenceFloor 是判定日志静默的下限；提醒关闭时取一个永远到不了的值，不标记静默，已有的静默状态随之清掉。
+func (m *Manager) silenceFloor() time.Duration {
+	if m.opt.SilenceAlert <= 0 {
+		return time.Duration(1 << 62)
+	}
+	return m.opt.SilenceAlert
+}
+
 func (s *runStat) observeLog(sample logSample, started *int64, now time.Time, floor time.Duration) {
 	s.logKnown = !sample.modified.IsZero() && now.Sub(sample.at) <= 2*logInterval && !sample.modified.After(now)
 	if !s.logKnown {

@@ -13,6 +13,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,7 +21,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"danlu/internal/settings"
 	"danlu/internal/store"
 	"danlu/internal/totp"
 
@@ -50,6 +51,8 @@ const (
 	totpSecretKey = "auth.totp_secret"
 )
 
+// Options 里的 Entrance、SessionTTL、MaxFailures、Lockout 来自 config.toml，只是初始值：
+// 面板或 danlu entrance 改过之后以数据库里的为准（见 Security）。
 type Options struct {
 	Entrance    string
 	Secret      []byte
@@ -64,11 +67,18 @@ type Auth struct {
 	opt   Options
 	store *store.Store
 
+	secMu sync.Mutex
+	sec   Security  // 当前生效的安全设置
+	secAt time.Time // sec 上次从库里读出的时刻
+
 	usedMu sync.Mutex
 	used   map[int64]time.Time // 设备令牌上次写入"最后使用时间"的时刻，避免每个请求都写库
 
 	loginMu sync.Mutex
 	logins  map[string]*ipLock // 正在登录的 IP，用完即删
+
+	throttle *loginThrottle // 所有 IP 加起来失败太多时放慢
+	bcrypt   chan struct{}  // 同时进行的 bcrypt 校验，最多 bcryptSlots 个
 }
 
 type ipLock struct {
@@ -77,7 +87,10 @@ type ipLock struct {
 }
 
 func New(st *store.Store, opt Options) *Auth {
-	return &Auth{opt: opt, store: st, used: map[int64]time.Time{}, logins: map[string]*ipLock{}}
+	a := &Auth{opt: opt, store: st, used: map[int64]time.Time{}, logins: map[string]*ipLock{},
+		throttle: newLoginThrottle(), bcrypt: make(chan struct{}, bcryptSlots)}
+	a.sec = a.defaults()
+	return a
 }
 
 // lockIP 让同一 IP 的登录一个接一个处理。否则并发的请求都在锁定生效前通过检查，各自跑完 bcrypt，
@@ -137,7 +150,14 @@ func ImportPasswordHash(st *store.Store, fromConfig string) (bool, error) {
 }
 
 // CheckPassword 每次从库里读哈希（只有登录和改密码时用到）。读不到就当作密码错误。
-func (a *Auth) CheckPassword(pw string) bool {
+// 同时最多 bcryptSlots 个校验，其余的排队；ctx 结束（客户端断开）时不再等，当作不通过。
+func (a *Auth) CheckPassword(ctx context.Context, pw string) bool {
+	select {
+	case a.bcrypt <- struct{}{}:
+		defer func() { <-a.bcrypt }()
+	case <-ctx.Done():
+		return false
+	}
 	h, err := a.store.GetSetting(passwordKey)
 	if err != nil {
 		return false
@@ -176,17 +196,18 @@ func DisableTOTP(st *store.Store) error {
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok, device := bearerToken(r)
+		sec := a.Security()
 		switch {
 		case device:
 			if !a.deviceValid(tok, ClientIP(r)) {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-		case r.URL.Path == "/"+a.opt.Entrance:
-			a.setGate(w)
+		case r.URL.Path == "/"+sec.Entrance:
+			a.setGate(w, sec)
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
-		case !a.gateValid(r):
+		case !a.gateValid(r, sec.Entrance):
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -210,30 +231,31 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 
 // ---------- gate cookie：值为 "过期时间.HMAC" ----------
 
-func (a *Auth) gateSig(exp string) string {
+// 签名里带着入口：换了入口，之前发出去的 gate cookie 就全部失效。
+func (a *Auth) gateSig(entrance, exp string) string {
 	m := hmac.New(sha256.New, a.opt.Secret)
-	m.Write([]byte("gate:" + a.opt.Entrance + ":" + exp))
+	m.Write([]byte("gate:" + entrance + ":" + exp))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
-func (a *Auth) setGate(w http.ResponseWriter) {
-	ttl := a.opt.SessionTTL
+func (a *Auth) setGate(w http.ResponseWriter, sec Security) {
+	ttl := sec.SessionTTL
 	exp := strconv.FormatInt(time.Now().Add(ttl).Unix(), 10)
 	http.SetCookie(w, &http.Cookie{
-		Name: gateCookie, Value: exp + "." + a.gateSig(exp), Path: "/",
+		Name: gateCookie, Value: exp + "." + a.gateSig(sec.Entrance, exp), Path: "/",
 		MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: a.opt.Secure,
 		// Lax：从书签或外部链接打开入口地址时也要能带上
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
-func (a *Auth) gateValid(r *http.Request) bool {
+func (a *Auth) gateValid(r *http.Request, entrance string) bool {
 	c, err := r.Cookie(gateCookie)
 	if err != nil {
 		return false
 	}
 	exp, sig, ok := strings.Cut(c.Value, ".")
-	if !ok || !hmac.Equal([]byte(sig), []byte(a.gateSig(exp))) {
+	if !ok || !hmac.Equal([]byte(sig), []byte(a.gateSig(entrance, exp))) {
 		return false
 	}
 	t, err := strconv.ParseInt(exp, 10, 64)
@@ -252,14 +274,17 @@ func (a *Auth) SessionValid(r *http.Request) bool {
 	return err == nil && c.Value != "" && a.store.SessionValid(hashToken(c.Value))
 }
 
-// Authorized 用请求当初带的凭证重新判断现在还能不能访问 /api，条件和 Middleware 相同。
-// 网页终端这类长连接只在握手时经过 Middleware，之后靠它复查：改密码、退出登录、会话到期、
+// Authorized 用请求当初带的凭证重新判断现在还能不能访问 /api。
+// 网页终端这类长连接只在握手时经过 Middleware，之后靠它复查：改密码、退出登录、会话到期或被注销、
 // 吊销设备令牌都会让它返回 false。改密码可能来自另一个进程（danlu passwd），所以每次都查库。
+//
+// 这里只复查会话，不复查 gate：gate 是挡扫描器的门，握手时已经过了；凭证是会话。
+// 否则在面板上换入口时，自己这个浏览器开着的终端和日志流也会被断开。要踢掉别的设备，注销它的会话。
 func (a *Auth) Authorized(r *http.Request) bool {
 	if tok, device := bearerToken(r); device {
 		return a.deviceValid(tok, ClientIP(r))
 	}
-	return a.gateValid(r) && a.SessionValid(r)
+	return a.SessionValid(r)
 }
 
 // ---------- 设备令牌 ----------
@@ -318,10 +343,20 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass, code st
 	if until := a.store.LockedUntil(ip); !until.IsZero() {
 		return time.Until(until), ErrLocked
 	}
+	if err := a.throttle.wait(r.Context()); err != nil {
+		return 0, err
+	}
+	if err := r.Context().Err(); err != nil {
+		return 0, err // 排队时客户端已经走了：不校验，也不计失败
+	}
+	sec := a.Security()
 	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(a.opt.Username)) == 1
-	passOK := a.CheckPassword(pass) // 用户名错也照样跑一遍 bcrypt，避免按耗时猜用户名
+	passOK := a.CheckPassword(r.Context(), pass) // 用户名错也照样跑一遍 bcrypt，避免按耗时猜用户名
+	if err := r.Context().Err(); err != nil {
+		return 0, err
+	}
 	if !userOK || !passOK {
-		return a.loginFailure(ip, user, "")
+		return a.loginFailure(ip, user, sec, "")
 	}
 	secret, err := a.store.GetSetting(totpSecretKey)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -334,14 +369,14 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass, code st
 		}
 		step, ok := totp.Verify(secret, code, time.Now())
 		if !ok {
-			return a.loginFailure(ip, user, "totp_invalid", ErrBadTOTP)
+			return a.loginFailure(ip, user, sec, "totp_invalid", ErrBadTOTP)
 		}
 		claimed, err := a.store.ClaimTOTPWindow(step)
 		if err != nil {
 			return 0, err
 		}
 		if !claimed {
-			return a.loginFailure(ip, user, "totp_replay", ErrBadTOTP)
+			return a.loginFailure(ip, user, sec, "totp_replay", ErrBadTOTP)
 		}
 	}
 	_ = a.store.ResetFailures(ip)
@@ -351,20 +386,21 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass, code st
 		return 0, err
 	}
 	tok := base64.RawURLEncoding.EncodeToString(raw)
-	if err := a.store.CreateSession(hashToken(tok), a.opt.SessionTTL, ip, r.UserAgent()); err != nil {
+	if err := a.store.CreateSession(hashToken(tok), sec.SessionTTL, ip, r.UserAgent()); err != nil {
 		return 0, err
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: tok, Path: "/",
-		MaxAge: int(a.opt.SessionTTL.Seconds()), HttpOnly: true, Secure: a.opt.Secure,
+		MaxAge: int(sec.SessionTTL.Seconds()), HttpOnly: true, Secure: a.opt.Secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 	a.store.Audit(ip, "login_ok", "user="+user)
 	return 0, nil
 }
 
-func (a *Auth) loginFailure(ip, user, detail string, cause ...error) (time.Duration, error) {
-	locked, err := a.store.RecordFailure(ip, a.opt.MaxFailures, a.opt.Lockout)
+func (a *Auth) loginFailure(ip, user string, sec Security, detail string, cause ...error) (time.Duration, error) {
+	a.throttle.fail()
+	locked, err := a.store.RecordFailure(ip, sec.MaxFailures, sec.Lockout)
 	if err != nil {
 		return 0, err
 	}
@@ -373,8 +409,8 @@ func (a *Auth) loginFailure(ip, user, detail string, cause ...error) (time.Durat
 	}
 	a.store.Audit(ip, "login_fail", "user="+user+detail)
 	if locked {
-		a.store.Audit(ip, "login_locked", fmt.Sprintf("锁定 %s", a.opt.Lockout))
-		return a.opt.Lockout, ErrLocked
+		a.store.Audit(ip, "login_locked", "锁定 "+settings.FormatDuration(sec.Lockout))
+		return sec.Lockout, ErrLocked
 	}
 	if len(cause) > 0 {
 		return 0, cause[0]

@@ -179,7 +179,8 @@
   background: #0b0b0b;
   color: #d9d9d9;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  /* 设置 → 面板偏好里可以改，只存在当前浏览器（见 lib/localPrefs.ts 和 index.html） */
+  font-size: var(--log-font-size, 12.5px);
   line-height: 1.6;
   tab-size: 4;
   scrollbar-color: #3a3a3a transparent;

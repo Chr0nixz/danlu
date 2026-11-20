@@ -82,14 +82,15 @@ $ danlu restart           # 改完配置后重启服务（训练不中断）
 ### 3.1 安全入口的工作方式
 
 ```
-GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有效期和会话一样是 7 天）──► 302 跳到 /
+GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有效期和会话一样，默认 7 天）──► 302 跳到 /
 其他任何路径，如果没有有效的 gate cookie  ──►  404，响应体为空，和普通的 404 一样
 有 gate cookie，但没有登录          ──►  页面跳转到 /login；/api/* 返回 401
-登录成功                           ──►  设置会话 cookie（随机 32 字节，存在服务端，HttpOnly + Secure + SameSite=Strict，7 天有效）
+登录成功                           ──►  设置会话 cookie（随机 32 字节，存在服务端，HttpOnly + Secure + SameSite=Strict，默认 7 天有效）
 ```
 
 - 前端的静态资源（JS/CSS）同样需要先过入口才能访问，所以扫描器拿不到任何能识别出 danlu 的特征。
 - 防暴力破解：同一个 IP 连续失败 5 次，锁定 15 分钟；每次失败都写入审计日志。
+- 入口、登录有效期和失败锁定可以在面板「设置 → 安全设置」里改，保存后立即生效。换入口后旧入口和其他设备上的 gate cookie 立即失效，发起修改的浏览器拿到新的 gate cookie；已登录的会话不受影响，要踢掉某台设备，在「登录会话」里注销它。缩短有效期时，已有会话也按新时长到期（其他会话从登录时算起，当前会话从现在算起）。
 - 防 CSRF：会话 cookie 设了 SameSite=Strict，而且所有写操作都要求 `Content-Type: application/json`。
 - **入口只负责"藏起来"，并不保证安全**。如果入口路径泄露了，还有密码、HTTPS 和限速三层防护。
 
@@ -267,7 +268,7 @@ GET  /api/queue                        队列状态（paused、kind、reason、s
 POST /api/queue/pause                  手动暂停队列（JSON {}，不影响已经占位或运行的任务）
 POST /api/queue/resume                 恢复队列（JSON {}）
 GET  /api/system                       CPU、内存采样，以及磁盘余量和采集状态
-GET  /api/resources                    资源详情当前快照：主机、CPU、内存、网络、磁盘 I/O、进程、功耗，以及磁盘容量
+GET  /api/resources                    资源详情当前快照：主机、CPU、内存、网络、磁盘 I/O、进程、功耗、磁盘容量，以及丹炉自身占用
 GET  /api/resources/history?range=1m|5m|15m|1h  最近 1 小时的降采样历史，返回 points 和 peaks
 GET  /api/conda-envs                   conda 环境列表
 GET  /api/fs/dirs?path=                目录自动补全
@@ -296,8 +297,16 @@ GET  /api/jobs/{id}/snapshot/download  下载 tar.gz
 
 GET  /api/settings/ca.crt              下载 CA 证书
 GET  /api/settings/qr.svg              完整安全入口地址的二维码（需登录，禁止缓存）
-GET  /api/settings                    服务配置摘要（含 terminal_enabled、totp_enabled）和 notify（enabled、queue_drained、last_sent_at、last_error）
+GET  /api/settings                    服务配置摘要（含 terminal_enabled、totp_enabled）、notify（enabled、queue_drained、last_sent_at、last_error）、security（entrance、base_url、url、session_ttl、max_failures、lockout，时长单位为秒）、runtime 和 retention（每项 value、default、custom、min、max、zero_off、unit）、prune（服务启动后最近一次自动清理：at、jobs、envs、bytes、error）和 prefs（new_job_gpus、new_job_bashrc、new_job_notify_done、new_job_conda、jobs_page_size、log_wrap、warn_cpu_percent、warn_mem_percent、warn_swap_percent、warn_gpu_temp_c）
 POST /api/settings/password            修改密码
+POST /api/settings/security            修改安全设置（JSON，只传要改的项：entrance、session_ttl、max_failures、lockout）；值不合要求返回 400，换入口时响应带上新的 gate cookie
+POST /api/settings/runtime             修改调度与告警（JSON {"名字": 数值或 null}，只传要改的项，null 恢复成 config.toml 的值）：fail_fast、kill_grace、silence_alert、terminal_session_lifetime（秒），disk_min_gb、disk_warn_gb（GB），unknown_gpu_memory_mb、snapshot_max_file_mb、snapshot_max_total_mb（MB）；保存后下一轮调度生效，返回 runtime
+POST /api/settings/retention           修改保留策略（keep_days 天、max_total_gb GB，格式同上）；保存后马上按新策略清理一次，返回 retention
+POST /api/settings/retention/preview   按要改的保留策略预览（格式同上，不保存、不删除）：jobs、envs、bytes、total_bytes、items（最多 50 条）、errors；正在清理时返回 409
+POST /api/settings/prefs               修改面板偏好（JSON {"名字": 值或 null}，null 恢复默认），返回 prefs
+GET  /api/sessions                     用密码登录、还没到期的会话（id 是令牌哈希的前 16 位，current 标出当前会话）
+POST /api/sessions/{id}/revoke         注销一个会话；当前会话返回 400，请用退出登录
+POST /api/sessions/revoke-others       注销当前会话以外的所有会话，返回 revoked
 GET  /api/terminal                     列出终端会话
 POST /api/terminal                     打开终端（JSON {"job_id"?: number}；可在任务目录和 conda 环境中启动）
 GET  /api/terminal/{id}/ws?offset=     终端 WebSocket（二进制输入输出；文本帧传 resize、offset 控制消息；offset 是已收到的输出末尾，只补发之后的部分；新连接接替旧连接，旧连接以 4001 关闭）
@@ -313,6 +322,8 @@ POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 `GET /api/system` 的 `disks` 数组包含 `id`（设备号）、`path`、`paths`（同一分区上被监测的路径）、`total_bytes`、`available_bytes`（普通用户实际可用）、`data`、`warn` 和可选的 `error`。`disks_updated_at` 是采样时间；整个磁盘采集失败或过期时增加 `disks_error`，不影响 CPU/内存数据。
 
 `GET /api/resources` 每 2 秒采样，`updated_at` 是最近一次成功采样的时间（为 0 表示还没有成功过，其余字段都是零值；采集失败时返回上一份好快照和它自己的时间，不会把旧数据标成刚刚），`samples` 是主机采样次数，`process_samples` 是进程采样次数；小于 2 时速率或进程 CPU 还在起步。`cpu.cores` 的 `-1` 表示还没有第二次采样。`processes` 是 CPU 前 8 与内存前 8 的并集，`job_id` 为 0 表示不是本实例任务，`job_name` 由接口补充。`root_disk` 是根分区 `/`，前端按设备号与 `disks` 去重；磁盘 I/O 只统计物理整盘（`/sys/block/<名字>/device` 存在；LVM/md 的成员常是分区，统计 dm/md 会和整盘重复），按开机以来的累计读写排序；网络汇总只加物理网卡（`/sys/class/net/<名字>/device` 存在），bridge、VLAN、bond、tailscale 等隧道和容器网卡标为 `virtual` 且不计入，一块物理网卡都没有时（容器）去掉认得出的容器网卡再加。`cpu.power_w` 来自 Intel RAPL 或 amd_energy（读不到为 null，`cpu.power_error` 写明原因：内核只允许 root 读这些计数器，普通用户的服务通常读不到），`gpu_power_w` 来自 nvidia-smi，`power_w` 是已知部分合计，`energy_wh` 是本次服务启动以来按采样积分估算的电量，均不含内存、硬盘、风扇和电源损耗。`cpu.freq_mhz` 是各核平均，`freq_max_mhz` 是此刻最快那个核；`temp_c` 是各颗 CPU 封装温度里最高的；不可用时为 null。`GET /api/resources/history` 的 `points` 最多 180 个（桶平均），`peaks` 按原始点计算；历史只保存在内存里，服务重启后清零。`range` 缺省 15m，非法值返回 400。
+
+丹炉自身占用：`GET /api/resources` 的 `self` 是数据目录（`~/.danlu`）的磁盘占用统计，每 30 秒一次，独立采样，目录遍历卡住只让这份数据过期，不影响主机采样和调度。`self_updated_at` 是最近一次成功统计的时间；还没有成功过时省略 `self`，失败时带 `self_error` 并保留上一份好统计。`parts` 按固定顺序分七类：`db`（danlu.db 及 WAL/SHM 文件）、`logs`、`snapshots`、`run`、`envs`、`backup`（升级前数据库备份）、`other`（配置、证书等），每类含 `bytes`、`files` 和可选 `error`（如管理目录是符号链接时不跟随）。口径是表观大小：硬链接只计一次（快照重跑会建硬链接），不跟随符号链接，任务写在运行目录里的产物也计入；输出目录若配在数据目录内同样计入。`db` 详情含逻辑大小 `logical_bytes`（页数×页大小，含空闲页）、`free_bytes`（空闲页，VACUUM 可回收）、主文件/WAL/SHM 字节和 `page_count`/`page_size`/`free_pages`；读不到时省略并带 `db_error`。历史 `points`/`peaks` 相应增加 `data_bytes`（数据目录总量）和 `db_bytes`（数据库逻辑大小，读不到时退回文件字节和），自身统计不可用时为 null。
 
 `GET /api/gpus` 的每张卡新增可选的 `fan_percent`、`clock_graphics_mhz`、`clock_memory_mhz`、`power_limit_w` 和 `pstate`，老驱动不支持时省略；`power_w` 和 `power.draw` 不变。扩展字段查询失败时服务端自动降级到原查询，只影响这些可选字段；降级是临时的（十分钟后再试，两次都失败则一分钟后重试），驱动升级或临时故障恢复后这些字段会自己回来，不必重启服务。扩展查询很快失败时，同一轮立即补查基本查询，两者共用一个 8 秒期限；失败前已经用掉一半期限的，这一轮不再补查，扩展字段同样暂停十分钟，之后几轮只用基本查询，调度用到的卡数据不会因为扩展字段一直拿不到。
 
@@ -338,7 +349,7 @@ POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 # ~/.danlu/config.toml
 [server]
 port      = 28457
-entrance  = "k3x9p2qa7m4z"
+entrance  = "k3x9p2qa7m4z"     # 初始值；面板或 danlu entrance --reset 改过后以数据库为准
 public_ip = "203.0.113.10"
 
 [tls]
@@ -347,11 +358,11 @@ mode = "local-ca"            # local-ca | file | off
 
 [auth]
 username      = "admin"      # 密码哈希不在这里，存在数据库的 settings 表里（danlu passwd 修改）
-session_ttl   = "168h"
+session_ttl   = "168h"       # 这三项和入口一样只是初始值，面板「安全设置」改过后以数据库为准
 max_failures  = 5
 lockout       = "15m"
 
-[runtime]
+[runtime]                     # 除 conda_base、output_root 外都只是初始值，面板「调度与告警」改过后以数据库为准
 conda_base         = "/home/me/miniconda3"
 output_root        = "~/danlu-outputs"
 kill_grace         = "30s"
@@ -363,7 +374,7 @@ unknown_gpu_memory_mb = 1024  # 可见进程无法解释的显存超过此值时
 snapshot_max_file_mb  = 1
 snapshot_max_total_mb = 50
 
-[retention]
+[retention]                   # 初始值，面板「数据保留」改过后以数据库为准
 keep_days          = 90      # 0 关闭按时间清理
 max_total_gb       = 50      # GiB，0 关闭按大小清理；两项均为 0 时关闭自动清理
 
@@ -373,10 +384,11 @@ queue_drained     = true    # 队列排空时发送多任务汇总
 # token           = ""      # 自建服务需要鉴权时填写，不通过 API 暴露
 
 [terminal]
-enabled = true               # 网页终端；关闭后终端 API 返回 404，面板隐藏入口
+enabled = true               # 网页终端；关闭后终端 API 返回 404，面板隐藏入口。只能在这里改
+session_lifetime = "15m"     # 页面断开后 shell 保留多久；初始值，面板上改过后以数据库为准
 ```
 
-网页终端使用 Linux PTY，同一时间最多 3 个会话。WebSocket 只接受同源连接，且需要已登录的面板会话；断线后 shell 保留 15 分钟，每个会话缓存最近 256 KiB 输出，重连时只补发没收到的部分；同一会话只保留最新的连接，服务器每 20 秒 ping 一次，尽快发现手机锁屏或换网络后断掉的连接。任务详情的"打开终端"会使用任务工作目录和 conda 环境。审计日志记录会话打开/关闭和工作目录，不记录输入输出内容。danlu 重启会关闭终端进程，不影响训练任务。
+网页终端使用 Linux PTY，同一时间最多 3 个会话。WebSocket 只接受同源连接，且需要已登录的面板会话；断线后 shell 默认保留 15 分钟（`session_lifetime`），每个会话缓存最近 256 KiB 输出，重连时只补发没收到的部分；同一会话只保留最新的连接，服务器每 20 秒 ping 一次，尽快发现手机锁屏或换网络后断掉的连接。任务详情的"打开终端"会使用任务工作目录和 conda 环境。审计日志记录会话打开/关闭和工作目录，不记录输入输出内容。danlu 重启会关闭终端进程，不影响训练任务。
 
 `danlu init` 和 `danlu info` 默认在终端打印带安全入口的访问二维码，`--no-qr` 可关闭。设置页的"在手机上打开"通过 `GET /api/settings/qr.svg` 显示同一地址；接口要求登录并返回 `Cache-Control: private, no-store`。本地 CA 区域根据浏览器平台预选 Android、iOS、macOS、Windows 或其他平台的安装步骤，也可手动切换，并显示 SHA-256 指纹供导入前核对。
 
@@ -393,7 +405,9 @@ enabled = true               # 网页终端；关闭后终端 API 返回 404，�
 ~/danlu-outputs/<项目>/<id>-<任务名>/danlu.json # 默认输出目录；记录任务、代码、GPU 和最终状态
 ```
 
-服务进程从不写 `config.toml`，只有命令行（`init`、`port`、`entrance`、`cert`）写它，改完重启生效。运行中会变的状态放在数据库的 `settings` 表里。旧版本放在 `[auth] password_hash` 的哈希，新版本第一次启动时导入一次，`danlu passwd` 会把它从配置里删掉。
+服务进程从不写 `config.toml`，只有命令行（`init`、`port`、`cert`）写它，改完重启生效。运行中会变的状态放在数据库的 `settings` 表里。旧版本放在 `[auth] password_hash` 的哈希，新版本第一次启动时导入一次，`danlu passwd` 会把它从配置里删掉。安全入口、登录有效期和失败锁定也在 `settings` 表里（`auth.entrance`、`auth.session_ttl`、`auth.max_failures`、`auth.lockout`）：面板上改，或用 `danlu entrance --reset` 换入口，都立即生效；库里没有的项才用 `config.toml` 的值，`danlu init --force` 会清掉库里的这几项。`danlu info`、`danlu entrance` 和 `danlu trace` 打印的是实际生效的地址。
+
+调度与告警（`[runtime]` 里除 `conda_base`、`output_root` 外的各项和 `[terminal] session_lifetime`）以及保留策略（`[retention]`）同样可以在面板「设置」里改，存在 `settings` 表的同名键里（`runtime.fail_fast` 等，时长以秒、大小以 GB 或 MB、天数以天为单位）。保存后立即生效，不用重启；改过的项再改 `config.toml` 不起作用，`danlu info` 会列出这些项，`serve` 启动时也会在日志里写出来，在面板上点「恢复」回到配置文件的值。`danlu doctor` 和 `danlu prune` 按实际生效的值工作，`danlu init --force` 清掉这些项。面板偏好（新建任务的默认值、任务列表每页条数、日志默认换行、资源页告警阈值）存在 `ui.*` 键里，手机和电脑共用；主题和字号只存在浏览器里。ntfy 地址和令牌、终端开关、两步验证、端口、证书、conda 和输出目录仍只能用命令行改。
 
 ```
 jobs(id, name, workdir, conda_env, cmd, env_json, inherit_bashrc,

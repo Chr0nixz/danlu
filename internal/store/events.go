@@ -218,6 +218,29 @@ func (s *Store) SetSettings(values map[string]string) error {
 	return tx.Commit()
 }
 
+// UpdateSettings 在一个事务里写入 set、删掉 del：面板上一次保存的几项要么都生效，要么都不生效。
+func (s *Store) UpdateSettings(set map[string]string, del []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range set {
+		if key == "" {
+			return errors.New("运行状态键不能为空")
+		}
+		if err := setSetting(tx, key, value); err != nil {
+			return err
+		}
+	}
+	for _, key := range del {
+		if _, err := tx.Exec("DELETE FROM settings WHERE key=?", key); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // EventsAfter 按游标顺序读取，供通知等消费者记住最后处理的事件 id。
 func (s *Store) EventsAfter(after int64, limit int) ([]Event, error) {
 	if limit <= 0 || limit > 1000 {

@@ -9,7 +9,7 @@ import (
 )
 
 func TestProcResourceSourceQuery(t *testing.T) {
-	src := NewResourceSource("", 0, func() GPUStats {
+	src := NewResourceSource("", nil, func() GPUStats {
 		return GPUStats{PowerW: 120, PowerKnown: true, MaxTempC: 60, TempKnown: true}
 	})
 	first, err := src.Query(context.Background())

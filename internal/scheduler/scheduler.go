@@ -91,6 +91,18 @@ type Options struct {
 	DiskMinBytes    uint64
 	// ManifestTimeout 是写 danlu.json 最多等多久：启动前写不完按失败处理，停止时写不完不再等。为 0 时用 10 秒
 	ManifestTimeout time.Duration
+	// Live 返回面板上能改的几项的当前值（见 LiveOptions），为 nil 时一直用上面的值。
+	// 调度器每一轮在加锁前调用它，所以它可以读库，但不能反过来调用调度器。
+	Live func() LiveOptions
+}
+
+// LiveOptions 是面板「调度与告警」里能改、保存后下一轮就生效的几项，会盖住 Options 里的同名项。
+type LiveOptions struct {
+	KillGrace    time.Duration
+	FailFast     time.Duration
+	SilenceAlert time.Duration
+	DiskMinBytes uint64
+	Snapshot     snapshot.Options
 }
 
 type Manager struct {
@@ -130,8 +142,10 @@ type Manager struct {
 	launches  sync.WaitGroup
 	captures  sync.WaitGroup
 	manifests sync.WaitGroup
-	// snap 做快照，单测里换掉，免得真的去打包目录
-	snap func(ctx context.Context, j *store.Job) (*snapshot.Meta, error)
+	// snap 做快照，单测里换掉，免得真的去打包目录。大小上限在占位时（锁内）读出来传进来
+	snap func(ctx context.Context, j *store.Job, limits snapshot.Options) (*snapshot.Meta, error)
+	// live 即 Options.Live，构造后不变，可以在锁外读
+	live func() LiveOptions
 }
 
 type launchState struct{ cancelled bool }
@@ -144,11 +158,29 @@ func New(st JobStore, gpus GPUSource, ex Executor, opt Options) *Manager {
 		cancelAt: map[int64]time.Time{}, noTracker: map[int64]bool{}, starting: map[int64]*launchState{}, pending: map[int64]*store.Job{},
 		pendingEvents: map[int64][]*store.Event{},
 		runStats:      map[int64]*runStat{},
-		ctx:           context.Background()}
-	m.snap = func(ctx context.Context, j *store.Job) (*snapshot.Meta, error) {
-		return snapshot.Take(ctx, j.Workdir, opt.SnapshotDir, j.ID, opt.Snapshot)
+		ctx:           context.Background(), live: opt.Live}
+	m.snap = func(ctx context.Context, j *store.Job, limits snapshot.Options) (*snapshot.Meta, error) {
+		return snapshot.Take(ctx, j.Workdir, opt.SnapshotDir, j.ID, limits)
 	}
 	return m
+}
+
+// liveOptions 在加锁前取面板上的最新值；没有 Live 时返回 nil。
+func (m *Manager) liveOptions() *LiveOptions {
+	if m.live == nil {
+		return nil
+	}
+	l := m.live()
+	return &l
+}
+
+// applyLiveLocked 把面板上的最新值写进 m.opt。持有 m.mu 时调用。
+func (m *Manager) applyLiveLocked(l *LiveOptions) {
+	if l == nil {
+		return
+	}
+	m.opt.KillGrace, m.opt.FailFast, m.opt.SilenceAlert = l.KillGrace, l.FailFast, l.SilenceAlert
+	m.opt.DiskMinBytes, m.opt.Snapshot = l.DiskMinBytes, l.Snapshot
 }
 
 // ValidationError 表示请求本身有问题（API 返回 400）。
@@ -370,8 +402,10 @@ func (m *Manager) SetNotifyDone(id int64, on bool) (*store.Job, error) {
 
 // Recover 在启动时调用：仍在运行的任务继续监控，已经结束的补做收尾，启动途中被打断的按 reconcile 处理。
 func (m *Manager) Recover() {
+	live := m.liveOptions()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.applyLiveLocked(live)
 	// 上次被杀时已结束的任务也可能还在采集包；没有采集者了，不能永久挡住清理。
 	if jobs, err := m.st.JobsWithPendingRecipe(); err != nil {
 		log.Printf("读取未完成的环境记录失败: %v", err)
@@ -411,9 +445,8 @@ func (m *Manager) Run(ctx context.Context) {
 	m.ctx = ctx
 	m.mu.Unlock()
 	go m.sampleProcesses(ctx)
-	if m.opt.SilenceAlert > 0 {
-		go m.sampleLogs(ctx)
-	}
+	// 日志静默提醒可能在面板上随时打开，采样一直跑（每 10 秒对运行中的任务各 stat 一次日志）
+	go m.sampleLogs(ctx)
 	defer func() {
 		m.launches.Wait()
 		m.captures.Wait()
@@ -434,8 +467,10 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) step(scanTracker, sched bool) {
+	live := m.liveOptions()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.applyLiveLocked(live)
 	for _, j := range m.pending {
 		m.save(j)
 	}
@@ -473,7 +508,7 @@ func (m *Manager) checkRunning(scanTracker bool) {
 		target := runTarget{j.ID, j.PID, j.PIDStart}
 		stat := m.updateRunStat(j, target, gpus, gpuAt, gpuErr, procs, now)
 		if logSamples != nil {
-			stat.observeLog((*logSamples)[target], j.StartedAt, now, m.opt.SilenceAlert)
+			stat.observeLog((*logSamples)[target], j.StartedAt, now, m.silenceFloor())
 		}
 		targets = append(targets, statTarget{runTarget: target, procAfter: stat.silentDetected})
 		view := RuntimeView{Profile: stat.profile.Clone()}
@@ -768,13 +803,13 @@ func (m *Manager) reserve(j *store.Job, gpus []int, ports map[int]bool) bool {
 	ports[port] = true
 	m.starting[j.ID] = &launchState{}
 	m.launches.Add(1)
-	go m.launch(m.ctx, j)
+	go m.launch(m.ctx, j, m.opt.Snapshot)
 	return true
 }
 
 // launch 是后两步。准备（锁外）：做快照、加载环境，都有超时，danlu 停止时立即放弃；
 // 启动（锁内）：看一眼这期间有没有被取消、danlu 是不是在停止，都没有才 fork/exec 并落库。
-func (m *Manager) launch(ctx context.Context, j *store.Job) {
+func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Options) {
 	defer m.launches.Done()
 
 	sctx, cancel := context.WithTimeout(ctx, m.opt.SnapshotTimeout)
@@ -784,7 +819,7 @@ func (m *Manager) launch(ctx context.Context, j *store.Job) {
 	var snapErr error
 	var restoreNote string
 	if j.CodeFrom == nil {
-		meta, snapErr = m.snap(sctx, j)
+		meta, snapErr = m.snap(sctx, j, limits)
 	} else {
 		source := *j.CodeFrom
 		if hadSnapshot {

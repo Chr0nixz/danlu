@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -130,5 +132,75 @@ func TestResourceHandlers(t *testing.T) {
 	s.resourceHistory(rec, httptest.NewRequest(http.MethodGet, "/api/resources/history?range=3h", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("非法范围应返回 400，实际 %d", rec.Code)
+	}
+}
+
+// 自身占用：统计成功时输出 self 和 self_updated_at；没有监控器时省略；失败时带 self_error。
+func TestResourceSelfUsage(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(home, "danlu.db")
+	if err := os.WriteFile(db, make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "logs", "1.log"), make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	self := system.NewSelfMonitor(home, db, func() (system.DBStats, error) {
+		return system.DBStats{PageCount: 10, PageSize: 4096, FreePages: 2}, nil
+	})
+	self.Refresh(context.Background())
+	mon := system.NewResourceMonitor(&fakeResourceSource{})
+	mon.Refresh(context.Background())
+
+	get := func(s *Server) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.resources(rec, httptest.NewRequest(http.MethodGet, "/api/resources", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("resources status = %d, body %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	body := get(&Server{Resources: mon, Self: self})
+	u, ok := body["self"].(map[string]any)
+	if !ok {
+		t.Fatalf("响应缺少 self: %v", body)
+	}
+	if u["total_bytes"].(float64) != 1100 || body["self_updated_at"].(float64) <= 0 {
+		t.Fatalf("self 内容不正确: %v", u)
+	}
+	dbStats := u["db"].(map[string]any)
+	if dbStats["logical_bytes"].(float64) != 40960 || dbStats["free_bytes"].(float64) != 8192 {
+		t.Fatalf("数据库大小不正确: %v", dbStats)
+	}
+	if _, ok := body["self_error"]; ok {
+		t.Fatalf("成功时不应有 self_error: %v", body)
+	}
+
+	// 没有自身占用监控器（旧 wiring/测试）时字段省略
+	body = get(&Server{Resources: mon})
+	if _, ok := body["self"]; ok {
+		t.Fatalf("没有监控器时应省略 self: %v", body)
+	}
+
+	// 统计失败：保留上一份好快照并带错误
+	if err := os.RemoveAll(home); err != nil {
+		t.Fatal(err)
+	}
+	self.Refresh(context.Background())
+	body = get(&Server{Resources: mon, Self: self})
+	if body["self_error"] == nil || body["self_error"] == "" {
+		t.Fatalf("失败时应带 self_error: %v", body)
+	}
+	if u := body["self"].(map[string]any); u["total_bytes"].(float64) != 1100 {
+		t.Fatalf("失败后应保留上一份好统计: %v", u)
 	}
 }

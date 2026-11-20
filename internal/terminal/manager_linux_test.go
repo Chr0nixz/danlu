@@ -105,7 +105,14 @@ func TestDetachedSessionsExpire(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Detach()
-	clock.Add(int64(SessionLifetime))
+	// 面板上把保留时长改成 1 分钟：没到 1 分钟不关，到了就关，不用等默认的 15 分钟
+	m.SetLifetime(func() time.Duration { return time.Minute })
+	clock.Add(int64(30 * time.Second))
+	m.reapExpired()
+	if got := m.List(); len(got) != 1 {
+		t.Fatalf("session closed before the configured lifetime: %+v", got)
+	}
+	clock.Add(int64(30 * time.Second))
 	m.reapExpired()
 	if got := m.List(); len(got) != 0 {
 		t.Fatalf("expired session remains: %+v", got)
