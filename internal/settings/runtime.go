@@ -34,6 +34,10 @@ type Values struct {
 
 	KeepDays   int64 // 任务文件保留天数，0 不按天数清理
 	MaxTotalGB int64 // 任务文件总量上限，0 不按总量清理
+
+	// Strict 是严格限卡开关（StrictKey）。不在 specs 里：它不是数字，打开前要确认 root 助手可用，
+	// 由 SetStrict 单独写；config.toml 里没有对应项，默认关闭
+	Strict bool
 }
 
 type unit string
@@ -162,11 +166,12 @@ func (v Values) ApplyTo(c *config.Config) {
 // Load 读库里的运行设置，没有的项用 def 补上；custom 标出库里有、正在生效的项。
 // 库里的值坏了（只可能是手工改库）时也用 def。
 func Load(st *store.Store, def Values) (Values, map[string]bool, error) {
-	raw, err := st.GetSettings(keys()...)
+	raw, err := st.GetSettings(append(keys(), StrictKey)...)
 	if err != nil {
 		return def, map[string]bool{}, err
 	}
 	v, custom := def, map[string]bool{}
+	v.Strict = raw[StrictKey] == "1"
 	for _, s := range specs {
 		text, ok := raw[s.key]
 		if !ok {
@@ -183,12 +188,15 @@ func Load(st *store.Store, def Values) (Values, map[string]bool, error) {
 }
 
 // Reset 删掉库里的运行设置，回到 config.toml 的值。danlu init --force 重新生成配置时用；面板偏好不动。
-func Reset(st *store.Store) error { return st.DeleteSettings(keys()...) }
+func Reset(st *store.Store) error { return st.DeleteSettings(append(keys(), StrictKey)...) }
 
 // Overridden 列出库里改过的项，如 "fail_fast=关闭"，给启动日志和 danlu info 用：
 // 这些项再改 config.toml 不起作用，要说清楚。
 func Overridden(v Values, custom map[string]bool) []string {
 	var out []string
+	if v.Strict {
+		out = append(out, "strict_gpu=开启")
+	}
 	for _, s := range specs {
 		if custom[s.name] {
 			out = append(out, s.name+"="+describe(s, s.get(&v)))
@@ -353,7 +361,7 @@ func (r *Runtime) apply(g Group, p Patch, cur Values, custom map[string]bool) (c
 	for _, name := range names {
 		s, ok := lookup(name)
 		if !ok || s.group != g {
-			return c, Invalid("未知设置项 " + name)
+			return c, InvalidC("runtime_unknown", "未知设置项 "+name, map[string]any{"key": name})
 		}
 		old := s.get(&cur)
 		val := p[name]
@@ -386,12 +394,12 @@ func (r *Runtime) apply(g Group, p Patch, cur Values, custom map[string]bool) (c
 	// 两项相关的只在其中一项改了时检查，config.toml 里本来就不满足的不拦着改别的项
 	if changed["disk_min_gb"] || changed["disk_warn_gb"] {
 		if c.next.DiskMinGB > 0 && c.next.DiskWarnGB > 0 && c.next.DiskMinGB >= c.next.DiskWarnGB {
-			return c, Invalid("磁盘保护暂停线需要低于低余量提示线")
+			return c, InvalidC("runtime_disk_lines", "磁盘保护暂停线需要低于低余量提示线", nil)
 		}
 	}
 	if changed["snapshot_max_file_mb"] || changed["snapshot_max_total_mb"] {
 		if c.next.SnapshotMaxFileMB > c.next.SnapshotMaxTotalMB {
-			return c, Invalid("快照单文件上限不能超过总大小上限")
+			return c, InvalidC("runtime_snapshot_lines", "快照单文件上限不能超过总大小上限", nil)
 		}
 	}
 	return c, nil
@@ -425,8 +433,12 @@ func validate(s spec, n int64) error {
 		rng = fmt.Sprintf("%d 到 %d %s", s.min, s.max, s.unit)
 	}
 	msg := fmt.Sprintf("%s需要在 %s 之间", s.label, rng)
+	// 每项一个码，整句文案在 core 目录 error.range_<name>[_zero]（zh 与这里的原文逐字一致）；
+	// 改 specs 的范围或标签时同步改目录。机器键名和单位不适合直接展示，所以不走通用插值。
+	code := "range_" + s.name
 	if s.zeroOff {
 		msg += "，或设为 0 关闭"
+		code += "_zero"
 	}
-	return Invalid(msg)
+	return InvalidC(code, msg, nil)
 }

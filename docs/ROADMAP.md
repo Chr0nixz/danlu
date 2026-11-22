@@ -65,6 +65,9 @@ F1 随 `v0.2.0` 定版。后续功能按 [PLAN.md](PLAN.md) 分批推进。
 
 - **丹炉自身占用（代码已实现，真机待验）**：资源页每 30 秒统计数据目录磁盘占用（数据库/日志/代码快照/运行目录/环境记录/升级备份/其他七类，硬链接只计一次、不跟随符号链接）、数据库逻辑大小、空闲页和 WAL，并写入最近 1 小时趋势曲线。独立采样加超时保护，存储卡住只影响这个面板，不拖累主机采样和调度。API 见 [DEMO.md](DEMO.md) 第 6 节。
 
+- **GPU 预约（代码已实现，真机待验）**：给丹炉外的任务提前占卡。按张数或指定卡号，此刻空闲的卡马上收下，之后丹炉任务释放的卡先给预约、再给排队任务，凑齐后开始计时；可定时自动释放、延长、手动释放，就绪和到期前 10 分钟推送到手机。设计和边界见 [FEATURES.md](FEATURES.md) 第 5.2 节。
+- **严格限卡（代码已实现，真机待验）**：可选。服务器上 sudo 装一次 root 助手、面板上打开后，每个任务在只放行分到的卡的 systemd 临时服务里运行，程序改写 `CUDA_VISIBLE_DEVICES` 或用 EGL 渲染也碰不到别的卡；程序里看到的卡从 0 编号。设计和边界见 [FEATURES.md](FEATURES.md) 第 5.4 节。
+
 - **队列**：优先级或"允许插队"开关、hold/release、拖动排序、修改排队中的任务、依赖（`--after`）；自动重试，只用于 NCCL 超时这类偶发错误（DESIGN.md 第 5.3 节）。
 - **参数扫描**：一个命令模板加几组取值，生成一批任务，在列表里归成一组。
 - **预计开始时间**：根据运行中任务的剩余时间，估计排队的任务什么时候能开始。
@@ -157,6 +160,8 @@ F1 随 `v0.2.0` 定版。后续功能按 [PLAN.md](PLAN.md) 分批推进。
 
 ---
 变更记录
+- v2.22（2026-11-22）：理想线新增严格限卡（FEATURES 5.4，PLAN F4）：hsy 上用 `scripts/s0/strict-probe.sh` 确认 cgroup 设备控制后 CUDA/NVML/EGL 只看得到放行的卡并从 0 编号；新增 root 助手（`danlu strict install`、sudoers 只放行 start/check）、`danlu job-exec`、迁移 18 `jobs.unit`、`POST /api/settings/strict`（additive，API 版本不变）、告警 `strict_unavailable`。GPU 进程记下启动时的 `CUDA_VISIBLE_DEVICES`（UUID 换成卡号），任务进程跑到没分给它的卡上时告警并推送一次。Go 单测、Linux vet、三端类型检查通过；e2e 新增一节（CI 免密 sudo 下跑）。同日 hsy 测试实例上真机验收通过隔离、编号、取消、重启接管和关开关（CHECKLIST G2/G3 记录），预约配合、LIBERO 和卸载待补。
+- v2.21（2026-11-21）：理想线新增 GPU 预约（FEATURES 5.2，PLAN F4）：迁移 16 加表 `gpu_reservations`，新增 `/api/reservations` 系列接口，`/api/gpus` 每张卡加 `reservation`（additive，API 版本不变）；预约先于排队任务收卡，已收的卡不分配、其上的外部进程不触发队首阻塞告警；就绪和到期前 10 分钟推送。Go 单测、Linux vet、三端类型检查、面板构建和桌面 clippy 通过，面板在 macOS 假 GPU 环境下目视检查过手机和电脑两种宽度；e2e 新增检查待 Linux/CI 执行，真机待验。
 - v2.20（2026-11-20）：设置页按分组拆成子页面（概览、调度与告警、数据保留、面板偏好、安全与登录、手机与证书、操作记录）。调度与告警、终端保留时长和保留策略可在面板上改，存数据库、保存即生效，`config.toml` 只当初始值；收紧保留策略前先预览并确认，保存后马上清理一次。新增手机和电脑共用的面板偏好（新建任务默认值、每页条数、日志默认换行、资源页告警阈值）和只存浏览器的日志字号。新增 `/api/settings/runtime`、`retention`、`retention/preview`、`prefs`，`GET /api/settings` 增加 runtime、retention、prune、prefs（additive，API 版本不变）。Go 单测、Linux vet、三端类型检查和面板构建通过；e2e 新增检查待 Linux/CI 执行，面板目视待补验。
 - v2.19（2026-11-20）：理想线新增丹炉自身占用监控：数据目录七类磁盘占用、数据库逻辑大小/空闲页/WAL，每 30 秒独立统计并进 1 小时趋势曲线；`/api/resources` 增加 self 字段（additive，API 版本不变）。Go 单测与三端类型检查通过，e2e 新增 4 项检查待 Linux/CI 执行，面板目视随 WSL/真机补验。
 - v2.18（2026-11-05）：第 8 节第 5 条首页速度实测达标：Fast 4G 节流下冷启动 0.80 秒，4 倍 CPU 降速 1.08 秒，结果记入 `web/DESIGN.md`。

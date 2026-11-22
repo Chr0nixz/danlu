@@ -51,6 +51,8 @@ export interface Job {
   fail_reason: string
   /** 失败原因分类；旧版服务器没有这个字段 */
   fail_kind?: string
+  /** 失败细分码（host_oom 三态、信号名）；start 类是不带前缀的原始启动错误。旧版服务器没有这个字段 */
+  fail_detail?: string
   /** 运行备注（如残留进程清理）；旧版服务器没有这个字段 */
   notes?: string
   memo?: string
@@ -61,6 +63,8 @@ export interface Job {
   ext_seen?: boolean
   recipe?: Recipe
   output_dir?: string
+  /** 严格限卡任务所在的 systemd 服务名，空串表示普通任务；旧版服务器没有这个字段 */
+  unit?: string
   starred?: boolean
   pruned_at?: number | null
   cancel_requested: boolean
@@ -124,6 +128,11 @@ export interface QueueState {
   reason?: string
   since?: number
   job_id?: number
+  /** 快速失败任务从启动到失败的秒数，供本地化合成；旧版服务器没有这个字段 */
+  fail_seconds?: number
+  /** 磁盘暂停时的余量与暂停线（GiB，一位小数）；旧版服务器没有这些字段 */
+  disk_available_gb?: number
+  disk_min_gb?: number
 }
 
 export interface Proc {
@@ -134,6 +143,8 @@ export interface Proc {
   job_id: number
   /** 图形进程（EGL/OpenGL 渲染），nvidia-smi 的 compute-apps 列不出来，由服务端另外补查 */
   graphics?: boolean
+  /** 任务进程启动时的 CUDA_VISIBLE_DEVICES（空串表示没设），GPU UUID 已换成卡号；只有本实例任务的进程有，旧版服务器没有这个字段 */
+  cuda_visible?: string
 }
 
 export interface GPU {
@@ -158,6 +169,44 @@ export interface GPU {
   job: { id: number; name: string } | null
   /** 不属于这张卡上任务的进程：外部进程，或者 job_id 不为 0 时是别的任务跑到了这张卡上（也可能是已结束任务的残留） */
   external: Proc[]
+  /** 收下这张卡的 GPU 预约，丹炉不会把它分给任务。卡上用户自己的进程仍列在 external 里。旧版服务器没有这个字段 */
+  reservation?: GPUReservationRef | null
+}
+
+export type ReservationStatus = 'waiting' | 'active' | 'ended'
+
+export interface GPUReservationRef {
+  id: number
+  note: string
+  status: ReservationStatus
+  ends_at: number | null
+}
+
+/** GPU 预约：给丹炉以外的任务占卡。waiting 还在收卡（可能已收了一部分），active 卡已全部到位 */
+export interface Reservation {
+  id: number
+  note: string
+  /** 一共要几张卡 */
+  gpus: number
+  pinned_gpus: number[]
+  /** 已经收下的卡 */
+  held_gpus: number[]
+  /** 卡全部到位后保留多少秒；null 表示手动释放前一直保留 */
+  duration: number | null
+  status: ReservationStatus
+  created_at: number
+  ready_at: number | null
+  ends_at: number | null
+  ended_at: number | null
+  end_reason: string
+}
+
+export interface ReservationReq {
+  gpus: number
+  pinned_gpus: number[]
+  /** 秒，600–604800；null 表示手动释放前一直保留 */
+  duration: number | null
+  note: string
 }
 
 export interface HostSample {
@@ -410,6 +459,27 @@ export interface Settings {
   prune?: PruneStatus
   /** 手机和电脑共用的面板偏好。旧版服务器没有这个字段 */
   prefs?: Partial<Prefs>
+  /** 严格限卡（cgroup 设备控制）。旧版服务器没有这个字段 */
+  strict?: StrictStatus
+}
+
+/** 严格限卡助手不可用的原因代码 */
+export type StrictReason = 'checking' | 'not_installed' | 'no_sudo' | 'protocol' | 'failed' | 'unsupported'
+
+/**
+ * 严格限卡：开启后每个任务在只放行分到的卡的 systemd 服务里运行，需要服务器上 sudo 安装一次 root 助手。
+ * installed 只看助手文件在不在；ok/reason 是上次经 sudo 检查的结果，从没查过时 reason 是 checking
+ */
+export interface StrictStatus {
+  enabled: boolean
+  installed: boolean
+  ok: boolean
+  reason?: StrictReason
+  detail?: string
+  helper_version?: string
+  checked_at?: number
+  /** 在服务器上运行的安装命令，带 danlu 的完整路径 */
+  install_cmd: string
 }
 
 /**
@@ -457,6 +527,8 @@ export interface RetentionPreviewItem {
   name: string
   bytes: number
   reason: string
+  /** resume/age/size，供本地化；旧版服务器没有这个字段，回退 reason 原文 */
+  reason_code?: string
 }
 
 /** 按新的保留策略会清理什么；不删任何东西 */
@@ -484,6 +556,8 @@ export interface Prefs {
   warn_mem_percent: number
   warn_swap_percent: number
   warn_gpu_temp_c: number
+  /** 服务端 ntfy 推送的语言；面板显示语言是各设备本地的，与它解耦 */
+  notify_lang: 'zh-CN' | 'en'
 }
 
 /** 要改的面板偏好，只传改了的项；null 恢复默认 */

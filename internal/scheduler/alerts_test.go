@@ -246,7 +246,9 @@ func TestStrayJobProcessesMergedIntoOneAlert(t *testing.T) {
 	h.tick()
 	updateAlerts(t, h.m, time.Now())
 	events := alertEvents(t, h.st.Store)
-	if len(events) != 1 || events[0].Key != fmt.Sprintf("external:%d:job%d", a, b) || *events[0].JobID != a {
+	// 另一条是 b 自己的越界告警（stray:b），见 TestStrayAlert
+	if len(events) != 2 || events[0].Key != fmt.Sprintf("external:%d:job%d", a, b) || *events[0].JobID != a ||
+		events[1].Key != fmt.Sprintf("stray:%d", b) {
 		t.Fatalf("应只有一条按任务合并的告警: %+v", events)
 	}
 	var data store.AlertData
@@ -259,7 +261,84 @@ func TestStrayJobProcessesMergedIntoOneAlert(t *testing.T) {
 	})
 	h.tick()
 	updateAlerts(t, h.m, time.Now())
-	if n := len(alertEvents(t, h.st.Store)); n != 1 {
+	if n := len(alertEvents(t, h.st.Store)); n != 2 {
 		t.Fatalf("同一对任务重复告警: %d 条", n)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// 任务自己的进程跑到没分给它的卡上（这里是预约收下的卡）：一个任务一条告警，带上能分清原因的事实；
+// 运行期间进程时有时无不重复告警，任务结束才清
+func TestStrayAlert(t *testing.T) {
+	h := newHarness(t, 4)
+	r := h.reserve(ReservationReq{PinnedGPUs: []int{0}})
+	a := h.add(1)
+	h.tick()
+	h.expect(a, store.StatusRunning, 1)
+	stray := func() {
+		h.gpus.set(func(f *fakeGPUs) {
+			f.gpus[0].Procs = []gpu.Proc{{PID: 301, JobID: a, CUDAVisible: strPtr("0,1"), UsedMemMB: 8000}}
+			f.gpus[1].Procs = []gpu.Proc{{PID: 300, JobID: a, CUDAVisible: strPtr("1")}}
+			f.gpus[2].Procs = []gpu.Proc{{PID: 302, JobID: a, Graphics: true, CUDAVisible: strPtr("1")}}
+		})
+	}
+	stray()
+	updateAlerts(t, h.m, time.Now())
+	events := alertEvents(t, h.st.Store)
+	if len(events) != 1 || events[0].Key != fmt.Sprintf("stray:%d", a) || *events[0].JobID != a {
+		t.Fatalf("应有一条越界告警: %+v", events)
+	}
+	var data store.AlertData
+	if err := json.Unmarshal(events[0].Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Type != "stray" || !slices.Equal(data.GPUs, []int{0, 2}) || !slices.Equal(data.Assigned, []int{1}) ||
+		!slices.Equal(data.Reserved, []int{0}) || data.PID != 301 || data.Graphics ||
+		data.CUDAVisible == nil || *data.CUDAVisible != "0,1" {
+		t.Fatalf("告警数据错误: %+v（预约 #%d）", data, r.ID)
+	}
+	if h.m.Reservations()[0].Status != store.ReservationActive {
+		t.Fatal("任务越界不改变预约")
+	}
+
+	h.gpus.set(func(f *fakeGPUs) { f.gpus[0].Procs, f.gpus[2].Procs = nil, nil })
+	updateAlerts(t, h.m, time.Now())
+	stray()
+	h.gpus.set(func(f *fakeGPUs) { f.err = errors.New("驱动出错") })
+	updateAlerts(t, h.m, time.Now())
+	h.gpus.set(func(f *fakeGPUs) { f.err = nil })
+	updateAlerts(t, h.m, time.Now())
+	if n := len(alertEvents(t, h.st.Store)); n != 1 {
+		t.Fatalf("运行期间越界进程时有时无不应重复告警: %d 条", n)
+	}
+
+	h.ex.finish(a, 0)
+	h.gpus.set(func(f *fakeGPUs) { f.gpus[0].Procs, f.gpus[1].Procs, f.gpus[2].Procs = nil, nil, nil })
+	h.tick()
+	updateAlerts(t, h.m, time.Now())
+	events = alertEvents(t, h.st.Store)
+	if len(events) != 2 || events[1].Kind != store.EventAlertCleared || events[1].Key != fmt.Sprintf("stray:%d", a) {
+		t.Fatalf("任务结束后越界告警应清除: %+v", events)
+	}
+}
+
+func TestStrayAlertCause(t *testing.T) {
+	gpus := []gpu.GPU{{Index: 0}, {Index: 1}, {Index: 2}}
+	j := &store.Job{ID: 7, GPUsAssigned: []int{1, 2}}
+	if strayAlert(j, gpus, nil) != nil {
+		t.Fatal("没有越界进程时不告警")
+	}
+	gpus[0].Procs = []gpu.Proc{{PID: 9, JobID: 7, Graphics: true, CUDAVisible: strPtr("1,2")}}
+	if a := strayAlert(j, gpus, nil); a == nil || !a.Graphics || a.CUDAVisible != nil {
+		t.Fatalf("只有图形进程、选卡变量没改：应记成图形渲染: %+v", a)
+	}
+	gpus[0].Procs = []gpu.Proc{{PID: 9, JobID: 7, CUDAVisible: strPtr("1,2")}}
+	if a := strayAlert(j, gpus, nil); a == nil || a.Graphics || a.CUDAVisible != nil {
+		t.Fatalf("计算进程的选卡变量没改（运行中改的看不到）：不写原因: %+v", a)
+	}
+	gpus[0].Procs = []gpu.Proc{{PID: 9, JobID: 7, CUDAVisible: strPtr("")}}
+	if a := strayAlert(j, gpus, nil); a == nil || a.CUDAVisible == nil || *a.CUDAVisible != "" {
+		t.Fatalf("选卡变量被去掉应记空串: %+v", a)
 	}
 }

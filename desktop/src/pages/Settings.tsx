@@ -1,8 +1,9 @@
 import { fmtTime, type DeviceToken } from '@danlu/core'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState, type ReactNode } from 'react'
-import { Button, closeDialog, cx, Dialog, ErrorText, Kbd, useToast } from '../components/ui'
+import { Button, closeDialog, cx, Dialog, ErrorText, Field, inputClass, Kbd, useToast } from '../components/ui'
 import { apiFor, appVersion, getPrefs, setPrefs, type Prefs, type ServerView } from '../lib/backend'
+import { t } from '../lib/i18n'
 import { isMac, shortcutLabel } from '../lib/platform'
 
 function Section({ title, desc, children }: { title: string; desc?: ReactNode; children: ReactNode }) {
@@ -52,21 +53,28 @@ export function Settings({ servers }: { servers: ServerView[] }) {
   return (
     <div className="h-full min-w-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-[720px] space-y-2.5 px-1 pb-3">
-        <h1 className="px-1 pt-1 text-[13px] font-semibold">设置</h1>
+        <h1 className="px-1 pt-1 text-[13px] font-semibold">{t('settings.title')}</h1>
         {p && (
-          <Section title="常规">
-            <Toggle label="系统通知" desc="任务失败、服务器连不上、外部进程影响到你的任务时通知" checked={p.notify} onChange={(notify) => update({ notify })} />
-            <Toggle label="开机自启" desc="登录系统后自动在托盘里运行" checked={p.autostart} onChange={(autostart) => update({ autostart })} />
+          <Section title={t('settings.general')}>
+            <Toggle label={t('settings.notify')} desc={t('settings.notify_desc')} checked={p.notify} onChange={(notify) => update({ notify })} />
+            <Toggle label={t('settings.autostart')} desc={t('settings.autostart_desc')} checked={p.autostart} onChange={(autostart) => update({ autostart })} />
+            <Field label={t('settings.lang')} hint={t('settings.lang_desc')}>
+              <select className={cx(inputClass, 'w-40')} value={p.lang} onChange={(e) => update({ lang: e.target.value })}>
+                <option value="auto">{t('settings.lang_auto')}</option>
+                <option value="zh-CN">{t('settings.lang_zh')}</option>
+                <option value="en">{t('settings.lang_en')}</option>
+              </select>
+            </Field>
             <ShortcutRow value={p.shortcut} onSave={(shortcut) => update({ shortcut })} />
           </Section>
         )}
         <Devices servers={servers} />
-        <Section title="关于">
+        <Section title={t('settings.about')}>
           <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1">
-            <dt className="text-fg-3">版本</dt>
+            <dt className="text-fg-3">{t('settings.version')}</dt>
             <dd className="num">{version.data ?? '-'}</dd>
-            <dt className="text-fg-3">数据</dt>
-            <dd className="text-fg-2">服务器列表和偏好存在本机，设备令牌存在系统凭据库（{isMac ? '钥匙串' : 'Windows 凭据管理器'}）</dd>
+            <dt className="text-fg-3">{t('settings.data')}</dt>
+            <dd className="text-fg-2">{t('settings.data_desc', { store: isMac ? t('settings.keychain') : t('settings.win_cred') })}</dd>
           </dl>
         </Section>
       </div>
@@ -96,11 +104,11 @@ function ShortcutRow({ value, onSave }: { value: string; onSave: (v: string) => 
   return (
     <div className="flex items-center gap-3 py-1.5">
       <span className="flex-1">
-        <span className="block font-medium">呼出迷你总览</span>
-        <span className="block text-fg-3">在任何地方按下，在托盘旁弹出各台的空卡和运行中的任务</span>
+        <span className="block font-medium">{t('settings.shortcut_label')}</span>
+        <span className="block text-fg-3">{t('settings.shortcut_desc')}</span>
       </span>
-      {recording ? <span className="text-fg-2">按下新的组合键，Esc 取消</span> : <Kbd className="h-6 px-2 text-[11.5px]">{shortcutLabel(value)}</Kbd>}
-      <Button onClick={() => setRecording((r) => !r)}>{recording ? '取消' : '修改'}</Button>
+      {recording ? <span className="text-fg-2">{t('settings.shortcut_recording')}</span> : <Kbd className="h-6 px-2 text-[11.5px]">{shortcutLabel(value)}</Kbd>}
+      <Button onClick={() => setRecording((r) => !r)}>{recording ? t('common.cancel') : t('settings.shortcut_change')}</Button>
     </div>
   )
 }
@@ -112,7 +120,7 @@ function Devices({ servers }: { servers: ServerView[] }) {
   })
   const [revoking, setRevoking] = useState<{ server: ServerView; token: DeviceToken } | null>(null)
   return (
-    <Section title="已登录的设备" desc="每台服务器上的设备令牌。吊销后那台设备上的客户端立即断开。">
+    <Section title={t('settings.devices')} desc={t('settings.devices_desc')}>
       <div className="-mx-1 space-y-2.5">
         {servers.map((s, i) => {
           const r = results[i]
@@ -122,18 +130,18 @@ function Devices({ servers }: { servers: ServerView[] }) {
               {r?.error ? (
                 <ErrorText error={r.error} className="px-1" />
               ) : (
-                r?.data?.tokens.map((t) => (
-                  <div key={t.id} className="flex h-8 items-center gap-3 rounded-[6px] px-1 hover:bg-hover">
+                r?.data?.tokens.map((tok) => (
+                  <div key={tok.id} className="flex h-8 items-center gap-3 rounded-[6px] px-1 hover:bg-hover">
                     <span className="min-w-0 flex-1 truncate">
-                      {t.name}
-                      {t.id === s.token_id && <span className="ml-2 text-[11px] text-fg-3">这台电脑</span>}
+                      {tok.name}
+                      {tok.id === s.token_id && <span className="ml-2 text-[11px] text-fg-3">{t('settings.this_computer')}</span>}
                     </span>
                     <span className="num text-[11px] text-fg-3">
-                      {t.last_used_at ? `最后使用 ${fmtTime(t.last_used_at).slice(5, 16)} · ${t.last_ip}` : '从未使用'}
+                      {tok.last_used_at ? t('settings.last_used', { time: fmtTime(tok.last_used_at).slice(5, 16), ip: tok.last_ip }) : t('settings.never_used')}
                     </span>
-                    {t.id !== s.token_id && (
-                      <Button variant="ghost" className="text-fail" onClick={() => setRevoking({ server: s, token: t })}>
-                        吊销
+                    {tok.id !== s.token_id && (
+                      <Button variant="ghost" className="text-fail" onClick={() => setRevoking({ server: s, token: tok })}>
+                        {t('settings.revoke')}
                       </Button>
                     )}
                   </div>
@@ -159,18 +167,18 @@ function RevokeDialog({ server, token, onClose }: { server: ServerView; token: D
   })
   return (
     <Dialog
-      title={`吊销「${token.name}」在 ${server.name} 上的令牌？`}
+      title={t('settings.revoke_title', { token: token.name, server: server.name })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={closeDialog}>保留</Button>
+          <Button onClick={closeDialog}>{t('servers.remove_keep')}</Button>
           <Button variant="danger" loading={revoke.isPending} onClick={() => revoke.mutate()}>
-            吊销
+            {t('settings.revoke')}
           </Button>
         </>
       }
     >
-      <p>那台设备上的客户端会立即断开，要重新连接得重新添加这台服务器。</p>
+      <p>{t('settings.revoke_body')}</p>
       <ErrorText error={revoke.error} />
     </Dialog>
   )

@@ -21,7 +21,7 @@ type resourceResponse struct {
 
 func (s *Server) resources(w http.ResponseWriter, r *http.Request) {
 	if s.Resources == nil {
-		writeErr(w, http.StatusServiceUnavailable, "资源采集尚未启动")
+		writeErrC(w, http.StatusServiceUnavailable, "resources_not_ready", "资源采集尚未启动", nil)
 		return
 	}
 	// updated_at 用快照自己的采样时间，不用 Sampler 的完成时间：采集失败时 Sampler 也会刷新时间，
@@ -114,13 +114,13 @@ type resourceHistoryResponse struct {
 
 func (s *Server) resourceHistory(w http.ResponseWriter, r *http.Request) {
 	if s.Resources == nil {
-		writeErr(w, http.StatusServiceUnavailable, "资源采集尚未启动")
+		writeErrC(w, http.StatusServiceUnavailable, "resources_not_ready", "资源采集尚未启动", nil)
 		return
 	}
 	rangeName := r.URL.Query().Get("range")
 	rng, ok := parseResourceRange(rangeName)
 	if !ok {
-		writeErr(w, http.StatusBadRequest, "range 只能是 1m、5m、15m 或 1h")
+		writeErrC(w, http.StatusBadRequest, "resources_range_invalid", "range 只能是 1m、5m、15m 或 1h", nil)
 		return
 	}
 	if rangeName == "" {

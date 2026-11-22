@@ -25,3 +25,8 @@ export function useQueueState() {
   // staleTime：首页的横幅和"暂停队列"按钮先后挂载，不设的话后挂载的那个会再请求一次
   return useQuery({ queryKey: ['queue'], queryFn: api.queue, refetchInterval: 3000, staleTime: 2000 })
 }
+
+/** 没有结束的 GPU 预约。首页列表和预约按钮共用一份缓存 */
+export function useReservations() {
+  return useQuery({ queryKey: ['reservations'], queryFn: api.reservations, refetchInterval: 3000, staleTime: 2000 })
+}

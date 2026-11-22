@@ -33,7 +33,9 @@ type Entry struct {
 	Name   string `json:"name"`
 	Bytes  int64  `json:"bytes"`
 	Reason string `json:"reason"`
-	Pruned bool   `json:"pruned"`
+	// ReasonCode 供前端本地化（resume/age/size）；Reason 仍是中文原文，旧客户端回退用
+	ReasonCode string `json:"reason_code,omitempty"`
+	Pruned     bool   `json:"pruned"`
 }
 
 type Report struct {
@@ -563,13 +565,13 @@ func (p *Pruner) prune(ctx context.Context, opt Options) (Report, error) {
 		if !j.Finished() || j.EndedAt == nil || j.Starred || j.PrunedAt != nil || pinnedSnapshots[j.ID] || (j.Recipe != nil && j.Recipe.Pending) {
 			continue
 		}
-		reason := ""
+		reason, reasonCode := "", ""
 		if j.Pruning {
-			reason = "继续上次中断的清理"
+			reason, reasonCode = "继续上次中断的清理", "resume"
 		} else if cutoff != nil && *j.EndedAt <= *cutoff {
-			reason = "超过保留时长"
+			reason, reasonCode = "超过保留时长", "age"
 		} else if opt.OlderThan == nil && opt.MaxBytes > 0 && remaining > opt.MaxBytes {
-			reason = "总大小超过上限"
+			reason, reasonCode = "总大小超过上限", "size"
 		}
 		if reason == "" {
 			continue
@@ -601,7 +603,7 @@ func (p *Pruner) prune(ctx context.Context, opt Options) (Report, error) {
 			r.Errors = append(r.Errors, fmt.Sprintf("任务 #%d: %v", j.ID, targetErr))
 			continue
 		}
-		e := Entry{JobID: j.ID, Name: j.Name, Bytes: size, Reason: reason}
+		e := Entry{JobID: j.ID, Name: j.Name, Bytes: size, Reason: reason, ReasonCode: reasonCode}
 		if !opt.DryRun {
 			claimed, err := p.Store.ClaimPrune(j.ID)
 			if err != nil {

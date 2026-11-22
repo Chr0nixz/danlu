@@ -1,3 +1,4 @@
+import { translate } from './i18n.ts'
 import type {
   HostMetricsResponse,
   AuditEntry,
@@ -13,6 +14,8 @@ import type {
   LoginSession,
   Prefs,
   PrefsPatch,
+  Reservation,
+  ReservationReq,
   Me,
   QueueState,
   ResourceHistory,
@@ -31,6 +34,7 @@ import type {
   SubmitReq,
   TerminalSession,
   TraceResponse,
+  StrictStatus,
 } from './types'
 
 /**
@@ -54,18 +58,38 @@ export interface ApiOptions {
   /**
    * 收到空的 404 时的报错文字。服务器对没有通过检查的请求一律返回空 404：
    * 面板里是安全入口的 cookie 过期了，客户端里是设备令牌被吊销了。
+   * 是函数不是字符串：抛错时才取文案，切换语言后不必重建 Api。
    */
-  emptyNotFound: string
+  emptyNotFound: () => string
 }
 
 /** 这一版前端认识的接口版本，和服务器 internal/api 的 APIVersion 保持一致 */
 export const API_VERSION = 1
 
-/** status 为 0 表示没连上服务器（网络错误、超时、证书不对） */
+/** status 为 0 表示没连上服务器（网络错误、超时、证书不对）。code/params 是服务器给的机器码，供本地化 */
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public needTotp = false) {
+  constructor(
+    public status: number,
+    message: string,
+    public needTotp = false,
+    public code?: string,
+    public params?: Record<string, string | number>,
+  ) {
     super(message)
   }
+}
+
+/**
+ * 错误的显示文案：带机器码且目录里有对应键就本地化，
+ * 否则回退服务器原文（旧服务器、未编码的错误天然兼容）。
+ */
+export function apiErrorText(err: unknown): string {
+  if (err instanceof ApiError && err.code) {
+    const key = `error.${err.code}`
+    const msg = translate(key, err.params)
+    if (msg !== key) return msg
+  }
+  return err instanceof Error ? err.message : String(err)
 }
 
 export function qs(params: object) {
@@ -85,7 +109,7 @@ export interface LogStreamHandlers {
 export function createApi(t: Transport, opt: ApiOptions) {
   async function req<T>(method: 'GET' | 'POST', url: string, body?: unknown): Promise<T> {
     const res = await t.request(method, url, body !== undefined ? JSON.stringify(body) : undefined)
-    if (res.status === 404 && !res.body) throw new ApiError(404, opt.emptyNotFound)
+    if (res.status === 404 && !res.body) throw new ApiError(404, opt.emptyNotFound())
     let data: unknown = null
     try {
       data = res.body ? JSON.parse(res.body) : null
@@ -93,23 +117,28 @@ export function createApi(t: Transport, opt: ApiOptions) {
       throw new ApiError(res.status, res.body.slice(0, 200) || `HTTP ${res.status}`)
     }
     if (res.status < 200 || res.status >= 300) {
-      const error = data as { error?: string; need_totp?: boolean } | null
-      throw new ApiError(res.status, error?.error ?? `HTTP ${res.status}`, error?.need_totp === true)
+      const error = data as { error?: string; need_totp?: boolean; code?: string; params?: Record<string, string | number> } | null
+      throw new ApiError(res.status, error?.error ?? `HTTP ${res.status}`, error?.need_totp === true, error?.code, error?.params)
     }
     return data as T
   }
 
   async function getText(url: string): Promise<string> {
     const res = await t.request('GET', url)
-    if (res.status === 404 && !res.body) throw new ApiError(404, opt.emptyNotFound)
+    if (res.status === 404 && !res.body) throw new ApiError(404, opt.emptyNotFound())
     if (res.status < 200 || res.status >= 300) {
       let message = `HTTP ${res.status}`
+      let code: string | undefined
+      let params: Record<string, string | number> | undefined
       try {
-        message = (JSON.parse(res.body) as { error?: string })?.error ?? message
+        const e = JSON.parse(res.body) as { error?: string; code?: string; params?: Record<string, string | number> }
+        message = e?.error ?? message
+        code = e?.code
+        params = e?.params
       } catch {
         message = res.body.slice(0, 200) || message
       }
-      throw new ApiError(res.status, message)
+      throw new ApiError(res.status, message, false, code, params)
     }
     return res.body
   }
@@ -125,6 +154,10 @@ export function createApi(t: Transport, opt: ApiOptions) {
     queue: () => get<QueueState>('/api/queue'),
     pauseQueue: () => post<QueueState>('/api/queue/pause'),
     resumeQueue: () => post<QueueState>('/api/queue/resume'),
+    reservations: () => get<{ reservations: Reservation[] }>('/api/reservations'),
+    createReservation: (r: ReservationReq) => post<Reservation>('/api/reservations', r),
+    releaseReservation: (id: number) => post<Reservation>(`/api/reservations/${id}/release`),
+    extendReservation: (id: number) => post<Reservation>(`/api/reservations/${id}/extend`),
     hostMetrics: () => get<HostMetricsResponse>('/api/system'),
     resources: () => get<ResourceSnapshot>('/api/resources'),
     resourceHistory: (range: ResourceRange) => get<ResourceHistory>(`/api/resources/history${qs({ range })}`),
@@ -177,6 +210,8 @@ export function createApi(t: Transport, opt: ApiOptions) {
     /** 按要改的保留策略预览会清理什么，不删任何东西；正在自动清理时返回 409 */
     previewRetention: (patch: SettingsPatch<RetentionKey>) => post<RetentionPreview>('/api/settings/retention/preview', patch),
     updatePrefs: (patch: PrefsPatch) => post<{ prefs: Partial<Prefs> }>('/api/settings/prefs', patch),
+    /** 打开前服务器经 sudo 查一次 root 助手，查不过返回 409 strict_unavailable。只影响之后启动的任务 */
+    updateStrict: (enabled: boolean) => post<StrictStatus>('/api/settings/strict', { enabled }),
     sessions: () => get<{ sessions: LoginSession[] }>('/api/sessions'),
     revokeSession: (id: string) => post<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/revoke`),
     revokeOtherSessions: () => post<{ revoked: number }>('/api/sessions/revoke-others'),

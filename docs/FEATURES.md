@@ -24,7 +24,7 @@
 | | 3.4 | 参数扫描与任务组 | 10 个任务要提交 10 次，提交后混在列表里 | 3 | 大 | 少量 |
 | 第三批：看结果 | 4.1 | 输出文件浏览 | 看样例图和评测结果要开终端 | 4、6 | 中 | 否 |
 | 第四批：看需要 | 5.1 | 命令行提交 | rsync 之后还要切到浏览器填表 | — | 中 | 否 |
-| | 5.2 | GPU 保留 | 临时调试时，卡被排队的任务抢走 | 6 | 小 | 少量 |
+| | 5.2 | GPU 预约（已做） | 丹炉外的任务和临时调试，卡被排队的任务抢走 | 6 | 中 | 是 |
 | | 5.3 | 依赖、自动重试、时长上限、调用栈 | 见第 5.3 节 | — | — | — |
 
 **为什么这样排**
@@ -441,22 +441,35 @@ rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 -
 
 **是否做**：取决于你平时会不会从终端或脚本发任务 ❓。
 
-### 5.2 GPU 保留
+### 5.2 GPU 预约（2026-11-21 已实现）
 
-**问题**：在网页终端或 SSH 里临时调试时（跑一小段代码、测一下显存），调试进程在跑的时候，卡会被当成外部进程跳过，这没问题。但两次调试之间卡是空的，排队的任务会马上占上，下一次调试就 OOM。
+**问题**：有些任务不在丹炉上跑（SSH 或网页终端里手动起的训练、调试、别的框架）。外部进程在跑时，卡会被当成外部占用跳过，这没问题；但外部任务启动前、两次调试之间卡是空的，排队的任务会马上占上。
 
 **怎么用**
 
-- 首页 GPU 卡片的菜单里有"保留这张卡"，可以选 1 小时、3 小时或"直到取消"，还可以写一句用途。
-- 保留中的卡显示"已保留到 15:30"，到期自动释放。
-- 排队任务在等这张卡时，等待原因写成"GPU 2 已保留（到 15:30）"。
+- 首页摘要行右侧的"预约 GPU"：按张数或指定卡号，自动释放选 1 / 3 / 8 小时、自定义（10 分钟到 7 天）或不自动，可写一句用途。
+- **优先收卡**：预约立即生效，此刻空闲的卡马上收下（按张数时只收没有任何进程的卡，优先挑排队任务没有指定的；指定卡号时卡上有外部进程也收，那多半就是用户自己的任务）。卡不够时，丹炉任务结束释放的卡先给预约、再给排队任务，一张张收到凑齐为止，凑齐前已收的卡也不分给任务。多个预约按创建顺序收卡。
+- **计时从卡全部到位时开始**。已就绪的定时预约可以"延长 1 小时"，最多保留到 7 天后；随时可以手动释放。
+- 首页在有预约时多一张"GPU 预约"列表：收卡进度和已等时长、到期时刻（按浏览器时区）、复制 `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=…`、延长、释放。GPU 卡片上显示"预约 #3 · 到 15:30"。
+- 排队任务等这张卡时，等待原因写"GPU 2 已被预约 #3 占用"；预约的卡上的外部进程不会触发"队首等待外部进程"。
+- 推送：卡全部到位时一次（带卡号），自动释放前 10 分钟一次（时长不超过 10 分钟的不提醒；延长后重新提醒）。
 
 **改动**
 
-- **状态**：存在 `settings` 表里（运行时状态，不写配置文件）。
-- **调度**：`schedule` 把保留中的卡当成忙卡；`allocationWait` 补上对应的等待原因。
-- **接口**：`POST /api/gpus/{index}/reserve`。
-- 不推送。
+- **状态**：表 `gpu_reservations`（迁移 16），只由调度器写。调度器把未结束的预约放在内存里，每轮先收卡再分卡，两步用同一份 GPU 采样；自己做的变化写库失败时以内存为准、下一轮重试，用户的操作（创建、释放、延长）先写库、成功才改内存。读不到预约时不启动需要 GPU 的任务。
+- **事件**：`reservation_ready`、`reservation_expiring`、`reservation_ended`，任务 id 为空，key 为 `reservation:<id>`。
+- **接口**：`GET /api/reservations`、`POST /api/reservations`、`POST /api/reservations/{id}/release`、`POST /api/reservations/{id}/extend`；`/api/gpus` 每张卡加 `reservation`。
+
+**已知边界**
+
+- 等待中的按张数预约不会超时，会一直占着已收的卡：列表显示已等多久，只能手动释放。
+- 排队任务指定了被预约的卡时，严格先来先跑下会挡住整个队列，直到预约释放（提交页有提示）。
+- 释放时卡上还有用户的进程，这张卡仍按外部进程的规则不分配。
+- 丹炉只能用 `CUDA_VISIBLE_DEVICES` 告诉任务用哪些卡，拦不住程序自己选卡：启动器或脚本改写这个变量（`deepspeed --num_gpus` 会从 0 号卡开始用、accelerate 配置里的 `gpu_ids`、脚本里的 `export`），或者 EGL/OpenGL 图形进程按自己的设备编号选卡，任务都会跑到预约的卡上（没有 root 权限做不了设备隔离）。所以改成看得见：
+  - GPU 采样时记下任务进程启动时的 `CUDA_VISIBLE_DEVICES`（`/api/gpus` 进程的 `cuda_visible`）。
+  - 运行中的任务有进程在没分给它的卡上时，记一条 `stray:<任务 id>` 告警并推送一次，写明越界的卡、其中哪些被预约、原因是选卡变量被改成了什么还是图形进程；任务运行期间不重复，结束才清。
+  - 任务详情页显示同样的说明；提交页发现命令里给 `CUDA_VISIBLE_DEVICES` 赋值或用了 `deepspeed --num_gpus` 时提前提示。
+  - 要真正拦住，打开 5.4 的严格限卡。
 
 ### 5.3 其他候选
 
@@ -466,6 +479,34 @@ rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 -
 | 自动重试 | 只针对 `fail_kind = nccl` 这类偶发错误，最多 1 次；重试是一个新任务，`rerun_of` 指向原任务 | 失败分类还没用真机日志校准过，现在按分类重试，容易把真问题盖住 |
 | 时长上限 | 提交时可选"超过 N 小时自动取消"，结束原因写"超过时长上限" | 2.3 的静默提醒覆盖了主要风险，先看提醒够不够用 |
 | 抓取调用栈 | 在 2.3 的提示里加"抓取调用栈"，对任务进程运行 `py-spy dump`，在手机上就能看到卡在哪一行 | 需要环境里装有 py-spy。Ubuntu 默认 `kernel.yama.ptrace_scope = 1`，只允许祖先进程附加，而 danlu 另起的 py-spy 不是训练进程的祖先，通常没有权限，要把它调成 0 或用 sudo。可以先让 `danlu doctor` 检查这两项 |
+
+### 5.4 严格限卡（2026-11-22 已实现）
+
+**解决什么**：丹炉只能用 `CUDA_VISIBLE_DEVICES` 告诉任务用哪些卡，程序自己改写它（hsy 上的 #82：VLARLKit 按 NVML 编号查 UUID，写成物理卡 0–3）或用 EGL 渲染（LIBERO 设 `MUJOCO_EGL_DEVICE_ID`）就会跑到别的任务或预约的卡上。5.2 的越界告警只能事后发现。
+
+**怎么用**：服务器上 `sudo <danlu 路径> strict install` 装一次 root 助手，再在面板「设置 → 调度 → 严格限卡」打开。之后启动的每个任务都在只放行分到的卡的 systemd 临时服务里运行；`danlu strict status` 查看状态，`sudo danlu strict uninstall` 卸载。
+
+**2026-11-22 hsy 实测**（`scripts/s0/strict-probe.sh`）：放行部分卡以后，被拦的 `/dev/nvidiaN` 打开报 EPERM；CUDA、NVML（nvidia-smi）、NVIDIA EGL 都只看得到放行的卡，并从 0 重新编号；`CUDA_VISIBLE_DEVICES` 写物理编号会 `CUDA_ERROR_NO_DEVICE`，写 0 起的编号正好是放行的卡。所以 #82 这类按 0..k-1 选卡的程序在严格模式下自动落在分到的卡上。
+
+**规则**
+
+- **权限边界**：助手是 danlu 二进制的 root 副本 `/usr/local/libexec/danlu-gpu-helper`，sudoers 只放行 `start`、`check` 两个子命令。它只会收紧：进程永远以调用者（`SUDO_UID`）身份、在 `user-<uid>.slice` 里运行，资源限制和附加组照抄 danlu 进程；调用者能选的只有放行哪些卡和执行什么（本来就能以自己的身份执行）。助手不写文件，只读 `/proc`、`/sys`、stat `/dev`。
+- **设备**：`DevicePolicy=closed`，按 `/proc/devices` 放行除 GPU 以外的所有驱动（排除 `/dev/nvidia[0-9]*`、`/dev/dri/*` 所在的主设备号），再按路径放行驱动公共节点和分到的卡的 `/dev/nvidiaN`、DRM 节点（按 PCI 总线号对上次号）。设备限制只用来隔离 GPU，不顺带做沙箱。
+- **启动**：每个任务一个 `danlu-job-<uid>-<数据目录哈希>-<id>-<时间戳>.service`（`Type=exec`、`KillMode=process`、`OOMPolicy=continue`、`--collect`），`ExecStart` 是 `danlu job-exec`：以用户身份读丹炉写的 NUL 分隔环境文件（读完即删）、接好日志、exec 包装脚本。pid 文件、进程组、`DANLU_RUN_DIR` 都和普通任务一样，所以接管、取消、清理不变；任务不在 danlu.service 的 cgroup 里，重启 danlu 天然不影响它。
+- **编号**：严格任务注入 `CUDA_VISIBLE_DEVICES=0..k-1`，`DANLU_GPUS` 仍是物理卡号，`DANLU_CVD` 是应注入的值（包装脚本据此纠正 conda 环境的改动）。日志开头写"严格限卡，程序里的编号是 …"。
+- **sudo 不进调度锁**：严格任务在 `launch` 末尾锁外调助手，期间被取消就按运行中的任务取消，danlu 正在停止也记下 pid 留给下次接管。
+- **不可用就等**：开着但助手不可用时不启动任何任务（不用卡的也不行），队首等待原因写明怎么修，告警 `strict_unavailable` 推送一次。启动失败时第一次放回队列并马上复查，复查通过后同一任务再失败才判失败。**绝不退回不隔离运行。**
+- **少打 sudo 日志**：每次 sudo 在 auth.log 留一行，所以不定时轮询：开启时启动后查一次、打开开关时查一次、启动失败后复查，不可用期间每 2 分钟复查。
+- **OOM**：包装脚本结束前读自己 cgroup 的 `memory.events` 写 `<run>/oom_kill`，只算这个任务；读不到算不确定。
+
+**改动**：`internal/strict`（请求、设备清单、助手、安装、状态缓存）；`runner` 的严格启动和 `job-exec`；调度器的闸门、锁外启动和 OOM；迁移 18 加 `jobs.unit`；`GET /api/settings` 加 `strict`，`POST /api/settings/strict`；`danlu.json` 加 `gpu_isolation`；面板设置页、任务详情标记、新建任务提示；`danlu doctor` 加一项。
+
+**已知边界**
+
+- 需要 systemd ≥ 240 和 cgroup v2（v1 理论上也行，没试过）；只支持整卡，不支持 MIG。
+- Mesa 会尝试打开被拦的 `/dev/dri` 节点，日志里多几行 `libEGL warning: … Permission denied`，无害。
+- 网页终端不是任务，不受限。
+- 升级 danlu 不会更新 root 拥有的助手；协议变了会提示重新运行 `sudo danlu strict install`。
 
 ## 6. 暂不建议做
 
@@ -484,7 +525,8 @@ rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 -
 | 第一批 | `jobs.memo`、`jobs.profile_json`、`jobs.notify_done` | `POST /api/jobs/{id}/memo`、`POST /api/jobs/{id}/notify`、`GET /api/jobs/{id}/log/search` | `runtime.silence_alert`、`notify.queue_drained` | `queue_drained`、告警 `silent:<id>` |
 | 第二批 | `jobs.queue_order`（迁移时设为 id）、`jobs.held`、表 `job_groups`、`jobs.group_id`、`jobs.params_json` | `POST /api/jobs/{id}/edit`、`POST /api/jobs/batch`、`POST /api/jobs/{id}/move`、`POST /api/jobs/{id}/hold`、`POST /api/groups`、`GET /api/groups/{id}` | — | `job_edited`、`job_moved`、`job_held` |
 | 第三批 | — | `GET /api/jobs/{id}/files`、`GET /api/jobs/{id}/files/raw` | — | — |
-| 第四批 | — | `POST /api/gpus/{index}/reserve`；unix socket 入口 | — | — |
+| 第四批 | 表 `gpu_reservations`（5.2，已做，迁移 16） | `GET/POST /api/reservations`、`POST /api/reservations/{id}/release`、`POST /api/reservations/{id}/extend`，`/api/gpus` 加 `reservation`；unix socket 入口 | — | `reservation_ready`、`reservation_expiring`、`reservation_ended` |
+| 第四批 · 严格限卡 | `jobs.unit`（5.4，已做，迁移 18） | `POST /api/settings/strict`，`GET /api/settings` 加 `strict`，任务加 `unit` | 库里 `runtime.strict_gpu`（面板开关） | 告警 `strict_unavailable` |
 
 **新的注入变量**：`DANLU_GROUP_ID`（任务组成员）；`WANDB_RUN_GROUP`（仅在用户没有设置时注入）。
 

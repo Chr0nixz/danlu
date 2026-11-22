@@ -71,7 +71,7 @@ fn remote_err(e: RemoteError) -> String {
     match e {
         RemoteError::Exit(code, stderr) => {
             if stderr.is_empty() {
-                format!("退出码 {code}")
+                crate::messages::t("fail.exit_code", &[("code", &code.to_string())])
             } else {
                 stderr
             }
@@ -105,18 +105,17 @@ pub async fn upgrade_server(
     let say = |t: String| {
         let _ = on_progress.send(t);
     };
-    let s = servers.get(&name).ok_or_else(|| format!("没有 {name} 这台服务器"))?;
+    let s = servers.get(&name).ok_or_else(|| crate::messages::t("http.no_server", &[("name", &name)]))?;
 
     say("$ uname -m".into());
     let machine = ssh::run_script(&s.ssh, "uname -m\n").await.map_err(remote_err)?;
     let arch = match machine.trim() {
         "x86_64" | "amd64" => "amd64",
         "aarch64" | "arm64" => "arm64",
-        other => return Err(format!("不支持的 CPU 架构 {other}")),
+        other => return Err(crate::messages::t("ops.arch_unsupported", &[("other", other)])),
     };
-    let local = find_binary(&app, arch)
-        .ok_or_else(|| format!("找不到 danlu-linux-{arch}：先运行 scripts/build.ps1 -Arch {arch} 构建"))?;
-    say(format!("{arch}，使用 {}", local.display()));
+    let local = find_binary(&app, arch).ok_or_else(|| crate::messages::t("ops.binary_missing", &[("arch", arch)]))?;
+    say(crate::messages::t("ops.using_local", &[("arch", arch), ("path", &local.display().to_string())]));
 
     let me = http.get_json(&servers, &name, "/api/me").await?;
     let from = me["version"].as_str().unwrap_or("").to_string();
@@ -128,7 +127,7 @@ pub async fn upgrade_server(
         .flatten()
         .filter_map(|j| Some((j["id"].as_i64()?, j["pid"].as_i64().unwrap_or(0))))
         .collect();
-    say(format!("当前版本 {from}，在跑的任务 {} 个", running.len()));
+    say(crate::messages::t("ops.current_version", &[("from", &from), ("n", &running.len().to_string())]));
 
     let exe = if s.exe.is_empty() {
         let out = ssh::run_script(&s.ssh, "PATH=\"$HOME/bin:$HOME/.local/bin:$PATH\"; command -v danlu\n")
@@ -139,7 +138,7 @@ pub async fn upgrade_server(
         s.exe.clone()
     };
     if !exe.starts_with('/') {
-        return Err(format!("找不到服务器上 danlu 的绝对路径（得到的是 {exe:?}）"));
+        return Err(crate::messages::t("ops.exe_path_unknown", &[("exe", &format!("{exe:?}"))]));
     }
     let staged = format!("{exe}.new");
     say(format!("$ scp {} {}:{staged}", local.display(), s.ssh));
@@ -149,10 +148,10 @@ pub async fn upgrade_server(
     say(format!("$ {cmd}"));
     let restarted_at = now_sec();
     let out = ssh::run_script(&s.ssh, &format!("{cmd}\n")).await.map_err(remote_err)?;
-    let replaced: serde_json::Value =
-        serde_json::from_str(&out).map_err(|_| format!("新程序不支持 replace，输出：{}", out.trim()))?;
+    let replaced: serde_json::Value = serde_json::from_str(&out)
+        .map_err(|_| crate::messages::t("ops.replace_unsupported", &[("out", out.trim())]))?;
     let to = replaced["version"].as_str().unwrap_or("").to_string();
-    say(format!("已替换为 {to}，等待服务重新启动…"));
+    say(crate::messages::t("ops.replaced", &[("to", &to)]));
     fleet.poke();
 
     // 检查一：/api/me 返回的是新版本
@@ -166,7 +165,7 @@ pub async fn upgrade_server(
             }
         }
     }
-    let mut problem = (!serving).then(|| format!("30 秒内 /api/me 仍然不是 {to}"));
+    let mut problem = (!serving).then(|| crate::messages::t("ops.not_serving", &[("to", &to)]));
 
     // 检查二：升级前在跑的任务没有被重启打断（新进程接管成功，或者期间自己正常结束）
     if serving {
@@ -178,9 +177,12 @@ pub async fn upgrade_server(
             }
         }
         if !lost.is_empty() {
-            problem = Some(format!("这些任务在重启后没有被接管：{}", lost.join("、")));
+            problem = Some(crate::messages::t(
+                "ops.jobs_lost",
+                &[("jobs", &lost.join(&crate::messages::t("list_sep", &[])))],
+            ));
         } else {
-            say(format!("新版本已在服务，{} 个在跑的任务都已接管", running.len()));
+            say(crate::messages::t("ops.jobs_reattached", &[("n", &running.len().to_string())]));
         }
     }
     let journal = match problem {
@@ -209,7 +211,7 @@ pub async fn service_action(
     action: String,
     value: Option<String>,
 ) -> Result<ActionResult, String> {
-    let s = servers.get(&name).ok_or_else(|| format!("没有 {name} 这台服务器"))?;
+    let s = servers.get(&name).ok_or_else(|| crate::messages::t("http.no_server", &[("name", &name)]))?;
     let t = s.ssh.as_str();
     let mut log = vec![];
     let mut run = async |args: &str, input: Option<&str>| -> Result<(), String> {
@@ -233,7 +235,12 @@ pub async fn service_action(
             false
         }
         "port" => {
-            let port: u16 = value.as_deref().unwrap_or("").trim().parse().map_err(|_| "端口应该是 1–65535 的数字")?;
+            let port: u16 = value
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .map_err(|_| crate::messages::t("ops.port_invalid", &[]))?;
             run(&format!("port {port}"), None).await?;
             run("restart", None).await?;
             true
@@ -246,18 +253,18 @@ pub async fn service_action(
         "password" => {
             let pw = value.unwrap_or_default();
             if pw.chars().count() < 8 || pw.contains('\n') {
-                return Err("新密码至少 8 位，不能换行".into());
+                return Err(crate::messages::t("ops.password_invalid", &[]));
             }
             run("passwd --password-stdin", Some(&pw)).await?;
             run("restart", None).await?;
             false
         }
-        a => return Err(format!("不认识的操作 {a}")),
+        a => return Err(crate::messages::t("ops.action_unknown", &[("a", a)])),
     };
     if reread {
         servers::refresh_info(&servers, &name).await?;
         http.forget(&name);
-        log.push("已重新读取地址和证书".into());
+        log.push(crate::messages::t("ops.reread_done", &[]));
     }
     fleet.poke();
     let command = log.iter().filter(|l| l.starts_with("$ ")).map(|l| &l[2..]).collect::<Vec<_>>().join(" && ");

@@ -18,6 +18,7 @@ import (
 	"danlu/internal/config"
 	"danlu/internal/execx"
 	"danlu/internal/gpu"
+	"danlu/internal/strict"
 	"danlu/internal/system"
 	"danlu/internal/tlsutil"
 )
@@ -32,6 +33,19 @@ type Check struct {
 
 type Report struct {
 	Checks []Check `json:"checks"`
+}
+
+// strictCheck 只在装了严格限卡助手时出现：经 sudo -n 查一次它能不能用（会在 auth.log 留一行）。
+// 不知道面板上开没开，所以查不过只算 warn
+func strictCheck(ctx context.Context) (Check, bool) {
+	if !strict.Installed() {
+		return Check{}, false
+	}
+	st := strict.Check(ctx)
+	if st.OK {
+		return Check{"strict", "ok", "严格限卡助手", "可用，版本 " + st.HelperVersion, ""}, true
+	}
+	return Check{"strict", "warn", "严格限卡助手", st.Reason + "：" + st.Detail, "在服务器上重新运行 sudo danlu strict install"}, true
 }
 
 func Run(ctx context.Context, cfg *config.Config, paths config.Paths, version string, apiVersion int) Report {
@@ -51,6 +65,9 @@ func Run(ctx context.Context, cfg *config.Config, paths config.Paths, version st
 	}
 	checks = append(checks, certificateChecks(cfg, paths)...)
 	checks = append(checks, portCheck(cfg))
+	if c, ok := strictCheck(ctx); ok {
+		checks = append(checks, c)
+	}
 	versionLevel, versionFix := "ok", ""
 	if !releaseVersion(version) {
 		versionLevel, versionFix = "warn", "使用带正式版本 tag、工作区干净时的构建"

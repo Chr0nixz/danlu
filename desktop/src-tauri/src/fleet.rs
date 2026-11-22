@@ -137,6 +137,12 @@ struct JobLite {
     #[serde(default)]
     fail_reason: String,
     #[serde(default)]
+    fail_kind: String,
+    #[serde(default)]
+    fail_detail: String,
+    #[serde(default)]
+    ext_seen: bool,
+    #[serde(default)]
     ended_at: Option<i64>,
     #[serde(default)]
     gpus_req: i64,
@@ -157,6 +163,9 @@ struct GpuLite {
     external: Vec<ProcLite>,
     #[serde(default)]
     unknown_mem_mb: i64,
+    /// 收下这张卡的 GPU 预约：丹炉不分配它，卡上用户自己的进程也不算挡住队首。旧版服务器没有这个字段
+    #[serde(default)]
+    reservation: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -302,6 +311,90 @@ fn push_history(s: &mut ServerSnap, now: i64) {
 
 // ---------- 通知和提醒 ----------
 
+/// 失败原因按机器码合成当前语言（和 core 的 failReasonText 同一套逻辑）；
+/// 旧服务器没有分类时回退 fail_reason 原文。
+fn fail_reason_text(j: &JobLite) -> String {
+    use crate::messages::t;
+    let fallback = || {
+        if !j.fail_reason.is_empty() {
+            j.fail_reason.clone()
+        } else if let Some(c) = j.exit_code {
+            t("fail.exit_code", &[("code", &c.to_string())])
+        } else {
+            t("fail.failed", &[])
+        }
+    };
+    match j.fail_kind.as_str() {
+        "cuda_oom" => t(if j.ext_seen { "fail.cuda_oom_ext" } else { "fail.cuda_oom" }, &[]),
+        "host_oom" => match j.fail_detail.as_str() {
+            "worker" => t("fail.host_oom_worker", &[]),
+            "guess137" => t("fail.host_oom_guess", &[]),
+            "confirmed" => t("fail.host_oom", &[]),
+            _ => fallback(),
+        },
+        "nccl" => t("fail.nccl", &[]),
+        "exception" => t("fail.exception", &[]),
+        "reboot" => t("fail.reboot", &[]),
+        "killed" => t("fail.killed", &[]),
+        "signal" => {
+            let sig = if !j.fail_detail.is_empty() {
+                j.fail_detail.clone()
+            } else if let Some(c) = j.exit_code.filter(|c| *c > 128) {
+                signal_name(c - 128)
+            } else {
+                String::new()
+            };
+            if sig.is_empty() {
+                // 与 core failReasonText 一致：有原文用原文，没有就说"被信号终止"，别落到笼统的"失败"
+                if j.fail_reason.is_empty() {
+                    t("fail.signal_generic", &[])
+                } else {
+                    j.fail_reason.clone()
+                }
+            } else {
+                t("fail.signal", &[("sig", &sig)])
+            }
+        }
+        "exit" => match j.exit_code {
+            Some(c) => t("fail.exit_code", &[("code", &c.to_string())]),
+            None => fallback(),
+        },
+        "start" => {
+            // 与 core failReasonText 一致：fail_detail 是原始启动错误，译前缀后附原文；旧服务器回退原文
+            if !j.fail_detail.is_empty() {
+                t("fail.start_detail", &[("detail", &j.fail_detail)])
+            } else if j.fail_reason.is_empty() {
+                t("fail.start", &[])
+            } else {
+                j.fail_reason.clone()
+            }
+        }
+        _ => fallback(),
+    }
+}
+
+fn signal_name(n: i64) -> String {
+    let name = match n {
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "",
+    };
+    if name.is_empty() {
+        crate::messages::t("fail.signal_num", &[("n", &n.to_string())])
+    } else {
+        name.into()
+    }
+}
+
 fn notify(app: &AppHandle, fleet: &Fleet, title: &str, body: &str, target: Focus) {
     if !app.state::<LocalState>().prefs().notify {
         return;
@@ -343,15 +436,30 @@ fn evaluate(
                 key: format!("offline:{name}"),
                 server: name.into(),
                 kind: "offline",
-                text: format!("{name} 连不上：{}", s.error.clone().unwrap_or_default()),
+                text: crate::messages::t(
+                    "offline.alert",
+                    &[("name", name), ("error", &s.error.clone().unwrap_or_default())],
+                ),
             });
             if !notified_offline {
                 fleet.track.lock().unwrap().offline_notified.insert(name.into());
-                notify(app, fleet, &format!("{name} 连不上"), s.error.as_deref().unwrap_or(""), server_focus());
+                notify(
+                    app,
+                    fleet,
+                    &crate::messages::t("offline.title", &[("name", name)]),
+                    s.error.as_deref().unwrap_or(""),
+                    server_focus(),
+                );
             }
         } else if s.online && notified_offline {
             fleet.track.lock().unwrap().offline_notified.remove(name);
-            notify(app, fleet, &format!("{name} 已恢复"), "又能连上了", server_focus());
+            notify(
+                app,
+                fleet,
+                &crate::messages::t("recovered.title", &[("name", name)]),
+                &crate::messages::t("recovered.body", &[]),
+                server_focus(),
+            );
         }
         if !s.online {
             continue; // 下面的判断都要新数据
@@ -364,11 +472,11 @@ fn evaluate(
                     key: format!("gpu_error:{name}"),
                     server: name.into(),
                     kind: "gpu_error",
-                    text: format!("{name} 的 nvidia-smi 报错：{err}"),
+                    text: crate::messages::t("gpu_error.alert", &[("name", name), ("error", err)]),
                 });
                 let last = fleet.track.lock().unwrap().gpu_error_notified.insert(name.into(), err.clone());
                 if last.as_ref() != Some(err) {
-                    notify(app, fleet, &format!("{name} 的 nvidia-smi 报错"), err, server_focus());
+                    notify(app, fleet, &crate::messages::t("gpu_error.title", &[("name", name)]), err, server_focus());
                 }
             }
             None => {
@@ -390,48 +498,56 @@ fn evaluate(
                         continue;
                     }
                     let mem: i64 = g.external.iter().filter(|q| q.job_id == p.job_id).map(|q| q.used_mem_mb).sum();
-                    let text = format!(
-                        "{name} 的 GPU {} 上有 {} 的进程，占了 {} MB，可能和 {} 抢显存",
-                        g.index,
-                        job_key(name, p.job_id),
-                        mem,
-                        job_key(name, job.id)
+                    let text = crate::messages::t(
+                        "external.job_text",
+                        &[
+                            ("name", name),
+                            ("gpu", &g.index.to_string()),
+                            ("who", &job_key(name, p.job_id)),
+                            ("mem", &mem.to_string()),
+                            ("job", &job_key(name, job.id)),
+                        ],
                     );
-                    (key, "别的任务跑到了你的卡上", text)
+                    (key, crate::messages::t("external.job_title", &[]), text)
                 } else {
                     let who = if p.user.is_empty() {
                         format!("pid {}", p.pid)
                     } else {
-                        format!("{}（pid {}）", p.user, p.pid)
+                        crate::messages::t("external.who_user", &[("user", &p.user), ("pid", &p.pid.to_string())])
                     };
-                    let text = format!(
-                        "{name} 的 GPU {} 上有外部进程 {who}，占了 {} MB，可能和 {} 抢显存",
-                        g.index,
-                        p.used_mem_mb,
-                        job_key(name, job.id)
+                    let text = crate::messages::t(
+                        "external.text",
+                        &[
+                            ("name", name),
+                            ("gpu", &g.index.to_string()),
+                            ("who", &who),
+                            ("mem", &p.used_mem_mb.to_string()),
+                            ("job", &job_key(name, job.id)),
+                        ],
                     );
-                    (format!("external:{name}:{}:{}", g.index, p.pid), "外部进程占用了你的卡", text)
+                    (format!("external:{name}:{}:{}", g.index, p.pid), crate::messages::t("external.title", &[]), text)
                 };
                 seen_external.insert(key.clone());
                 if !read.contains(&key) {
                     alerts.push(Alert { key: key.clone(), server: name.into(), kind: "external", text: text.clone() });
                 }
                 if fleet.track.lock().unwrap().external_notified.insert(key) {
-                    notify(app, fleet, title, &text, Focus { kind: "job", key: job_key(name, job.id) });
+                    notify(app, fleet, &title, &text, Focus { kind: "job", key: job_key(name, job.id) });
                 }
             }
         }
 
-        // 外部进程或未知显存占用挡住队首：没有这些占用时本来能跑
+        // 外部进程或未知显存占用挡住队首：没有这些占用时本来能跑。预约的卡和任务的卡一样算自有占用
         if let Some(head) = jobs.iter().filter(|j| j.status == "queued").min_by_key(|j| j.queue_pos.unwrap_or(i64::MAX))
         {
+            let owned = |g: &GpuLite| g.job.is_some() || g.reservation.is_some();
             let busy_external: HashSet<i64> = gpus
                 .iter()
-                .filter(|g| g.job.is_none() && (!g.external.is_empty() || g.unknown_mem_mb > 0))
+                .filter(|g| !owned(g) && (!g.external.is_empty() || g.unknown_mem_mb > 0))
                 .map(|g| g.index)
                 .collect();
-            let free = gpus.iter().filter(|g| g.job.is_none() && g.external.is_empty() && g.unknown_mem_mb <= 0).count()
-                as i64;
+            let free =
+                gpus.iter().filter(|g| !owned(g) && g.external.is_empty() && g.unknown_mem_mb <= 0).count() as i64;
             let blocked = if head.gpus_pinned.is_empty() {
                 head.gpus_req > free && head.gpus_req <= free + busy_external.len() as i64
             } else {
@@ -445,21 +561,17 @@ fn evaluate(
                 } else {
                     head.gpus_pinned.iter().any(|index| gpus.iter().any(|g| g.index == *index && g.unknown_mem_mb > 0))
                 };
-                let text = if unknown {
-                    format!("{} {} 在排队，被未知显存占用的卡挡住了", job_key(name, head.id), head.name)
-                } else {
-                    format!("{} {} 在排队，被外部进程占着的卡挡住了", job_key(name, head.id), head.name)
-                };
+                let text = crate::messages::t(
+                    if unknown { "blocked.unknown_text" } else { "blocked.text" },
+                    &[("key", &job_key(name, head.id)), ("name", &head.name)],
+                );
                 if !read.contains(&key) {
                     alerts.push(Alert { key: key.clone(), server: name.into(), kind: "blocked", text: text.clone() });
                 }
                 if fleet.track.lock().unwrap().blocked_notified.insert(key) {
-                    let title = if unknown {
-                        "排队的任务被未知显存占用挡住"
-                    } else {
-                        "排队的任务被外部进程挡住"
-                    };
-                    notify(app, fleet, title, &text, Focus { kind: "job", key: job_key(name, head.id) });
+                    let title =
+                        crate::messages::t(if unknown { "blocked.unknown_title" } else { "blocked.title" }, &[]);
+                    notify(app, fleet, &title, &text, Focus { kind: "job", key: job_key(name, head.id) });
                 }
             }
         }
@@ -484,17 +596,13 @@ fn evaluate(
                     notify(
                         app,
                         fleet,
-                        &format!("{name} 上有 {} 个任务失败", fresh.len()),
-                        &names.join("、"),
+                        &crate::messages::t("failed.many_title", &[("name", name), ("n", &fresh.len().to_string())]),
+                        &names.join(&crate::messages::t("list_sep", &[])),
                         Focus { kind: "job", key: job_key(name, fresh[0].id) },
                     );
                 } else {
                     for j in fresh {
-                        let why = if !j.fail_reason.is_empty() {
-                            j.fail_reason.clone()
-                        } else {
-                            j.exit_code.map(|c| format!("退出码 {c}")).unwrap_or_else(|| "失败".into())
-                        };
+                        let why = fail_reason_text(j);
                         let body = match &j.error_line {
                             Some(l) if !l.is_empty() => format!("{why} · {l}"),
                             _ => why,
@@ -502,7 +610,7 @@ fn evaluate(
                         notify(
                             app,
                             fleet,
-                            &format!("{} 失败 · {}", job_key(name, j.id), j.name),
+                            &crate::messages::t("failed.title", &[("key", &job_key(name, j.id)), ("name", &j.name)]),
                             &body,
                             Focus { kind: "job", key: job_key(name, j.id) },
                         );
@@ -564,4 +672,29 @@ pub fn mark_read(app: AppHandle, local: State<'_, LocalState>, fleet: State<'_, 
         tray::set_state(&app, state);
     }
     let _ = app.emit("fleet", view.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(v: serde_json::Value) -> JobLite {
+        serde_json::from_value(v).unwrap()
+    }
+
+    // 只断言与语言无关的部分：messages 的语言是全局状态，别的测试可能同时在切换
+    #[test]
+    fn start_failure_uses_detail_and_falls_back() {
+        let with_detail = job(serde_json::json!({
+            "id": 1, "name": "a", "status": "failed", "fail_kind": "start",
+            "fail_detail": "fork 失败", "fail_reason": "启动失败: fork 失败"
+        }));
+        let s = fail_reason_text(&with_detail);
+        assert!(s.ends_with(": fork 失败") && s != "fork 失败", "{s}");
+
+        let old_server = job(serde_json::json!({
+            "id": 2, "name": "b", "status": "failed", "fail_kind": "start", "fail_reason": "写入任务清单失败: x"
+        }));
+        assert_eq!(fail_reason_text(&old_server), "写入任务清单失败: x");
+    }
 }

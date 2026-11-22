@@ -2,59 +2,65 @@ import { useQuery } from '@tanstack/react-query'
 import { TriangleAlert } from 'lucide-react'
 import type { RuntimeKey, RuntimeSettings, Settings } from '@danlu/core'
 import { api } from '../../lib/api'
+import { t } from '../../lib/i18n'
 import { RuntimeForm, type RowMeta } from './RuntimeForm'
 import { Section } from './shared'
+import { StrictForm } from './StrictForm'
 
-const meta: Record<RuntimeKey, RowMeta> = {
-  fail_fast: {
-    label: '快速失败暂停',
-    hint: '任务启动后这么短时间内就失败，暂停队列，免得排在后面的任务接着失败。关闭后失败照常推送，队列不暂停。',
-  },
-  kill_grace: {
-    label: '取消后强杀等待',
-    hint: '取消任务时先发 SIGTERM，等这么久还没退出就 SIGKILL，给训练脚本留出保存检查点的时间。',
-  },
-  unknown_gpu_memory_mb: {
-    label: '未知显存阈值',
-    hint: '卡上对不上进程的显存超过这个值，这张卡就不分配给新任务。图形界面、驱动自身会占一点，阈值太低会误判。',
-  },
-  disk_min_gb: {
-    label: '磁盘保护暂停线',
-    hint: '数据目录所在分区剩余空间低于它时暂停队列，回到它的两倍以上自动恢复。',
-  },
-  disk_warn_gb: {
-    label: '磁盘低余量提示',
-    hint: '数据目录、输出目录或最近用过的工作目录所在分区低于它时，在首页提示并推送到手机。最多 1 分钟后按新值判断。',
-  },
-  silence_alert: {
-    label: '日志静默提醒',
-    hint: '运行中的任务超过这么久没有新输出，且明显长于它以往最长的输出间隔时提醒，多半是卡住了。',
-  },
-  snapshot_max_file_mb: {
-    label: '单文件上限',
-    hint: '超过的文件不进快照，数据集、权重这类大文件一般都会被跳过。',
-  },
-  snapshot_max_total_mb: {
-    label: '总大小上限',
-    hint: '快照加起来超过这个大小就截断，剩下的文件不再收录。',
-  },
-  terminal_session_lifetime: {
-    label: '断开后保留',
-    hint: '关掉终端页面后 shell 继续保留多久，回来能接着用。改短后，已断开超过新时长的终端会在 15 秒内关闭。',
-  },
+/** 行标签和提示按当前语言取值：是函数不是模块级常量表，切换语言后重渲染即生效 */
+function rowMeta(): Record<RuntimeKey, RowMeta> {
+  return {
+    fail_fast: {
+      label: t('settings.sched.fail_fast'),
+      hint: t('settings.sched.fail_fast_hint'),
+    },
+    kill_grace: {
+      label: t('settings.sched.kill_grace'),
+      hint: t('settings.sched.kill_grace_hint'),
+    },
+    unknown_gpu_memory_mb: {
+      label: t('settings.sched.unknown_gpu_memory'),
+      hint: t('settings.sched.unknown_gpu_memory_hint'),
+    },
+    disk_min_gb: {
+      label: t('settings.sched.disk_min'),
+      hint: t('settings.sched.disk_min_hint'),
+    },
+    disk_warn_gb: {
+      label: t('settings.sched.disk_warn'),
+      hint: t('settings.sched.disk_warn_hint'),
+    },
+    silence_alert: {
+      label: t('settings.sched.silence_alert'),
+      hint: t('settings.sched.silence_alert_hint'),
+    },
+    snapshot_max_file_mb: {
+      label: t('settings.sched.snapshot_file'),
+      hint: t('settings.sched.snapshot_file_hint'),
+    },
+    snapshot_max_total_mb: {
+      label: t('settings.sched.snapshot_total'),
+      hint: t('settings.sched.snapshot_total_hint'),
+    },
+    terminal_session_lifetime: {
+      label: t('settings.sched.terminal_lifetime'),
+      hint: t('settings.sched.terminal_lifetime_hint'),
+    },
+  }
 }
 
 const gib = (bytes: number) => (bytes / 1024 ** 3).toFixed(1)
 
 export function Scheduling({ st }: { st: Settings }) {
-  if (!st.runtime) return <Section title="调度与告警">这台服务器的版本较旧，不支持在面板上修改。</Section>
+  if (!st.runtime) return <Section title={t('settings.group_scheduling')}>{t('settings.old_server')}</Section>
   const items: RuntimeSettings = st.runtime
+  const meta = rowMeta()
   const update = (patch: Parameters<typeof api.updateRuntime>[0]) => api.updateRuntime(patch).then((r) => r.runtime)
   return (
     <>
       <RuntimeForm
-        title="任务调度"
-        desc="保存后下一轮调度（1 秒内）生效，已经在跑的任务也按新值处理。"
+        title={t('settings.sched.title')}
+        desc={t('settings.sched.desc')}
         items={items}
         keys={['fail_fast', 'kill_grace', 'unknown_gpu_memory_mb']}
         meta={meta}
@@ -62,20 +68,21 @@ export function Scheduling({ st }: { st: Settings }) {
         update={update}
       />
       <DiskForm items={items} update={update} />
-      <RuntimeForm title="告警" desc="触发时在首页提示，开了手机推送的也推送到手机。" items={items} keys={['silence_alert']} meta={meta} cacheKey="runtime" update={update} />
+      <RuntimeForm title={t('settings.sched.alerts')} desc={t('settings.sched.alerts_desc')} items={items} keys={['silence_alert']} meta={meta} cacheKey="runtime" update={update} />
       <RuntimeForm
-        title="代码快照"
-        desc="每个任务启动时把工作目录里的代码打包留底，之后能查看和用快照重跑。新的上限从下一个启动的任务开始生效。"
+        title={t('settings.sched.snapshot')}
+        desc={t('settings.sched.snapshot_desc')}
         items={items}
         keys={['snapshot_max_file_mb', 'snapshot_max_total_mb']}
         meta={meta}
         cacheKey="runtime"
         update={update}
         crossCheck={(v, changed) =>
-          (changed.snapshot_max_file_mb || changed.snapshot_max_total_mb) && v.snapshot_max_file_mb > v.snapshot_max_total_mb ? { snapshot_max_file_mb: '单文件上限不能超过总大小上限' } : {}
+          (changed.snapshot_max_file_mb || changed.snapshot_max_total_mb) && v.snapshot_max_file_mb > v.snapshot_max_total_mb ? { snapshot_max_file_mb: t('settings.sched.err_snapshot_lines') } : {}
         }
       />
-      {st.terminal_enabled && <RuntimeForm title="网页终端" items={items} keys={['terminal_session_lifetime']} meta={meta} cacheKey="runtime" update={update} />}
+      {st.terminal_enabled && <RuntimeForm title={t('settings.sched.terminal')} items={items} keys={['terminal_session_lifetime']} meta={meta} cacheKey="runtime" update={update} />}
+      {st.strict && <StrictForm strict={st.strict} />}
     </>
   )
 }
@@ -85,15 +92,15 @@ function DiskForm({ items, update }: { items: RuntimeSettings; update: (patch: P
   const data = host.data?.disks?.find((d) => d.data && !d.error)
   return (
     <RuntimeForm
-      title="磁盘保护"
-      desc="空间不够时，训练写检查点和丹炉写日志都会失败。暂停线要低于提示线。"
+      title={t('settings.sched.disk')}
+      desc={t('settings.sched.disk_desc')}
       items={items}
       keys={['disk_min_gb', 'disk_warn_gb']}
-      meta={meta}
+      meta={rowMeta()}
       cacheKey="runtime"
       update={update}
       crossCheck={(v, changed) =>
-        (changed.disk_min_gb || changed.disk_warn_gb) && v.disk_min_gb > 0 && v.disk_warn_gb > 0 && v.disk_min_gb >= v.disk_warn_gb ? { disk_min_gb: '暂停线需要低于低余量提示线' } : {}
+        (changed.disk_min_gb || changed.disk_warn_gb) && v.disk_min_gb > 0 && v.disk_warn_gb > 0 && v.disk_min_gb >= v.disk_warn_gb ? { disk_min_gb: t('settings.sched.err_disk_lines') } : {}
       }
       extra={{
         disk_min_gb: (_, v) =>
@@ -101,8 +108,8 @@ function DiskForm({ items, update }: { items: RuntimeSettings; update: (patch: P
             <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-fg-3">
               {v.disk_min_gb > 0 && data.available_bytes < v.disk_min_gb * 1024 ** 3 && <TriangleAlert className="mt-px size-3.5 shrink-0 text-warn" aria-hidden />}
               <span>
-                数据目录所在分区现在剩 {gib(data.available_bytes)} GiB / {gib(data.total_bytes)} GiB
-                {v.disk_min_gb > 0 && data.available_bytes < v.disk_min_gb * 1024 ** 3 && '，低于这条暂停线，保存后队列会立即暂停'}
+                {t('settings.sched.disk_now', { free: gib(data.available_bytes), total: gib(data.total_bytes) })}
+                {v.disk_min_gb > 0 && data.available_bytes < v.disk_min_gb * 1024 ** 3 && t('settings.sched.disk_below')}
               </span>
             </p>
           ),

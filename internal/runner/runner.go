@@ -12,14 +12,19 @@ import (
 	"sync"
 
 	"danlu/internal/procfs"
+	"danlu/internal/strict"
 )
 
 type Runner struct {
-	RunRoot    string // ~/.danlu/run
-	LogRoot    string // ~/.danlu/logs
-	EnvRoot    string // ~/.danlu/envs
-	CondaBase  string
-	manifestMu sync.Mutex
+	RunRoot   string // ~/.danlu/run
+	LogRoot   string // ~/.danlu/logs
+	EnvRoot   string // ~/.danlu/envs
+	CondaBase string
+	// Exe 是 danlu 程序的路径：严格任务的服务以用户身份执行 Exe job-exec
+	Exe string
+	// StrictStart 请 root 助手把任务作为临时服务启动（生产里是 strict.Start），没设置时严格任务启动失败
+	StrictStart func(context.Context, strict.StartRequest) (strict.StartResult, error)
+	manifestMu  sync.Mutex
 	// manifestLocks 按输出目录串行写清单，用完即删。一个目录卡住只挡住它自己的任务
 	manifestLocks map[string]*dirLock
 }
@@ -34,6 +39,17 @@ type Spec struct {
 	GPUs      []int
 	Port      int
 	OutputDir string
+	// Strict 表示严格限卡：任务在只放行分到的卡的 systemd 服务里运行，GPUBuses 是这些卡的 PCI 总线号。
+	// 这时程序只看得到分到的卡，并从 0 编号，所以 CUDA_VISIBLE_DEVICES 写 0..k-1
+	Strict   bool
+	GPUBuses []string
+}
+
+// Started 是启动结果。Unit 是严格任务的 systemd 服务名，普通任务为空。
+type Started struct {
+	PID       int
+	StartTime uint64
+	Unit      string
 }
 
 // JobMarker 是任务进程的身份标记，值是 RunDir(id)，见 procfs.JobMarker。
@@ -64,7 +80,17 @@ func ReservedEnv(key string) bool {
 const runScript = `#!/usr/bin/env bash
 # 由 danlu 生成，请勿修改
 echo $$ > "$DANLU_RUN_DIR/pid.tmp" && mv -f "$DANLU_RUN_DIR/pid.tmp" "$DANLU_RUN_DIR/pid"
-finish() { echo "$1" > "$DANLU_RUN_DIR/exitcode.tmp" && mv -f "$DANLU_RUN_DIR/exitcode.tmp" "$DANLU_RUN_DIR/exitcode"; exit "$1"; }
+# 严格任务在自己的 systemd 服务里，cgroup 只装这一个任务：结束前记下它被 OOM 杀掉的进程数，
+# 写在退出码之前，danlu 看到退出码时这个文件已经在了
+oom_record() {
+  [ "${DANLU_STRICT-}" = 1 ] || return 0
+  local cg
+  cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+  [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/memory.events" ] || return 0
+  awk '$1 == "oom_kill" { print $2 }' "/sys/fs/cgroup$cg/memory.events" > "$DANLU_RUN_DIR/oom_kill.tmp" \
+    && mv -f "$DANLU_RUN_DIR/oom_kill.tmp" "$DANLU_RUN_DIR/oom_kill"
+}
+finish() { oom_record; echo "$1" > "$DANLU_RUN_DIR/exitcode.tmp" && mv -f "$DANLU_RUN_DIR/exitcode.tmp" "$DANLU_RUN_DIR/exitcode"; exit "$1"; }
 cd "$DANLU_WORKDIR" || { echo "[danlu] 无法进入工作目录: $DANLU_WORKDIR"; finish 1; }
 if [ -n "$DANLU_CONDA_ENV" ]; then
   if [ ! -f "$DANLU_CONDA_BASE/etc/profile.d/conda.sh" ]; then
@@ -72,13 +98,20 @@ if [ -n "$DANLU_CONDA_ENV" ]; then
   fi
   source "$DANLU_CONDA_BASE/etc/profile.d/conda.sh" && conda activate "$DANLU_CONDA_ENV" \
     || { echo "[danlu] conda activate 失败: $DANLU_CONDA_ENV"; finish 127; }
-  # conda 环境可以带自己的环境变量（conda env config vars、activate.d 脚本），不能让它改掉分给任务的卡
-  if [ "${CUDA_VISIBLE_DEVICES-未设置}" != "$DANLU_GPUS" ] || [ "${CUDA_DEVICE_ORDER-}" != PCI_BUS_ID ]; then
+  # conda 环境可以带自己的环境变量（conda env config vars、activate.d 脚本），不能让它改掉分给任务的卡。
+  # DANLU_CVD 是应注入的值：普通任务是物理卡号，严格任务是 0..k-1
+  if [ "${CUDA_VISIBLE_DEVICES-未设置}" != "$DANLU_CVD" ] || [ "${CUDA_DEVICE_ORDER-}" != PCI_BUS_ID ]; then
     echo "[danlu] conda 环境改动了选卡变量（CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-未设置}，CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER-未设置}），已恢复为分配的 GPU=[$DANLU_GPUS]"
-    export CUDA_VISIBLE_DEVICES="$DANLU_GPUS" CUDA_DEVICE_ORDER=PCI_BUS_ID
+    export CUDA_VISIBLE_DEVICES="$DANLU_CVD" CUDA_DEVICE_ORDER=PCI_BUS_ID
   fi
 fi
-echo "[danlu] 任务 #$DANLU_JOB_ID 开始于 $(date '+%F %T')  GPU=[$CUDA_VISIBLE_DEVICES]  端口=$PET_MASTER_PORT"
+if [ "${DANLU_STRICT-}" = 1 ] && [ -n "$DANLU_GPUS" ]; then
+  echo "[danlu] 任务 #$DANLU_JOB_ID 开始于 $(date '+%F %T')  GPU=[$DANLU_GPUS]（严格限卡，程序里的编号是 $CUDA_VISIBLE_DEVICES）  端口=$PET_MASTER_PORT"
+elif [ "${DANLU_STRICT-}" = 1 ]; then
+  echo "[danlu] 任务 #$DANLU_JOB_ID 开始于 $(date '+%F %T')  GPU=[]（严格限卡，看不到任何卡）  端口=$PET_MASTER_PORT"
+else
+  echo "[danlu] 任务 #$DANLU_JOB_ID 开始于 $(date '+%F %T')  GPU=[$CUDA_VISIBLE_DEVICES]  端口=$PET_MASTER_PORT"
+fi
 bash "$DANLU_RUN_DIR/cmd.sh"
 code=$?
 echo "[danlu] 任务结束于 $(date '+%F %T')，退出码 $code"
@@ -92,6 +125,7 @@ func (r *Runner) prepare(s Spec) (string, error) {
 	}
 	_ = os.Remove(filepath.Join(dir, "exitcode"))
 	_ = os.Remove(filepath.Join(dir, "pid"))
+	_ = os.Remove(filepath.Join(dir, "oom_kill"))
 	if err := os.WriteFile(filepath.Join(dir, "cmd.sh"), []byte(s.Cmd+"\n"), 0o600); err != nil {
 		return "", err
 	}
@@ -132,9 +166,20 @@ func (r *Runner) BuildEnv(base []string, s Spec) []string {
 		gpus[i] = strconv.Itoa(g)
 	}
 	id := strconv.FormatInt(s.JobID, 10)
-	set("CUDA_VISIBLE_DEVICES", strings.Join(gpus, ","))
-	// 包装脚本激活 conda 以后拿它核对 CUDA_VISIBLE_DEVICES 有没有被 conda 环境改掉
-	set("DANLU_GPUS", strings.Join(gpus, ","))
+	cvd := strings.Join(gpus, ",")
+	if s.Strict {
+		// 严格任务只看得到分到的卡，CUDA 和 NVML 都从 0 重新编号（2026-11-22 hsy 实测）
+		for i := range gpus {
+			gpus[i] = strconv.Itoa(i)
+		}
+		cvd = strings.Join(gpus, ",")
+		set("DANLU_STRICT", "1")
+	}
+	set("CUDA_VISIBLE_DEVICES", cvd)
+	// DANLU_GPUS 永远是物理卡号（面板和日志里的编号）；包装脚本激活 conda 以后拿 DANLU_CVD
+	// 核对 CUDA_VISIBLE_DEVICES 有没有被 conda 环境改掉
+	set("DANLU_GPUS", physicalGPUs(s.GPUs))
+	set("DANLU_CVD", cvd)
 	// 让 CUDA 的设备编号和 nvidia-smi 一致（CUDA 默认按算力排序，编号可能对不上）
 	set("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 	// torchrun 会读 PET_MASTER_PORT 作为 --master_port 的默认值，避免多个任务撞端口
@@ -175,6 +220,21 @@ func (r *Runner) LoadEnv(ctx context.Context, inheritBashrc bool) ([]string, err
 // ReadExitCode 读取包装脚本写下的退出码；进程被强杀时没有这个文件。
 func (r *Runner) ReadExitCode(id int64) (int, bool) {
 	return readInt(filepath.Join(r.RunDir(id), "exitcode"))
+}
+
+// JobOOMKills 读严格任务结束前记下的 OOM 杀进程数（只算这个任务的 cgroup）。
+// 普通任务没有这个文件，ok 为 false，调用方改用整个 danlu cgroup 的基线。
+func (r *Runner) JobOOMKills(id int64) (int64, bool) {
+	n, ok := readInt(filepath.Join(r.RunDir(id), "oom_kill"))
+	return int64(n), ok
+}
+
+func physicalGPUs(gpus []int) string {
+	parts := make([]string, len(gpus))
+	for i, g := range gpus {
+		parts[i] = strconv.Itoa(g)
+	}
+	return strings.Join(parts, ",")
 }
 
 // Launched 返回包装脚本留下的 pid，不要求进程仍然存活。

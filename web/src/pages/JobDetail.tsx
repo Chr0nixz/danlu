@@ -1,15 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Bell, BellOff, Check, ChevronLeft, Copy, GitCompareArrows, NotebookPen, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Bell, BellOff, ChevronLeft, Copy, GitCompareArrows, NotebookPen, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
+import { useGpus } from '../components/GpuGrid'
 import { CancelDialog } from '../components/JobRow'
 import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
 import { ProfileSummary } from '../components/ResourceProfile'
 import { StarButton, StarError, StarMenuItem } from '../components/StarButton'
 import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, Input, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
-import { ApiError, compactProgress, duration, fmtTime, isActive, jobDuration, now, sameCodeFailKinds, stripProgressTiming, type Job } from '@danlu/core'
+import { ApiError, compactProgress, duration, failReasonText, fmtTime, isActive, jobDuration, now, sameCodeFailKinds, stripProgressTiming, type Job } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
+import { useCopy } from '../lib/useCopy'
 
 type Tab = 'log' | 'info' | 'code'
 const tabs: Tab[] = ['log', 'info', 'code']
@@ -22,7 +25,7 @@ export function JobDetail() {
     onSuccess: (updated) => {
       qc.setQueryData(['job', updated.id], updated)
       void qc.invalidateQueries({ queryKey: ['jobs'] })
-      announce(updated.notify_done ? '已开启结束提醒' : '已关闭结束提醒')
+      announce(updated.notify_done ? t('job.notify_enabled') : t('job.notify_disabled'))
     },
     onError: (_error, { id }) => void qc.invalidateQueries({ queryKey: ['job', id] }),
   })
@@ -37,16 +40,16 @@ export function JobDetail() {
   })
   // 标签页放在地址里（?tab=code），commit 链接可以直接打开代码快照，刷新也不丢
   const [params, setParams] = useSearchParams()
-  const tab = tabs.find((t) => t === params.get('tab')) ?? 'log'
+  const tab = tabs.find((v) => v === params.get('tab')) ?? 'log'
   const offsetParam = params.get('offset')
   const parsedOffset = offsetParam === null ? undefined : Number(offsetParam)
   const logOffset = parsedOffset !== undefined && Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : undefined
-  const setTab = (t: Tab) =>
+  const setTab = (next: Tab) =>
     setParams(
       (p) => {
-        if (t === 'log') p.delete('tab')
+        if (next === 'log') p.delete('tab')
         else {
-          p.set('tab', t)
+          p.set('tab', next)
           p.delete('offset')
         }
         return p
@@ -85,13 +88,13 @@ export function JobDetail() {
   }
   if (q.error) {
     // 编号不存在或不是数字；安全入口失效也是 404，但那种要显示原文，告诉用户重新打开入口地址
-    const missing = q.error instanceof ApiError && (q.error.status === 400 || q.error.message === '任务不存在')
+    const missing = q.error instanceof ApiError && (q.error.status === 400 || q.error.code === 'job_not_found' || q.error.message === '任务不存在')
     return (
       <div className="space-y-4">
         <BackLink />
         {missing ? (
           <Card>
-            <Empty action={<Link to="/jobs" className={buttonClass('secondary', 'sm')}>回到任务列表</Link>}>任务 #{id} 不存在，可能输错了编号</Empty>
+            <Empty action={<Link to="/jobs" className={buttonClass('secondary', 'sm')}>{t('job.back_to_list')}</Link>}>{t('job.not_found', { id })}</Empty>
           </Card>
         ) : (
           <ErrorBox error={q.error} />
@@ -104,13 +107,13 @@ export function JobDetail() {
   const terminal = settings.data?.terminal_enabled === true
   // 每种状态只有一个主操作：在跑或排队的是取消，结束了的是重跑（失败的写明"改参数"）
   const canCancel = isActive(j) && !j.cancel_requested
-  const notifyLabel = j.notify_done ? '关闭结束时推送' : '开启结束时推送'
+  const notifyLabel = j.notify_done ? t('job.notify_disable') : t('job.notify_enable')
   const NotifyIcon = j.notify_done ? Bell : BellOff
   const toggleNotify = () => notifyToggle.mutate({ id: j.id, on: !j.notify_done })
   // 和代码无关的失败（服务器重启、被外部终止等）重跑页默认用原任务的快照，按钮和失败说明里的建议说同一件事
   const sameCode = j.status === 'failed' && sameCodeFailKinds.includes(j.fail_kind ?? '')
-  const rerunLabel = sameCode ? '原样重跑' : j.status === 'failed' ? '改参数重跑' : '重跑'
-  const rerunTitle = sameCode ? '默认用原任务的代码快照再跑一次，提交前可以改参数' : '用同样的设置再跑一次，可以先改参数'
+  const rerunLabel = sameCode ? t('job.rerun_same') : j.status === 'failed' ? t('job.rerun_edit') : t('job.rerun')
+  const rerunTitle = sameCode ? t('job.rerun_same_title') : t('job.rerun_title')
   // 次要操作用幽灵按钮：一排里只有实验记录链接和主操作带边框，一眼分得出主次
   const minor = buttonClass('ghost', 'sm')
   const tracker = (cls: string) =>
@@ -124,7 +127,7 @@ export function JobDetail() {
     canCancel ? (
       <Button size="sm" variant="danger" className={cls} onClick={() => setConfirming(true)}>
         <X aria-hidden />
-        取消任务
+        {t('job.cancel')}
       </Button>
     ) : (
       <Link to={`/new?from=${j.id}`} className={cx(buttonClass(isActive(j) ? 'secondary' : 'primary', 'sm'), cls)} title={rerunTitle}>
@@ -154,15 +157,15 @@ export function JobDetail() {
                 <span className="min-w-0 break-all">
                   {j.name}
                   <span className="ml-2 font-normal whitespace-nowrap text-fg-3">#{j.id}</span>
-                  {j.starred && <Star role="img" aria-label="已标星" className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
+                  {j.starred && <Star role="img" aria-label={t('job.starred')} className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
                 </span>
               </h1>
               <button
                 ref={renameButton}
                 type="button"
                 className={cx(buttonClass('ghost', 'icon-sm'), '-mt-0.5 text-fg-3 max-sm:hidden')}
-                aria-label="修改任务名"
-                title="修改任务名"
+                aria-label={t('job.rename')}
+                title={t('job.rename')}
                 onClick={() => setRenaming(true)}
               >
                 <Pencil aria-hidden />
@@ -173,24 +176,24 @@ export function JobDetail() {
             <div className="hidden flex-wrap justify-end gap-1 sm:flex">
               <StarButton job={j} label />
               {isActive(j) && (
-                <Button size="icon-sm" variant="ghost" loading={notifyToggle.isPending} aria-label="结束时推送" aria-pressed={!!j.notify_done}
+                <Button size="icon-sm" variant="ghost" loading={notifyToggle.isPending} aria-label={t('job.notify_aria')} aria-pressed={!!j.notify_done}
                   title={notifyLabel} onClick={toggleNotify}>
                   <NotifyIcon aria-hidden />
                 </Button>
               )}
               {terminal && (
-                <Link to={`/terminal?job_id=${j.id}`} className={minor} title="在这个任务的目录和 conda 环境中打开终端">
+                <Link to={`/terminal?job_id=${j.id}`} className={minor} title={t('job.terminal_title')}>
                   <TerminalIcon aria-hidden />
-                  终端
+                  {t('job.terminal')}
                 </Link>
               )}
               <Link to={`/compare?a=${j.id}`} className={minor}>
                 <GitCompareArrows aria-hidden />
-                和…对比
+                {t('job.compare_with')}
               </Link>
-              <Link to={`/new?copy=${j.id}`} className={minor} title="复制任务设置，提交为独立的新任务">
+              <Link to={`/new?copy=${j.id}`} className={minor} title={t('job.copy_title')}>
                 <Copy aria-hidden />
-                复制任务
+                {t('job.copy_job')}
               </Link>
               {canCancel && (
                 <Link to={`/new?from=${j.id}`} className={minor} title={rerunTitle}>
@@ -206,13 +209,13 @@ export function JobDetail() {
             <div className="flex items-center gap-2 sm:hidden">
               {primary('px-3.5 text-sm')}
               {tracker(cx(buttonClass('secondary', 'sm'), 'px-3.5 text-sm'))}
-              <Menu label="更多操作" className="ml-auto">
+              <Menu label={t('job.more_actions')} className="ml-auto">
                 <StarMenuItem job={j} />
                 {/* 没写过备注时，手机上"写备注"收在这里，不占日志上方的一行 */}
                 {!j.memo && (
                   <button type="button" role="menuitem" className={menuItemClass} onClick={() => setMemoEditing(true)}>
                     <NotebookPen aria-hidden />
-                    写备注
+                    {t('job.memo_write')}
                   </button>
                 )}
                 {isActive(j) && (
@@ -223,7 +226,7 @@ export function JobDetail() {
                 )}
                 <button type="button" role="menuitem" className={menuItemClass} onClick={() => setRenaming(true)}>
                   <Pencil aria-hidden />
-                  改名
+                  {t('job.rename_short')}
                 </button>
                 {canCancel && (
                   <Link role="menuitem" to={`/new?from=${j.id}`} className={menuItemClass}>
@@ -233,17 +236,17 @@ export function JobDetail() {
                 )}
                 <Link role="menuitem" to={`/new?copy=${j.id}`} className={menuItemClass}>
                   <Copy aria-hidden />
-                  复制任务
+                  {t('job.copy_job')}
                 </Link>
                 {terminal && (
                   <Link role="menuitem" to={`/terminal?job_id=${j.id}`} className={menuItemClass}>
                     <TerminalIcon aria-hidden />
-                    终端
+                    {t('job.terminal')}
                   </Link>
                 )}
                 <Link role="menuitem" to={`/compare?a=${j.id}`} className={menuItemClass}>
                   <GitCompareArrows aria-hidden />
-                  和…对比
+                  {t('job.compare_with')}
                 </Link>
               </Menu>
             </div>
@@ -258,24 +261,25 @@ export function JobDetail() {
 
       {j.status === 'failed' && <FailBox j={j} onShowLog={showLog} />}
       {j.status !== 'failed' && j.fail_reason && <Alert>{j.fail_reason}</Alert>}
-      {j.notes && <Alert>运行说明：{j.notes}</Alert>}
+      {j.notes && <Alert>{t('job.notes_alert', { notes: j.notes })}</Alert>}
       {j.status === 'running' && j.silent_since && (
         // 操作写成一行文字链接：不撑高提示框（日志要留在首屏），点击区各自向上下撑到 44px。
         // 取消任务用失败红并单独靠右，和两个只是去看一眼的操作分开，这时候最容易手抖
         <Alert tone="warn">
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-            <span className="max-sm:basis-full">已 {duration(now() - j.silent_since)}没有新输出</span>
-            <button type="button" className={cx(alertAction, alertActionTone)} onClick={() => showLog()}>看日志末尾</button>
-            {terminal && <Link to={`/terminal?job_id=${j.id}`} className={cx(alertAction, alertActionTone)}>打开终端</Link>}
+            <span className="max-sm:basis-full">{t('job.silent_for', { duration: duration(now() - j.silent_since) })}</span>
+            <button type="button" className={cx(alertAction, alertActionTone)} onClick={() => showLog()}>{t('job.show_log_tail')}</button>
+            {terminal && <Link to={`/terminal?job_id=${j.id}`} className={cx(alertAction, alertActionTone)}>{t('job.open_terminal')}</Link>}
             {canCancel && (
               <button type="button" className={cx(alertAction, 'ml-auto text-fail decoration-fail/40 hover:decoration-fail')} onClick={() => setConfirming(true)}>
-                取消任务
+                {t('job.cancel')}
               </button>
             )}
           </div>
         </Alert>
       )}
-      {j.cancel_requested && j.status === 'running' && <Alert tone="warn">已发送结束信号，正在等进程退出；超时会强制结束。</Alert>}
+      {j.status === 'running' && <StrayAlert j={j} />}
+      {j.cancel_requested && j.status === 'running' && <Alert tone="warn">{t('job.cancel_sent')}</Alert>}
 
       <div ref={panel} className="scroll-mt-16">
         <Tabs
@@ -283,16 +287,16 @@ export function JobDetail() {
           value={tab}
           onChange={setTab}
           tabs={[
-            { value: 'log', label: '日志' },
-            { value: 'info', label: '详情' },
-            { value: 'code', label: '代码' },
+            { value: 'log', label: t('job.tab_log') },
+            { value: 'info', label: t('job.tab_info') },
+            { value: 'code', label: t('job.tab_code') },
           ]}
         />
         <div className="pt-3 sm:pt-4" {...tabPanelProps('job', tab)}>
           {tab === 'log' &&
             (j.pruned_at ? <PrunedFiles job={j} /> : j.status === 'queued' ? (
               <Card className="px-4 py-12 text-center text-ui text-fg-3">
-                任务还在排队{j.queue_pos ? `（第 ${j.queue_pos} 位）` : ''}，开始运行后这里会显示日志
+                {j.queue_pos ? t('job.queued_log_hint_pos', { pos: j.queue_pos }) : t('job.queued_log_hint')}
                 {j.wait_reason && <p className="mt-2 px-2 break-words text-fg-2">{j.wait_reason}</p>}
               </Card>
             ) : (
@@ -311,11 +315,39 @@ export function JobDetail() {
 const alertAction = 'relative shrink-0 font-medium underline underline-offset-2 before:absolute before:-inset-x-2 before:-inset-y-3'
 const alertActionTone = 'text-fg decoration-fg/30 hover:decoration-fg'
 
+/**
+ * 任务的进程跑到了没分给它的卡上（预约的卡、别的任务的卡）。丹炉只能用 CUDA_VISIBLE_DEVICES 告诉程序用哪些卡，
+ * 拦不住程序自己选卡，所以把能分清原因的事实摆出来：进程启动时的选卡变量被改写了，还是图形渲染不看这个变量
+ */
+function StrayAlert({ j }: { j: Job }) {
+  const { data } = useGpus()
+  const assigned = j.gpus_assigned ?? []
+  const cards = (data?.gpus ?? []).filter((g) => !assigned.includes(g.index) && g.procs.some((p) => p.job_id === j.id))
+  if (!cards.length) return null
+  const procs = cards.flatMap((g) => g.procs.filter((p) => p.job_id === j.id))
+  const compute = procs.filter((p) => !p.graphics)
+  const want = assigned.join(',')
+  const changed = compute.find((p) => p.cuda_visible !== undefined && p.cuda_visible !== want)?.cuda_visible
+  const reserved = cards.filter((g) => g.reservation).map((g) => g.index)
+  const list = (xs: number[]) => xs.join(', ')
+  const parts = [
+    assigned.length
+      ? t('job.stray', { gpus: list(cards.map((g) => g.index)), assigned: list(assigned) })
+      : t('job.stray_none', { gpus: list(cards.map((g) => g.index)) }),
+  ]
+  if (reserved.length) parts.push(t('job.stray_reserved', { gpus: list(reserved) }))
+  if (changed === '') parts.push(t('job.stray_cvd_unset'))
+  else if (changed !== undefined) parts.push(t('job.stray_cvd', { cvd: changed }))
+  else if (!compute.length) parts.push(t('job.stray_graphics'))
+  else parts.push(t('job.stray_runtime'))
+  return <Alert tone="warn">{parts.join(t('job.stray_sep'))}</Alert>
+}
+
 function PrunedFiles({ job }: { job: Job }) {
   return (
     <Card className="space-y-2 px-4 py-8 text-center text-ui">
-      <p className="font-medium">日志和代码快照已按保留策略清理</p>
-      <p className="text-fg-3">清理于 {fmtTime(job.pruned_at)}。任务记录、环境信息和训练产物仍保留，可在“详情”中查看。</p>
+      <p className="font-medium">{t('job.pruned_title')}</p>
+      <p className="text-fg-3">{t('job.pruned_detail', { time: fmtTime(job.pruned_at) })}</p>
     </Card>
   )
 }
@@ -340,7 +372,7 @@ function JobMemo({ job, editing, onEditing }: { job: Job; editing: boolean; onEd
       void qc.invalidateQueries({ queryKey: ['jobs'] })
       void qc.invalidateQueries({ queryKey: ['compare'] })
       void qc.invalidateQueries({ queryKey: ['trace'] })
-      announce('备注已保存')
+      announce(t('job.memo_saved'))
       close()
     },
   })
@@ -355,11 +387,11 @@ function JobMemo({ job, editing, onEditing }: { job: Job; editing: boolean; onEd
   }
   if (!editing) {
     return (
-      <button ref={button} type="button" aria-label={job.memo ? '编辑备注' : '写备注'} title={job.memo || undefined}
+      <button ref={button} type="button" aria-label={job.memo ? t('job.memo_edit') : t('job.memo_write')} title={job.memo || undefined}
         className={cx('inline-flex max-w-full items-center gap-2 rounded px-1 text-left text-ui text-fg-3 hover:bg-hover hover:text-fg max-sm:min-h-11', !job.memo && 'max-sm:hidden')}
         onClick={() => onEditing(true)}>
         <Pencil className="size-3.5 shrink-0" aria-hidden />
-        <span className="line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{job.memo || '写备注…'}</span>
+        <span className="line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{job.memo || t('job.memo_write_ellipsis')}</span>
       </button>
     )
   }
@@ -370,7 +402,7 @@ function JobMemo({ job, editing, onEditing }: { job: Job; editing: boolean; onEd
   return (
     <form onSubmit={submit} className="space-y-1">
       <div className="flex items-start gap-2">
-        <Textarea aria-label="任务备注" autoFocus rows={2} value={draft}
+        <Textarea aria-label={t('job.memo_aria')} autoFocus rows={2} value={draft}
           className="min-w-0 flex-1 max-sm:text-base" readOnly={save.isPending}
           aria-invalid={tooLong || undefined} aria-describedby={tooLong ? errorId : undefined}
           onChange={(e) => setDraft(e.target.value)}
@@ -385,10 +417,10 @@ function JobMemo({ job, editing, onEditing }: { job: Job; editing: boolean; onEd
               e.currentTarget.form?.requestSubmit()
             }
           }} />
-        <Button type="submit" variant="primary" size="sm" loading={save.isPending} disabled={tooLong}>保存</Button>
-        <Button size="sm" disabled={save.isPending} onClick={close}>取消</Button>
+        <Button type="submit" variant="primary" size="sm" loading={save.isPending} disabled={tooLong}>{t('common.save')}</Button>
+        <Button size="sm" disabled={save.isPending} onClick={close}>{t('common.cancel')}</Button>
       </div>
-      {tooLong && <FieldError id={errorId}>备注最多 500 字</FieldError>}
+      {tooLong && <FieldError id={errorId}>{t('error.job_memo_too_long', { max: 500 })}</FieldError>}
       <ErrorBox error={save.error} />
     </form>
   )
@@ -404,7 +436,7 @@ function RenameForm({ job: j, onDone }: { job: Job; onDone: () => void }) {
     onSuccess: (updated) => {
       qc.setQueryData(['job', j.id], updated)
       void qc.invalidateQueries({ queryKey: ['jobs'] })
-      announce(`任务 #${j.id} 已改名为 ${updated.name}`)
+      announce(t('job.renamed', { id: j.id, name: updated.name }))
       onDone()
     },
   })
@@ -419,7 +451,7 @@ function RenameForm({ job: j, onDone }: { job: Job; onDone: () => void }) {
     <form onSubmit={submit} className="space-y-2">
       <div className="flex items-center gap-2">
         <Input
-          aria-label={`任务 #${j.id} 的名字`}
+          aria-label={t('job.rename_aria', { id: j.id })}
           aria-describedby={launched ? hintId : undefined}
           aria-invalid={rename.isError || undefined}
           value={name}
@@ -436,15 +468,15 @@ function RenameForm({ job: j, onDone }: { job: Job; onDone: () => void }) {
           className="flex-1"
         />
         <Button type="submit" variant="primary" size="sm" loading={rename.isPending} className="max-sm:px-3.5 max-sm:text-sm">
-          保存
+          {t('common.save')}
         </Button>
         <Button size="sm" onClick={onDone} className="max-sm:px-3.5 max-sm:text-sm">
-          取消
+          {t('common.cancel')}
         </Button>
       </div>
       {launched && (
         <p id={hintId} className="text-xs text-fg-3">
-          只改任务记录里的名字；输出目录和 DANLU_JOB_NAME 仍是启动时的名字。
+          {t('job.rename_hint')}
         </p>
       )}
       <ErrorBox error={rename.error} />
@@ -457,21 +489,25 @@ function BackLink() {
     // 点击区向四周撑到 44px 高，不改变排版
     <Link to="/jobs" className="relative inline-flex items-center gap-0.5 text-ui text-fg-3 before:absolute before:-inset-x-2 before:-inset-y-3 hover:text-fg">
       <ChevronLeft className="size-4" aria-hidden />
-      任务
+      {t('job.back')}
     </Link>
   )
 }
 
-/** 按失败分类给的下一步：只是建议，不替用户断定原因；退出码这类没法归类的不给 */
-const failHint: Partial<Record<string, string>> = {
-  cuda_oom: '显存不够：减小 batch size，或多申请一张卡再重跑。',
-  host_oom: '主机内存不够：减少 DataLoader 的 num_workers，或等别的任务结束再重跑。',
-  nccl: '多卡通信出错：可以先点"原样重跑"；反复出现时加环境变量 NCCL_DEBUG=INFO 查看原因。',
-  exception: '代码报错：按报错行改好代码，再重跑。',
-  reboot: '代码没问题的话，点"原样重跑"：默认用原任务的快照。',
-  killed: '进程是被丹炉以外的程序结束的。确认原因后，可以点"原样重跑"：默认用原任务的快照。',
-  signal: '不是你发的信号时，先看日志末尾找原因；要再跑一次，"原样重跑"默认用原任务的快照。',
-  start: '任务没能启动：检查工作目录、conda 环境和 ~/.bashrc，再重跑。',
+/** 按失败分类给的下一步：只是建议，不替用户断定原因；退出码这类没法归类的不给。
+ *  写成函数在渲染时取词：模块级常量字符串表会把语言冻结在加载那一刻 */
+function failHint(kind: string): string | undefined {
+  switch (kind) {
+    case 'cuda_oom': return t('job.fail_hint_cuda_oom')
+    case 'host_oom': return t('job.fail_hint_host_oom')
+    case 'nccl': return t('job.fail_hint_nccl')
+    case 'exception': return t('job.fail_hint_exception')
+    case 'reboot': return t('job.fail_hint_reboot')
+    case 'killed': return t('job.fail_hint_killed')
+    case 'signal': return t('job.fail_hint_signal')
+    case 'start': return t('job.fail_hint_start')
+    default: return undefined
+  }
 }
 
 /**
@@ -484,8 +520,11 @@ const failHint: Partial<Record<string, string>> = {
 function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => void }) {
   // 没有报错行时用最后一行输出；它是 tqdm 进度条的话，已用时间和速率对失败的任务没有用，去掉
   const line = j.error_line || (j.last_line && stripProgressTiming(compactProgress(j.last_line).text))
-  const extra = j.fail_reason && !/^退出码 -?\d+$/.test(j.fail_reason) ? j.fail_reason : ''
-  const hint = failHint[j.fail_kind ?? '']
+  // 退出码已在状态栏里，这里只写退出码以外的原因；有机器码就按当前语言合成，旧记录回退原文
+  const extra = j.fail_kind
+    ? (j.fail_kind !== 'exit' ? failReasonText(j) : '')
+    : (j.fail_reason && !/^退出码 -?\d+$/.test(j.fail_reason) ? j.fail_reason : '')
+  const hint = failHint(j.fail_kind ?? '')
   const reasonFirst = !!extra && !j.error_line && sameCodeFailKinds.includes(j.fail_kind ?? '')
   const mono = 'font-mono text-[12.5px] leading-relaxed [overflow-wrap:anywhere]'
   return (
@@ -495,19 +534,19 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
           <div className="font-medium">{extra}</div>
           {line && (
             <div className="mt-0.5">
-              <span className="text-xs">中断前的最后一行输出：</span>
+              <span className="text-xs">{t('job.fail_last_line')}</span>
               <span className={mono}>{line}</span>
             </div>
           )}
         </>
       ) : line ? (
         <>
-          {!j.error_line && <div className="text-xs">没有找到报错行，最后一行输出是：</div>}
+          {!j.error_line && <div className="text-xs">{t('job.fail_no_error_line')}</div>}
           <div className={mono}>{line}</div>
           {extra && <div className="mt-0.5">{extra}</div>}
         </>
       ) : (
-        <div>{j.fail_reason || '任务失败，没有留下输出'}</div>
+        <div>{j.fail_reason || t('job.fail_no_output')}</div>
       )}
       {hint && <div className="mt-0.5 text-fg">{hint}</div>}
       {j.started_at && !j.pruned_at && (
@@ -516,7 +555,7 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
           onClick={() => onShowLog(j.traceback_offset)}
           className="relative mt-1 inline-flex items-center gap-1 text-xs font-medium underline decoration-fail/40 underline-offset-2 before:absolute before:-inset-x-2 before:-inset-y-3.5 hover:decoration-fail"
         >
-          {j.traceback_offset !== undefined ? '跳到报错' : '看日志末尾'}
+          {j.traceback_offset !== undefined ? t('job.jump_to_error') : t('job.show_log_tail')}
           <ArrowDown className="size-3.5" aria-hidden />
         </button>
       )}
@@ -546,36 +585,49 @@ function MetaStrip({ j }: { j: Job }) {
       <Meta
         label={
           <>
-            状态
-            {exited && <span className="sm:hidden"> · 退出码 {j.exit_code}</span>}
+            {t('job.meta_status')}
+            {exited && <span className="sm:hidden"> · {t('fail.exit_code', { code: j.exit_code! })}</span>}
           </>
         }
         live
         wrap
       >
         <StatusLabel job={j} />
-        {exited && <span className="text-fg-3 max-sm:hidden">退出码 {j.exit_code}</span>}
+        {exited && <span className="text-fg-3 max-sm:hidden">{t('fail.exit_code', { code: j.exit_code! })}</span>}
       </Meta>
-      <Meta label="GPU" wrap>
-        {gpus.length ? <GpuChips ids={gpus} className="flex-wrap" /> : <span className="text-fg-2">{j.gpus_req ? `${j.gpus_req} 张，未分配` : '不用 GPU'}</span>}
+      <Meta
+        label={
+          <>
+            GPU
+            {j.unit && (
+              <span title={t('job.strict_title', { unit: j.unit })}>
+                {' · '}
+                {t('job.strict_short')}
+              </span>
+            )}
+          </>
+        }
+        wrap
+      >
+        {gpus.length ? <GpuChips ids={gpus} className="flex-wrap" /> : <span className="text-fg-2">{j.gpus_req ? t('job.gpu_unassigned', { n: j.gpus_req }) : t('gpu.none')}</span>}
       </Meta>
-      <Meta label="conda 环境">
-        <span className="truncate">{j.conda_env || <span className="text-fg-3">不使用</span>}</span>
+      <Meta label={t('job.meta_conda')}>
+        <span className="truncate">{j.conda_env || <span className="text-fg-3">{t('job.conda_none')}</span>}</span>
       </Meta>
-      <Meta label={j.status === 'running' ? '已运行' : j.status === 'queued' ? '已等待' : '耗时'}>
+      <Meta label={j.status === 'running' ? t('job.meta_elapsed') : j.status === 'queued' ? t('job.meta_waited') : t('job.meta_duration')}>
         {j.status === 'queued' ? duration(now() - j.created_at) : d !== null ? duration(d) : <span className="text-fg-3">-</span>}
       </Meta>
       <Meta
         label={
           // 手机上一列只有 100px 上下，写全了会折成两行，把日志框往下挤；写短，琥珀字仍然说明圆点的意思
           <>
-            <span className="sm:hidden">代码</span>
-            <span className="max-sm:hidden">代码版本</span>
+            <span className="sm:hidden">{t('job.meta_code_short')}</span>
+            <span className="max-sm:hidden">{t('job.meta_code')}</span>
             {j.git_dirty && (
               <span className="text-warn">
                 {' · '}
-                <span className="sm:hidden">有改动</span>
-                <span className="max-sm:hidden">有未提交改动</span>
+                <span className="sm:hidden">{t('job.dirty_short')}</span>
+                <span className="max-sm:hidden">{t('job.dirty')}</span>
               </span>
             )}
           </>
@@ -587,10 +639,10 @@ function MetaStrip({ j }: { j: Job }) {
             {j.git_branch && <span className="truncate text-fg-3">{j.git_branch}</span>}
           </>
         ) : (
-          <span className="truncate text-fg-3">{j.snapshot_ok ? '非 git，已存快照' : j.status === 'queued' ? '启动时保存' : '无快照'}</span>
+          <span className="truncate text-fg-3">{j.snapshot_ok ? t('job.snapshot_non_git') : j.status === 'queued' ? t('job.snapshot_at_start') : t('job.snapshot_none')}</span>
         )}
       </Meta>
-      <Meta label={j.ended_at ? '结束于' : j.started_at ? '开始于' : '提交于'}>
+      <Meta label={j.ended_at ? t('job.meta_ended') : j.started_at ? t('job.meta_started') : t('job.meta_submitted')}>
         <span className="truncate">{fmtTime(j.ended_at ?? j.started_at ?? j.created_at).slice(5, 16)}</span>
       </Meta>
     </Card>
@@ -606,40 +658,6 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-/**
- * 复制到剪贴板，结果如实反馈：浏览器只在 HTTPS（或本机地址）下开放剪贴板，tls = off 时用 IP 打开面板就复制不了；
- * 开放了也可能被拒绝（例如页面没有焦点）。失败时不能照样显示对勾。结果也读给读屏听。
- */
-function useCopy(text: string) {
-  const [state, setState] = useState<'idle' | 'ok' | 'fail'>('idle')
-  const [why, setWhy] = useState('')
-  const timer = useRef<number>(undefined)
-  const copy = async () => {
-    window.clearTimeout(timer.current)
-    if (!navigator.clipboard) {
-      setWhy('浏览器只在 HTTPS 下允许复制')
-      setState('fail')
-    } else {
-      try {
-        await navigator.clipboard.writeText(text)
-        setState('ok')
-      } catch {
-        setWhy('浏览器拒绝了复制')
-        setState('fail')
-      }
-    }
-    timer.current = window.setTimeout(() => setState('idle'), 3000)
-  }
-  const icon = state === 'ok' ? <Check className="size-4" aria-hidden /> : state === 'fail' ? <X className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />
-  const status = (
-    <span role="status" className="sr-only">
-      {state === 'ok' ? '已复制' : state === 'fail' ? `复制失败，${why}` : ''}
-    </span>
-  )
-  const title = state === 'fail' ? `复制失败：${why}，请手动选中` : undefined
-  return { state, copy, icon, status, title }
-}
-
 function CopyBlock({ text }: { text: string }) {
   const c = useCopy(text)
   return (
@@ -649,8 +667,8 @@ function CopyBlock({ text }: { text: string }) {
         type="button"
         className={cx('absolute right-1.5 top-1.5 grid size-7 place-items-center rounded hover:bg-white/10', c.state === 'fail' ? 'text-[#ff7b72]' : 'text-[#8f8f8f] hover:text-white')}
         onClick={c.copy}
-        aria-label="复制命令"
-        title={c.title ?? '复制'}
+        aria-label={t('job.copy_cmd')}
+        title={c.title ?? t('common.copy')}
       >
         {c.icon}
       </button>
@@ -668,8 +686,8 @@ function CopyValue({ text }: { text: string }) {
         type="button"
         className={cx('grid size-7 shrink-0 place-items-center rounded hover:bg-hover', c.state === 'fail' ? 'text-fail' : 'text-fg-3 hover:text-fg')}
         onClick={c.copy}
-        aria-label="复制输出目录"
-        title={c.title ?? '复制输出目录'}
+        aria-label={t('job.copy_output_dir')}
+        title={c.title ?? t('job.copy_output_dir')}
       >
         {c.icon}
       </button>
@@ -684,34 +702,34 @@ function Overview({ j }: { j: Job }) {
   return (
     <Card>
       <dl className="divide-y divide-line">
-        <Row label="命令">
+        <Row label={t('job.row_cmd')}>
           <CopyBlock text={j.cmd} />
         </Row>
-        <Row label="工作目录">
+        <Row label={t('job.row_workdir')}>
           <span className="font-mono text-[12.5px]">{j.workdir}</span>
         </Row>
         {j.started_at && (
-          <Row label="环境包">
+          <Row label={t('job.row_env_package')}>
             {j.recipe?.env_hash ? (
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="font-mono text-xs" title={j.recipe.env_hash}>{j.recipe.env_hash.slice(0, 12)}</span>
-                <a href={`/api/jobs/${j.id}/env`} target="_blank" rel="noreferrer" className={link}>查看包列表</a>
+                <a href={`/api/jobs/${j.id}/env`} target="_blank" rel="noreferrer" className={link}>{t('job.env_view_packages')}</a>
               </div>
             ) : j.recipe?.pending ? (
-              <span className="text-fg-3">正在记录</span>
+              <span className="text-fg-3">{t('job.env_recording')}</span>
             ) : j.recipe?.env_error ? (
-              <span className="text-warn">记录失败：{j.recipe.env_error}</span>
+              <span className="text-warn">{t('job.env_record_failed', { error: j.recipe.env_error })}</span>
             ) : (
-              <span className="text-fg-3">没有记录</span>
+              <span className="text-fg-3">{t('job.env_none')}</span>
             )}
           </Row>
         )}
         {j.recipe?.machine && (
-          <Row label="运行环境">
+          <Row label={t('job.row_machine')}>
             <div className="space-y-1">
               <div>
-                {j.recipe.machine.hostname || '主机信息未记录'}
-                {j.recipe.machine.driver_version && <> · 驱动 {j.recipe.machine.driver_version}</>}
+                {j.recipe.machine.hostname || t('job.machine_unknown')}
+                {j.recipe.machine.driver_version && <> · {t('job.machine_driver', { version: j.recipe.machine.driver_version })}</>}
                 {j.recipe.machine.cuda_version && <> · CUDA {j.recipe.machine.cuda_version}</>}
               </div>
               {j.recipe.machine.gpus?.map((gpu) => (
@@ -724,22 +742,24 @@ function Overview({ j }: { j: Job }) {
           </Row>
         )}
         {j.output_dir && (
-          <Row label="输出目录">
+          <Row label={t('job.row_output_dir')}>
             <CopyValue text={j.output_dir} />
           </Row>
         )}
         <Row label="GPU">
-          申请 {j.gpus_pinned.length ? `指定卡 ${j.gpus_pinned.join(', ')}` : `${j.gpus_req} 张`}
-          {j.gpus_assigned.length > 0 && <>，分到 GPU {j.gpus_assigned.join(', ')}</>}
+          {j.gpus_pinned.length ? t('job.gpu_req_pinned', { list: j.gpus_pinned.join(', ') }) : t('job.gpu_req_count', { n: j.gpus_req })}
+          {j.gpus_assigned.length > 0 && t('job.gpu_assigned_suffix', { list: j.gpus_assigned.join(', ') })}
+          {j.unit && j.gpus_assigned.length > 0 && t('job.gpu_strict_suffix', { list: j.gpus_assigned.map((_, i) => i).join(', ') })}
+          {j.unit && <div className="mt-0.5 font-mono text-xs text-fg-3">{j.unit}</div>}
         </Row>
-        <Row label="资源"><ProfileSummary job={j} showHint /></Row>
+        <Row label={t('job.row_resources')}><ProfileSummary job={j} showHint /></Row>
         {j.master_port > 0 && (
-          <Row label="端口">
-            {j.master_port} <span className="text-fg-3">（已注入 PET_MASTER_PORT）</span>
+          <Row label={t('job.row_port')}>
+            {j.master_port} <span className="text-fg-3">{t('job.port_injected')}</span>
           </Row>
         )}
         {env.length > 0 && (
-          <Row label="环境变量">
+          <Row label={t('job.row_env')}>
             <div className="font-mono text-[12.5px] leading-relaxed">
               {env.map(([k, v]) => (
                 <div key={k}>
@@ -750,49 +770,49 @@ function Overview({ j }: { j: Job }) {
             </div>
           </Row>
         )}
-        {j.inherit_bashrc && <Row label="Bash 环境">启动时加载服务器 ~/.bashrc</Row>}
-        <Row label="代码版本">
+        {j.inherit_bashrc && <Row label={t('job.row_bash')}>{t('job.bash_hint')}</Row>}
+        <Row label={t('job.meta_code')}>
           {j.git_commit ? (
             <span className="font-mono text-[12.5px]">
               {j.git_branch && `${j.git_branch} @ `}
               {j.git_commit.slice(0, 12)}
-              {j.git_dirty && <span className="ml-2 font-sans text-warn">有未提交的改动，已保存在快照里</span>}
+              {j.git_dirty && <span className="ml-2 font-sans text-warn">{t('job.dirty_saved')}</span>}
             </span>
           ) : j.snapshot_ok ? (
-            '不是 git 仓库，代码已保存在快照里'
+            t('job.not_git_saved')
           ) : (
-            j.snapshot_note || '启动时保存'
+            j.snapshot_note || t('job.snapshot_at_start')
           )}
         </Row>
         {j.tracker_url && (
-          <Row label="实验记录">
+          <Row label={t('job.row_tracker')}>
             <a href={j.tracker_url} target="_blank" rel="noreferrer" className={link}>
               {j.tracker_url}
             </a>
           </Row>
         )}
         {j.rerun_of && (
-          <Row label="重跑自">
+          <Row label={t('job.row_rerun_of')}>
             <Link to={`/jobs/${j.rerun_of}`} className={link}>
-              任务 #{j.rerun_of}
+              {t('job.job_link', { id: j.rerun_of })}
             </Link>
           </Row>
         )}
         {j.code_from && (
-          <Row label="代码来源">
-            <Link to={`/jobs/${j.code_from}?tab=code`} className={link}>任务 #{j.code_from} 的快照</Link>
+          <Row label={t('job.row_code_from')}>
+            <Link to={`/jobs/${j.code_from}?tab=code`} className={link}>{t('job.code_from_link', { id: j.code_from })}</Link>
             {j.snapshot_ok && j.snapshot_note && (
               <details className="mt-1 text-fg-2">
-                <summary className="cursor-pointer text-ui">查看使用现有文件的情况</summary>
+                <summary className="cursor-pointer text-ui">{t('job.snapshot_note_toggle')}</summary>
                 <p className="mt-1 text-xs [overflow-wrap:anywhere]">{j.snapshot_note}</p>
               </details>
             )}
           </Row>
         )}
-        <Row label="提交时间">{fmtTime(j.created_at)}</Row>
-        <Row label="开始时间">{fmtTime(j.started_at)}</Row>
-        <Row label="结束时间">{fmtTime(j.ended_at)}</Row>
-        {j.pid > 0 && <Row label="进程">pid {j.pid}</Row>}
+        <Row label={t('job.row_created')}>{fmtTime(j.created_at)}</Row>
+        <Row label={t('job.row_started')}>{fmtTime(j.started_at)}</Row>
+        <Row label={t('job.row_ended')}>{fmtTime(j.ended_at)}</Row>
+        {j.pid > 0 && <Row label={t('job.row_pid')}>pid {j.pid}</Row>}
       </dl>
     </Card>
   )

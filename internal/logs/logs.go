@@ -156,7 +156,17 @@ type FailureInput struct {
 type Failure struct {
 	Kind   string
 	Reason string
+	// Detail 是机器码（host_oom 三态、信号名等），前端和推送据此合成本地化文案；
+	// 空串表示没有细分，显示时回退 Reason 原文。
+	Detail string
 }
+
+// 失败细分码：随 fail_detail 落库，也进结束事件。
+const (
+	DetailOOMWorker    = "worker"    // 运行期间本机 OOM kill 杀了 dataloader worker
+	DetailOOMConfirmed = "confirmed" // oom_kill 计数增加且退出码吻合
+	DetailOOMGuess137  = "guess137"  // 读不到计数，只能凭退出码 137 推测
+)
 
 // 主机内存相关原因文字；推送按失败类别生成文案，不转发其他原因文字。
 const (
@@ -174,12 +184,12 @@ func ClassifyFailure(in FailureInput) Failure {
 	case in.Reboot && in.ExitCode == nil:
 		return Failure{Kind: "reboot", Reason: "服务器重启，任务中断"}
 	case in.HostOOM && dataLoaderWorkerKilled(in.LogTail):
-		return Failure{Kind: "host_oom", Reason: ReasonWorkerHostOOM}
+		return Failure{Kind: "host_oom", Reason: ReasonWorkerHostOOM, Detail: DetailOOMWorker}
 	case in.HostOOM && (exit137 || in.ExitCode == nil):
-		return Failure{Kind: "host_oom", Reason: ReasonHostOOM}
+		return Failure{Kind: "host_oom", Reason: ReasonHostOOM, Detail: DetailOOMConfirmed}
 	case exit137 && !in.OOMKnown:
 		// 读不到计数时只能凭退出码推测；读得到而计数没变，就按日志和信号继续判断。
-		return Failure{Kind: "host_oom", Reason: ReasonMaybeHostOOM}
+		return Failure{Kind: "host_oom", Reason: ReasonMaybeHostOOM, Detail: DetailOOMGuess137}
 	}
 
 	text := strings.ToLower(StripANSI(in.LogTail))
@@ -203,7 +213,7 @@ func ClassifyFailure(in FailureInput) Failure {
 	if in.ExitCode != nil {
 		if *in.ExitCode > 128 {
 			sig := *in.ExitCode - 128
-			return Failure{Kind: "signal", Reason: fmt.Sprintf("被信号终止（%s）", signalName(sig))}
+			return Failure{Kind: "signal", Reason: fmt.Sprintf("被信号终止（%s）", signalName(sig)), Detail: signalName(sig)}
 		}
 		return Failure{Kind: "exit", Reason: fmt.Sprintf("退出码 %d", *in.ExitCode)}
 	}

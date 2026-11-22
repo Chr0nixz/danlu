@@ -1,6 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Flame, Minus, Search, Square, X } from 'lucide-react'
 import { useEffect, useState, type Ref } from 'react'
+import { t } from '../lib/i18n'
 import { isMac, MOD } from '../lib/platform'
 import { cx, Kbd } from './ui'
 
@@ -33,8 +34,8 @@ export function TitleBar({ search, onSearch, inputRef }: { search: string; onSea
                 else e.currentTarget.blur()
               }
             }}
-            placeholder="筛选任务：编号、名称、命令、目录"
-            aria-label="筛选任务"
+            placeholder={t('titlebar.search_placeholder')}
+            aria-label={t('titlebar.search_label')}
             className="min-w-0 flex-1 bg-transparent text-fg outline-none placeholder:text-fg-3"
             spellCheck={false}
           />
@@ -61,14 +62,14 @@ function WindowButtons() {
   const btn = 'grid h-full w-[46px] place-items-center text-fg-2 transition-colors duration-[120ms] [&_svg]:size-3.5'
   return (
     <>
-      <button type="button" className={cx(btn, 'hover:bg-hover hover:text-fg')} aria-label="最小化" onClick={() => win.minimize()}>
+      <button type="button" className={cx(btn, 'hover:bg-hover hover:text-fg')} aria-label={t('titlebar.minimize')} onClick={() => win.minimize()}>
         <Minus />
       </button>
-      <button type="button" className={cx(btn, 'hover:bg-hover hover:text-fg')} aria-label={maximized ? '还原' : '最大化'} onClick={() => win.toggleMaximize()}>
+      <button type="button" className={cx(btn, 'hover:bg-hover hover:text-fg')} aria-label={maximized ? t('titlebar.restore') : t('titlebar.maximize')} onClick={() => win.toggleMaximize()}>
         {maximized ? <Copy className="-scale-x-100" /> : <Square className="!size-3" />}
       </button>
       {/* 关闭只是缩回托盘，退出在托盘菜单里 */}
-      <button type="button" className={cx(btn, 'hover:bg-[#c42b1c] hover:text-white')} aria-label="关闭到托盘" title="关闭到托盘" onClick={() => win.close()}>
+      <button type="button" className={cx(btn, 'hover:bg-[#c42b1c] hover:text-white')} aria-label={t('titlebar.close_to_tray')} title={t('titlebar.close_to_tray')} onClick={() => win.close()}>
         <X />
       </button>
     </>

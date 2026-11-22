@@ -1,7 +1,8 @@
 import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query'
 import { Star } from 'lucide-react'
-import type { Job } from '@danlu/core'
+import { apiErrorText, type Job } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { Button, cx, ErrorBox, menuItemClass } from './ui'
 
 const mutationKey = ['job', 'star']
@@ -19,23 +20,23 @@ function useStar(job: Job) {
   return {
     pending: star.isPending,
     toggle: () => star.mutate({ id: job.id, starred: !job.starred }),
-    title: job.starred ? '取消标星' : job.pruned_at ? '标星任务（日志和快照已清理）' : '标星保留日志和代码快照',
+    title: job.starred ? t('job.unstar') : job.pruned_at ? t('job.star_pruned_title') : t('job.star_title'),
   }
 }
 
 export function StarButton({ job, label = false }: { job: Job; label?: boolean }) {
   const star = useStar(job)
-  const action = job.starred ? '取消标星' : '标星'
+  const action = job.starred ? t('job.unstar') : t('job.star')
   return (
     <Button
       size={label ? 'sm' : 'icon-sm'} variant="ghost"
       className={cx(!label && 'max-md:size-11', job.starred ? 'text-fg' : 'text-fg-3')}
-      loading={star.pending} aria-pressed={!!job.starred} aria-label={`${action}任务 #${job.id}`}
+      loading={star.pending} aria-pressed={!!job.starred} aria-label={t('job.star_toggle_aria', { action, id: job.id })}
       title={star.title}
       onClick={star.toggle}
     >
       <Star aria-hidden className={job.starred ? 'fill-current' : ''} />
-      {label && (job.starred ? '已标星' : '标星')}
+      {label && (job.starred ? t('job.starred') : t('job.star'))}
     </Button>
   )
 }
@@ -46,7 +47,7 @@ export function StarMenuItem({ job }: { job: Job }) {
   return (
     <button type="button" role="menuitem" className={menuItemClass} disabled={star.pending} onClick={star.toggle}>
       <Star aria-hidden className={job.starred ? 'fill-current' : ''} />
-      {job.starred ? '取消标星' : <>标星<span className="text-xs text-fg-3">保留日志和代码快照</span></>}
+      {job.starred ? t('job.unstar') : <>{t('job.star')}<span className="text-xs text-fg-3">{t('job.star_hint')}</span></>}
     </button>
   )
 }
@@ -57,5 +58,5 @@ export function StarError() {
     select: (mutation) => ({ error: mutation.state.error, id: (mutation.state.variables as { id?: number } | undefined)?.id }),
   })
   const latest = results.at(-1)
-  return latest?.error ? <ErrorBox error={`任务 #${latest.id} 标星修改失败：${latest.error.message}。请重试标星按钮。`} /> : null
+  return latest?.error ? <ErrorBox error={t('job.star_error', { id: String(latest.id), error: apiErrorText(latest.error) })} /> : null
 }

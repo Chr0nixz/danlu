@@ -1,4 +1,5 @@
 import { logToHtml, useJobLog, type Api } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Download, Search, WrapText, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { MOD, modKey } from '../lib/platform'
@@ -112,9 +113,9 @@ export function LogPane({ api, jobId, onDownload }: { api: Api; jobId: number; o
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-white/[0.06] pr-1.5 pl-2.5 text-[11.5px] text-[#8b8e97]">
         <span className="flex items-center gap-1.5">
           <span className={cx('size-1.5 rounded-full', ended ? 'bg-[#5a5d66]' : 'breathe bg-[#4fd18b]')} aria-hidden />
-          {ended ? '已结束' : '实时'}
+          {ended ? t('log.ended') : t('log.live')}
         </span>
-        {start === -1 && <span className="truncate pl-2">只保留了最近的部分</span>}
+        {start === -1 && <span className="truncate pl-2">{t('log.truncated')}</span>}
         <span className="ml-auto" />
         {searching ? (
           <div className="flex items-center gap-0.5">
@@ -129,37 +130,37 @@ export function LogPane({ api, jobId, onDownload }: { api: Api; jobId: number; o
                   closeSearch()
                 }
               }}
-              placeholder="搜索日志"
-              aria-label="搜索日志"
+              placeholder={t('log.search')}
+              aria-label={t('log.search')}
               className="h-6 w-40 rounded-[5px] bg-white/[0.07] px-2 text-[11.5px] text-white caret-white outline-none placeholder:text-[#6b6e77]"
             />
-            <span className="num w-14 text-center text-[11px]">{query ? (hits.length ? `${current + 1}/${hits.length}` : '无') : ''}</span>
-            <button type="button" className={tb} aria-label="上一个" onClick={() => jump(current - 1)}>
+            <span className="num w-14 text-center text-[11px]">{query ? (hits.length ? `${current + 1}/${hits.length}` : t('log.no_hits')) : ''}</span>
+            <button type="button" className={tb} aria-label={t('log.prev')} onClick={() => jump(current - 1)}>
               <ChevronUp />
             </button>
-            <button type="button" className={tb} aria-label="下一个" onClick={() => jump(current + 1)}>
+            <button type="button" className={tb} aria-label={t('log.next')} onClick={() => jump(current + 1)}>
               <ChevronDown />
             </button>
-            <button type="button" className={tb} aria-label="关闭搜索" onClick={closeSearch}>
+            <button type="button" className={tb} aria-label={t('log.close_search')} onClick={closeSearch}>
               <X />
             </button>
           </div>
         ) : (
-          <button type="button" className={tb} title={`搜索（${MOD}+F）`} onClick={() => setSearching(true)}>
+          <button type="button" className={tb} title={t('log.search_title', { mod: MOD })} onClick={() => setSearching(true)}>
             <Search />
           </button>
         )}
         {start > 0 && (
           <button type="button" className={tb} disabled={loadingOlder} onClick={loadOlder}>
             <ArrowUp />
-            更早
+            {t('log.earlier')}
           </button>
         )}
-        <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title="自动换行" onClick={() => setWrap((w) => !w)}>
+        <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title={t('log.wrap')} onClick={() => setWrap((w) => !w)}>
           <WrapText />
         </button>
         {onDownload && (
-          <button type="button" className={tb} title="下载完整日志" onClick={onDownload}>
+          <button type="button" className={tb} title={t('log.download')} onClick={onDownload}>
             <Download />
           </button>
         )}
@@ -174,11 +175,11 @@ export function LogPane({ api, jobId, onDownload }: { api: Api; jobId: number; o
           className="selectable absolute inset-0 overflow-auto px-3 py-2 font-mono text-[11.5px] leading-[1.6]"
         >
           {loading ? (
-            <span className="text-[#8b8e97]">读取中…</span>
+            <span className="text-[#8b8e97]">{t('log.loading')}</span>
           ) : error ? (
             <ErrorText error={error} />
           ) : raw === '' ? (
-            <span className="text-[#8b8e97]">{ended ? '没有输出' : '等待输出…'}</span>
+            <span className="text-[#8b8e97]">{ended ? t('log.no_output') : t('log.waiting')}</span>
           ) : (
             <pre ref={pre} className={wrap ? 'whitespace-pre-wrap [overflow-wrap:anywhere]' : 'whitespace-pre'} dangerouslySetInnerHTML={{ __html: html }} />
           )}
@@ -190,7 +191,7 @@ export function LogPane({ api, jobId, onDownload }: { api: Api; jobId: number; o
             className="absolute right-3 bottom-3 inline-flex h-7 items-center gap-1 rounded-[6px] bg-white px-2.5 text-[11.5px] font-medium text-black shadow-[0_4px_12px_rgb(0_0_0/0.4)]"
           >
             <ArrowDown className="size-3.5" />
-            回到底部
+            {t('log.back_bottom')}
           </button>
         )}
       </div>

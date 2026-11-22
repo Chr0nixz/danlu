@@ -1,4 +1,5 @@
 import { ApiError, createApi, type Transport } from '@danlu/core'
+import { t } from './i18n'
 
 // 面板和服务器同源：直接 fetch，靠 gate cookie 和会话 cookie 认证
 const transport: Transport = {
@@ -14,7 +15,7 @@ const transport: Transport = {
       text = await res.text()
     } catch {
       // 没连上服务器：status 0，和桌面端同一套约定；文案直白，别把浏览器的英文 TypeError 抛给用户
-      throw new ApiError(0, '无法连接服务器（网络中断、服务正在重启，或证书不受信任）')
+      throw new ApiError(0, t('error.network'))
     }
     if (res.status === 401 && !location.pathname.startsWith('/login')) {
       // 登录后回到原来的页面
@@ -37,5 +38,5 @@ const transport: Transport = {
 
 export const api = createApi(transport, {
   // 安全入口 cookie 过期后，所有请求都会是空的 404
-  emptyNotFound: '访问凭证已失效，请重新打开带安全入口的地址',
+  emptyNotFound: () => t('error.gate_expired'),
 })

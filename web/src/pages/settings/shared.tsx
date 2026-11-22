@@ -3,6 +3,10 @@ import { ShieldCheck } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { SettingItem, Settings } from '@danlu/core'
 import { Button, Card, cx, FieldError, FormRow, hitArea, Input, Select } from '../../components/ui'
+import { t } from '../../lib/i18n'
+
+/** t 的键位类型：静态映射表里存键，不存文案，避免模块加载时冻结语言 */
+type TKey = Parameters<typeof t>[0]
 
 export function Section({ title, desc, children, footer }: { title: string; desc?: ReactNode; children: ReactNode; footer?: ReactNode }) {
   return (
@@ -32,7 +36,7 @@ export function Rows({ children }: { children: ReactNode }) {
 }
 
 /** 保存按钮所在的底栏：左边是状态，右边是按钮 */
-export function SaveFooter({ saved, dirty, pending, savedText = '已保存，立即生效', children }: { saved: boolean; dirty: boolean; pending: boolean; savedText?: string; children?: ReactNode }) {
+export function SaveFooter({ saved, dirty, pending, savedText = t('settings.saved_now'), children }: { saved: boolean; dirty: boolean; pending: boolean; savedText?: string; children?: ReactNode }) {
   return (
     <>
       <span role="status" className="flex min-w-0 flex-1 items-center gap-1.5 text-ui text-ok">
@@ -45,7 +49,7 @@ export function SaveFooter({ saved, dirty, pending, savedText = '已保存，立
       </span>
       {children}
       <Button type="submit" size="sm" variant="primary" loading={pending} disabled={!dirty}>
-        保存
+        {t('common.save')}
       </Button>
     </>
   )
@@ -66,11 +70,22 @@ export function useSettingsCache() {
 // ---------- 运行设置的一项：数值、单位、0 表示关闭、恢复成配置文件里的值 ----------
 
 export type DurUnit = 's' | 'm' | 'h'
-export const durUnits: { value: DurUnit; label: string; seconds: number }[] = [
-  { value: 's', label: '秒', seconds: 1 },
-  { value: 'm', label: '分钟', seconds: 60 },
-  { value: 'h', label: '小时', seconds: 3600 },
+export const durUnits: { value: DurUnit; seconds: number }[] = [
+  { value: 's', seconds: 1 },
+  { value: 'm', seconds: 60 },
+  { value: 'h', seconds: 3600 },
 ]
+/** 单位词按当前语言取值，不在模块级常量里冻结 */
+export function durUnitLabel(u: DurUnit): string {
+  switch (u) {
+    case 's':
+      return t('settings.unit_s')
+    case 'm':
+      return t('settings.unit_m')
+    case 'h':
+      return t('settings.unit_h')
+  }
+}
 const unitSeconds = (u: DurUnit) => durUnits.find((x) => x.value === u)!.seconds
 
 /** 能整除的最大单位，1800 秒显示成 30 分钟 */
@@ -82,19 +97,19 @@ export function pickUnit(sec: number): DurUnit {
 
 /** 和服务器的操作记录一样：7 天、12 小时、90 分钟、30 秒 */
 export function fmtSeconds(sec: number) {
-  if (sec >= 86400 && sec % 86400 === 0) return `${sec / 86400} 天`
-  if (sec >= 3600 && sec % 3600 === 0) return `${sec / 3600} 小时`
-  if (sec >= 60 && sec % 60 === 0) return `${sec / 60} 分钟`
-  return `${sec} 秒`
+  if (sec >= 86400 && sec % 86400 === 0) return t('settings.duration_days', { n: sec / 86400 })
+  if (sec >= 3600 && sec % 3600 === 0) return t('settings.duration_hours', { n: sec / 3600 })
+  if (sec >= 60 && sec % 60 === 0) return t('settings.duration_minutes', { n: sec / 60 })
+  return t('settings.duration_seconds', { n: sec })
 }
 
 export function fmtItem(item: SettingItem, v: number) {
-  if (item.zero_off && v === 0) return '关闭'
+  if (item.zero_off && v === 0) return t('settings.value_off')
   switch (item.unit) {
     case 's':
       return fmtSeconds(v)
     case 'day':
-      return `${v} 天`
+      return t('settings.duration_days', { n: v })
     default:
       return `${v} ${item.unit}`
   }
@@ -124,13 +139,11 @@ export function fieldValue(item: SettingItem, f: ItemField): number | null {
 
 export function validateField(item: SettingItem, f: ItemField): string | undefined {
   if (f.reset || (item.zero_off && !f.on)) return undefined
-  if (!/^\d+$/.test(f.amount.trim())) return '需要是整数'
+  if (!/^\d+$/.test(f.amount.trim())) return t('settings.err_integer')
   const v = fieldValue(item, f)!
-  if (v < item.min || v > item.max) return `需要在 ${fmtItem(item, item.min)} 到 ${fmtItem(item, item.max)} 之间${item.zero_off ? '，或关闭' : ''}`
+  if (v < item.min || v > item.max) return t(item.zero_off ? 'settings.err_range_or_off' : 'settings.err_range', { min: fmtItem(item, item.min), max: fmtItem(item, item.max) })
   return undefined
 }
-
-const unitText: Record<SettingItem['unit'], string> = { s: '', GB: 'GB', MB: 'MB', day: '天' }
 
 /** 一项运行设置：开关（0 表示关闭的项才有）、数值和单位，以及"面板上改过 · 恢复" */
 export function SettingRow({
@@ -162,13 +175,13 @@ export function SettingRow({
         {item.zero_off && (
           <label className="flex items-center gap-2 text-fg">
             <input type="checkbox" className="size-4 accent-inv" checked={value.on} onChange={(e) => set({ on: e.target.checked })} />
-            开启
+            {t('settings.row_on')}
           </label>
         )}
         <span className="flex items-center gap-2">
           <Input
             id={id}
-            aria-label={`${label}数值`}
+            aria-label={t('settings.row_amount_aria', { label })}
             aria-invalid={!!error || undefined}
             aria-describedby={error ? errId : undefined}
             className="w-24!"
@@ -178,30 +191,30 @@ export function SettingRow({
             onChange={(e) => set({ amount: e.target.value.trim() })}
           />
           {item.unit === 's' ? (
-            <Select aria-label={`${label}单位`} className="w-24!" disabled={off} value={value.unit} onChange={(e) => set({ unit: e.target.value as DurUnit })}>
+            <Select aria-label={t('settings.row_unit_aria', { label })} className="w-24!" disabled={off} value={value.unit} onChange={(e) => set({ unit: e.target.value as DurUnit })}>
               {durUnits.map((u) => (
                 <option key={u.value} value={u.value}>
-                  {u.label}
+                  {durUnitLabel(u.value)}
                 </option>
               ))}
             </Select>
           ) : (
-            <span className={cx(off && 'opacity-50')}>{unitText[item.unit]}</span>
+            <span className={cx(off && 'opacity-50')}>{item.unit === 'day' ? t('settings.unit_d') : item.unit}</span>
           )}
         </span>
       </div>
       {value.reset ? (
-        <p className="mt-1.5 text-xs leading-relaxed text-fg-3">保存后恢复为配置文件里的 {fmtItem(item, item.default)}</p>
+        <p className="mt-1.5 text-xs leading-relaxed text-fg-3">{t('settings.row_reset_hint', { value: fmtItem(item, item.default) })}</p>
       ) : (
         item.custom && (
           <p className="mt-1.5 text-xs leading-relaxed text-fg-3">
-            面板上改过，config.toml 里的值（{fmtItem(item, item.default)}）不生效 ·{' '}
+            {t('settings.row_custom', { value: fmtItem(item, item.default) })} ·{' '}
             <button
               type="button"
               className={cx(hitArea, 'text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg')}
               onClick={() => onChange({ ...fieldFrom(item, item.default), reset: true })}
             >
-              恢复
+              {t('settings.restore')}
             </button>
           </p>
         )
@@ -212,24 +225,42 @@ export function SettingRow({
   )
 }
 
-export const actionLabel: Record<string, string> = {
-  login_ok: '登录成功',
-  login_fail: '登录失败',
-  login_locked: '登录被锁定',
-  logout: '退出登录',
-  submit: '提交任务',
-  cancel: '取消任务',
-  password_change: '修改密码',
-  security_change: '修改安全设置',
-  settings_change: '修改调度与告警',
-  retention_change: '修改保留策略',
-  prefs_change: '修改面板偏好',
-  session_revoke: '注销登录会话',
-  totp_enable: '开启两步验证',
-  totp_disable: '关闭两步验证',
-  token_create: '创建设备令牌',
-  token_revoke: '吊销设备令牌',
-  notify_test: '测试手机推送',
-  job_memo: '修改任务备注',
-  job_notify: '修改结束提醒',
+// 动作码 → 目录键的静态映射；文案在调用时按当前语言取
+const actionKeys: Record<string, TKey> = {
+  login_ok: 'settings.action.login_ok',
+  login_fail: 'settings.action.login_fail',
+  login_locked: 'settings.action.login_locked',
+  logout: 'settings.action.logout',
+  submit: 'settings.action.submit',
+  cancel: 'settings.action.cancel',
+  password_change: 'settings.action.password_change',
+  security_change: 'settings.action.security_change',
+  settings_change: 'settings.action.settings_change',
+  retention_change: 'settings.action.retention_change',
+  prefs_change: 'settings.action.prefs_change',
+  session_revoke: 'settings.action.session_revoke',
+  totp_enable: 'settings.action.totp_enable',
+  totp_disable: 'settings.action.totp_disable',
+  token_create: 'settings.action.token_create',
+  token_revoke: 'settings.action.token_revoke',
+  notify_test: 'settings.action.notify_test',
+  job_memo: 'settings.action.job_memo',
+  job_notify: 'settings.action.job_notify',
+  job_star: 'settings.action.job_star',
+  job_rename: 'settings.action.job_rename',
+  queue_pause: 'settings.action.queue_pause',
+  queue_resume: 'settings.action.queue_resume',
+  terminal_open: 'settings.action.terminal_open',
+  terminal_close: 'settings.action.terminal_close',
+  reservation_create: 'settings.action.reservation_create',
+  reservation_release: 'settings.action.reservation_release',
+  reservation_extend: 'settings.action.reservation_extend',
+  strict_enable: 'settings.action.strict_enable',
+  strict_disable: 'settings.action.strict_disable',
+}
+
+/** 操作记录的动作名：按 action 码翻译，未知码照原样显示（和服务器一致） */
+export function actionLabel(action: string): string {
+  const key = actionKeys[action]
+  return key ? t(key) : action
 }

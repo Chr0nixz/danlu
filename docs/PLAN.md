@@ -20,7 +20,7 @@
 | F2 | 批量：命令参数编辑、修改排队中的任务与批量操作、队列顺序与暂缓、参数扫描与任务组 | 大 | F1 的资源画像（3.3、3.4 要显示） | `v0.4.0` |
 | F3 | 看结果：输出文件浏览 | 中 | 无 | 随所在批次 |
 | C | 回到客户端（ROADMAP §9） | 大 | F2 定下来的队列模型 ❓ | 客户端单独发版 |
-| F4 | 看需要：命令行提交、GPU 保留 | 中 | 等第 8 节的答复 | — |
+| F4 | 看需要：命令行提交、GPU 预约（2026-11-21 已做）、严格限卡（2026-11-22 已做） | 中 | 等第 8 节的答复 | 随下一个版本 |
 
 **为什么这样排**
 
@@ -39,8 +39,10 @@
   1. `jobs.memo`（F1 2.1）
   2. `jobs.profile_json`（F1 4.2）
   3. `jobs.notify_done`（F1 2.2）
-  4. `jobs.queue_order`（迁移时设为 id）、`jobs.held`（F2 3.2）
-  5. 表 `job_groups`，`jobs.group_id`、`jobs.params_json`（F2 3.4）
+  4. 表 `gpu_reservations`（F4 5.2，2026-11-21 已在 main 上追加为迁移 16；不进 `release/0.2`）
+  5. `jobs.fail_detail`（双语化，迁移 17）、`jobs.unit`（F4 5.4 严格限卡，迁移 18；都在 main 上，不进 `release/0.2`）
+  6. `jobs.queue_order`（迁移时设为 id）、`jobs.held`（F2 3.2）
+  7. 表 `job_groups`，`jobs.group_id`、`jobs.params_json`（F2 3.4）
 - **接口只做加法，`APIVersion` 保持 1**（FEATURES 第 7 节）。每个改动里同步 `packages/core` 的类型和请求函数，`desktop` 保持能编译。
 - **哪些能并行。** 几乎每项功能都要改下面这些文件，所以主线一次只做一项：`internal/store/store.go`（迁移和列清单）、`internal/scheduler/`、`internal/notify/notify.go`、`web/src/pages/JobDetail.tsx`、`NewJob.tsx`、`Jobs.tsx`。可以单独开 worktree 和主线同时做的只有三块：2.4 日志搜索（`internal/logs`、日志接口、`LogViewer`）、3.3 的 shell 分词器（只在 `packages/core`）、4.1 的后端（新文件 `internal/api/files.go`）。
 - **每个阶段的收尾**沿用 PHASES.md 第 2 节：跑 AGENTS.md 里的全部检查和 `scripts/e2e.sh`，浏览器 1440px 和 390px、深浅两个主题看一遍；接口和配置并入 DEMO.md，命令并入 README，ROADMAP §5 和 FEATURES.md 对应条目标上状态；部署到真机实际用起来，打这一阶段的版本号。
@@ -147,7 +149,8 @@
 **F4 · 看需要**
 
 - **5.1 命令行提交**：等你答复第 8 节第 9 条。如果做，它经 unix socket 跳过了安全入口和会话，AGENTS.md 的"Request gating"一节要写明这条新路径和 `SO_PEERCRED` 的检查。
-- **5.2 GPU 保留**：小，有需要时随时插进任何一批。
+- **5.2 GPU 预约**：2026-11-21 已在 main 上实现（FEATURES 5.2）。装了这一版的机器回退到 rc.2 要先恢复 `backup/` 里迁移前的自动备份。
+- **5.4 严格限卡**：2026-11-22 已在 main 上实现（FEATURES 5.4），可选，要 sudo 装一次 root 助手；hsy 上探测和测试实例验收通过（CHECKLIST G2/G3 记录了做了哪些、还差哪些）。
 - **5.3 其他候选**继续往后放，各有前提：自动重试要等失败分类用真机日志校准过（R1 的 C 节样本）；抓调用栈要先让 `danlu doctor` 检查 py-spy 和 `ptrace_scope`。
 
 ## 8. 待确认 ❓（括号里是默认做法）

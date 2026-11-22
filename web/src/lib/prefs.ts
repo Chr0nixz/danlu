@@ -14,6 +14,7 @@ export const PREF_DEFAULTS: Prefs = {
   warn_mem_percent: 90,
   warn_swap_percent: 50,
   warn_gpu_temp_c: 83,
+  notify_lang: 'zh-CN',
 }
 
 /**

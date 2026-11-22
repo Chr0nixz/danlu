@@ -1,6 +1,8 @@
 import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query'
 import { Pause, Play } from 'lucide-react'
+import { apiErrorText, queuePauseText } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { useQueueState } from '../lib/queries'
 import { Alert, Button, ErrorBox } from './ui'
 
@@ -18,16 +20,16 @@ export function QueueBanner() {
   })
 
   if (!queue.data?.paused) return <ErrorBox error={queue.error} />
-  const reason = [queue.data.reason, queue.data.job_id && `#${queue.data.job_id}`].filter(Boolean).join(' · ')
+  const reason = queuePauseText(queue.data)
 
   return (
     <div className="space-y-2">
       <Alert tone={queue.data.kind === 'manual' ? 'info' : 'warn'} role="status">
         <div className="flex flex-wrap items-center gap-3">
-          <span className="min-w-0 flex-1">队列已暂停：{reason || '暂不启动排队任务'}</span>
+          <span className="min-w-0 flex-1">{t('jobs.queue_paused', { reason: reason || t('jobs.queue_paused_fallback') })}</span>
           <Button size="sm" loading={resume.isPending} onClick={() => resume.mutate()}>
             <Play aria-hidden />
-            继续队列
+            {t('jobs.resume_queue')}
           </Button>
         </div>
       </Alert>
@@ -51,14 +53,14 @@ export function QueuePauseButton() {
     <Button
       variant="ghost"
       size="sm"
-      title="暂停队列，运行中的任务继续"
+      title={t('jobs.pause_queue_title')}
       // 手机上按钮比 36px 的分组标题高，上下各伸出 4px；z-10 让伸出去的部分也点得到，不被相邻的任务行盖住
       className="relative z-10 -mr-2 text-xs text-fg-3 max-sm:-my-1"
       loading={pause.isPending}
       onClick={() => pause.mutate()}
     >
       <Pause aria-hidden />
-      暂停队列
+      {t('jobs.pause_queue')}
     </Button>
   )
 }
@@ -72,6 +74,5 @@ export function QueuePauseError() {
   })
   const error = errors[errors.length - 1]
   if (!error || queue.data?.paused) return null
-  const message = error instanceof Error ? error.message : String(error)
-  return <ErrorBox error={`暂停队列失败：${message}。请点上方暂停按钮重试。`} className="mx-3 my-2 sm:mx-4" />
+  return <ErrorBox error={t('jobs.pause_failed', { message: apiErrorText(error) })} className="mx-3 my-2 sm:mx-4" />
 }

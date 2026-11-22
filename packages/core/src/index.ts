@@ -4,5 +4,6 @@
 export * from './types'
 export * from './client'
 export * from './format'
+export * from './i18n'
 export * from './terminal'
 export * from './useJobLog'

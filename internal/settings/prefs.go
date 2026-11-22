@@ -44,6 +44,8 @@ var prefSpecs = []prefSpec{
 	{name: "warn_mem_percent", label: "内存告警阈值", kind: prefInt, min: 50, max: 100, def: int64(90), suffix: "%"},
 	{name: "warn_swap_percent", label: "交换区告警阈值", kind: prefInt, min: 10, max: 100, def: int64(50), suffix: "%"},
 	{name: "warn_gpu_temp_c", label: "GPU 温度告警阈值", kind: prefInt, min: 60, max: 100, def: int64(83), suffix: "°C"},
+	// 推送语言是服务端行为（手机收到什么语言），与面板显示语言（各设备本地）解耦
+	{name: "notify_lang", label: "推送语言", kind: prefChoice, choices: []any{"zh-CN", "en"}, def: "zh-CN"},
 }
 
 const prefPrefix = "ui."
@@ -67,7 +69,11 @@ func lookupPref(name string) (prefSpec, bool) {
 
 // parse 解析并校验一个值。坏值返回 InputError。
 func (p prefSpec) parse(raw json.RawMessage) (any, error) {
-	bad := func() (any, error) { return nil, Invalid(p.label + p.rangeText()) }
+	// 每项一个码，整句文案在 core 目录 error.pref_invalid_<name>（zh 与 label+rangeText 逐字一致）；
+	// 改 prefSpecs 的范围或标签时同步改目录。
+	bad := func() (any, error) {
+		return nil, InvalidC("pref_invalid_"+p.name, p.label+p.rangeText(), nil)
+	}
 	switch p.kind {
 	case prefBool:
 		var b bool
@@ -194,7 +200,7 @@ func UpdatePrefs(st *store.Store, patch map[string]json.RawMessage) (map[string]
 	for _, name := range names {
 		p, ok := lookupPref(name)
 		if !ok {
-			return cur, nil, Invalid("未知偏好项 " + name)
+			return cur, nil, InvalidC("pref_unknown", "未知偏好项 "+name, map[string]any{"name": name})
 		}
 		key := prefPrefix + name
 		raw := bytes.TrimSpace(patch[name])

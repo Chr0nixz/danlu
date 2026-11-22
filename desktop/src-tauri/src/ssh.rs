@@ -38,7 +38,7 @@ pub fn quote(s: &str) -> String {
 /// SSH 目标只能是主机别名或 user@host，不能以 - 开头（否则会被当成 ssh 的参数）
 pub fn check_target(target: &str) -> Result<(), String> {
     if target.is_empty() || target.starts_with('-') || target.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("SSH 目标 {target:?} 无效，应该是 ~/.ssh/config 里的主机名或 user@host"));
+        return Err(crate::messages::t("ssh.target_invalid", &[("target", &format!("{target:?}"))]));
     }
     Ok(())
 }
@@ -66,12 +66,10 @@ pub async fn run_danlu_input(target: &str, args: &str, input: Option<&str>) -> R
         None => script.push_str(&format!("exec danlu {args}\n")),
     }
     run_script(target, &script).await.map_err(|e| match e {
-        RemoteError::Exit(127, _) => {
-            format!("{target} 上没有找到 danlu（PATH、~/bin、~/.local/bin 里都没有）。请先按 README 在服务器上安装")
-        }
+        RemoteError::Exit(127, _) => crate::messages::t("ssh.danlu_missing", &[("target", target)]),
         RemoteError::Exit(code, stderr) => {
             if stderr.is_empty() {
-                format!("danlu {args} 执行失败（退出码 {code}）")
+                crate::messages::t("ssh.cmd_failed", &[("args", args), ("code", &code.to_string())])
             } else {
                 stderr
             }
@@ -106,15 +104,20 @@ pub async fn run_script(target: &str, script: &str) -> Result<String, RemoteErro
 pub async fn upload(target: &str, local: &std::path::Path, remote: &str) -> Result<(), String> {
     check_target(target)?;
     if remote.chars().any(|c| c.is_whitespace() || "'\"\\$`;&|".contains(c)) {
-        return Err(format!("服务器上的路径 {remote} 含有特殊字符，请手动升级"));
+        return Err(crate::messages::t("ssh.path_special", &[("remote", remote)]));
     }
     let mut cmd = Command::new(scp_program());
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-q"]).arg(local).arg(format!("{target}:{remote}"));
-    run(cmd, None, Duration::from_secs(600), &format!("scp 到 {target}")).await.map(|_| ()).map_err(|e| match e {
-        RemoteError::Exit(255, stderr) | RemoteError::Exit(1, stderr) => explain_ssh_error(target, &stderr),
-        RemoteError::Exit(code, stderr) => format!("scp 失败（退出码 {code}）：{stderr}"),
-        RemoteError::Other(msg) => msg,
-    })
+    run(cmd, None, Duration::from_secs(600), &crate::messages::t("ssh.scp_what", &[("target", target)]))
+        .await
+        .map(|_| ())
+        .map_err(|e| match e {
+            RemoteError::Exit(255, stderr) | RemoteError::Exit(1, stderr) => explain_ssh_error(target, &stderr),
+            RemoteError::Exit(code, stderr) => {
+                crate::messages::t("ssh.scp_failed", &[("code", &code.to_string()), ("stderr", &stderr)])
+            }
+            RemoteError::Other(msg) => msg,
+        })
 }
 
 async fn run(mut cmd: Command, stdin: Option<&str>, limit: Duration, what: &str) -> Result<String, RemoteError> {
@@ -125,32 +128,39 @@ async fn run(mut cmd: Command, stdin: Option<&str>, limit: Duration, what: &str)
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW：不闪出控制台窗口
 
-    let mut child = cmd.spawn().map_err(|e| RemoteError::Other(format!("无法启动 {what}：{e}")))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        RemoteError::Other(crate::messages::t("ssh.spawn_failed", &[("what", what), ("e", &e.to_string())]))
+    })?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
         pipe.write_all(text.as_bytes()).await.map_err(|e| RemoteError::Other(e.to_string()))?;
     }
     let out = tokio::time::timeout(limit, child.wait_with_output())
         .await
-        .map_err(|_| RemoteError::Other(format!("{what} 超过 {} 秒没有完成", limit.as_secs())))?
+        .map_err(|_| {
+            RemoteError::Other(crate::messages::t(
+                "ssh.timeout",
+                &[("what", what), ("secs", &limit.as_secs().to_string())],
+            ))
+        })?
         .map_err(|e| RemoteError::Other(e.to_string()))?;
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     match out.status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Some(255) if what.starts_with("ssh ") => Err(RemoteError::Other(explain_ssh_error(&what[4..], &stderr))),
         Some(code) => Err(RemoteError::Exit(code, stderr)),
-        None => Err(RemoteError::Other(format!("{what} 被中止"))),
+        None => Err(RemoteError::Other(crate::messages::t("ssh.aborted", &[("what", what)]))),
     }
 }
 
 fn explain_ssh_error(target: &str, stderr: &str) -> String {
     let hint = if stderr.contains("Host key verification failed") || stderr.contains("No ED25519 host key") {
-        format!("还没有确认过这台服务器的主机密钥：先在终端里执行一次 ssh {target}，核对指纹后再来添加。")
+        crate::messages::t("ssh.host_key_new", &[("target", target)])
     } else if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
-        "服务器的主机密钥变了，可能是重装过系统，也可能有人在冒充它，请先在终端里确认。".to_string()
+        crate::messages::t("ssh.host_key_changed", &[])
     } else if stderr.contains("Permission denied") {
-        "客户端只能用密钥登录：请确认密钥已经加入 ssh-agent，或者在 ~/.ssh/config 里配置了 IdentityFile。".to_string()
+        crate::messages::t("ssh.key_only", &[])
     } else {
-        return format!("ssh {target} 失败：{stderr}");
+        return crate::messages::t("ssh.failed", &[("target", target), ("stderr", stderr)]);
     };
     // ssh 的原始输出放在后面，界面按行显示
     format!("{hint}\nssh {target}：{stderr}")

@@ -1,14 +1,15 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { StrictMode, Suspense, lazy } from 'react'
+import { StrictMode, Suspense, lazy, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router'
 import { PageBoundary } from './components/ErrorBoundary'
 import { Layout } from './components/Layout'
 import './index.css'
-import { ApiError } from '@danlu/core'
+import { ApiError, useLocale } from '@danlu/core'
 import { Home } from './pages/Home'
 import { Login } from './pages/Login'
 import { Spinner } from './components/ui'
+import { t } from './lib/i18n'
 
 const Jobs = lazy(() => import('./pages/Jobs').then((m) => ({ default: m.Jobs })))
 const JobDetail = lazy(() => import('./pages/JobDetail').then((m) => ({ default: m.JobDetail })))
@@ -30,9 +31,18 @@ const queryClient = new QueryClient({
   },
 })
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
+/**
+ * 语言切换时以 key={locale} 重挂整棵树：t 是纯函数，这样所有组件（含 memo 的）
+ * 都拿到新语言的文案，不必逐个订阅。查询缓存挂在模块级 queryClient 上，不受重挂影响。
+ */
+function Root() {
+  const locale = useLocale()
+  useEffect(() => {
+    document.documentElement.lang = locale
+    document.title = t('layout.title')
+  }, [locale])
+  return (
+    <QueryClientProvider client={queryClient} key={locale}>
       <BrowserRouter>
         {/* 整页兜底：顶栏或登录页出错时也不白屏。主内容区另有一层，见 Layout */}
         <PageBoundary full>
@@ -54,5 +64,11 @@ createRoot(document.getElementById('root')!).render(
         </PageBoundary>
       </BrowserRouter>
     </QueryClientProvider>
+  )
+}
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <Root />
   </StrictMode>,
 )

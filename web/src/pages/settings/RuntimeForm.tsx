@@ -1,6 +1,7 @@
 import type { FormEvent, ReactNode } from 'react'
 import type { SettingItem, Settings, SettingsPatch } from '@danlu/core'
 import { announce, ErrorBox } from '../../components/ui'
+import { t } from '../../lib/i18n'
 import { fieldFrom, fieldValue, Rows, SaveFooter, Section, SettingRow, useSettingsCache, validateField, type ItemField } from './shared'
 import { useServerForm, type FormErrors } from './useServerForm'
 
@@ -64,7 +65,7 @@ export function RuntimeForm<K extends string>({
     fromResult: toForm,
     onSaved: (r) => {
       cache.merge({ [cacheKey]: r } as Partial<Settings>)
-      announce(`${title}已保存`)
+      announce(t('settings.section_saved', { title }))
     },
     onSettled: cache.refresh,
   })

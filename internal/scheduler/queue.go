@@ -18,6 +18,11 @@ type QueueState struct {
 	Reason string `json:"reason,omitempty"`
 	Since  int64  `json:"since,omitempty"`
 	JobID  *int64 `json:"job_id,omitempty"`
+	// FailSeconds 是快速失败任务从启动到失败的秒数，供前端本地化合成暂停原因；Reason 仍是中文原文
+	FailSeconds *int64 `json:"fail_seconds,omitempty"`
+	// 磁盘暂停时的余量与暂停线（GiB，一位小数），供前端本地化合成
+	DiskAvailableGB *float64 `json:"disk_available_gb,omitempty"`
+	DiskMinGB       *float64 `json:"disk_min_gb,omitempty"`
 }
 
 func (m *Manager) QueueState() (QueueState, error) {
@@ -32,10 +37,10 @@ func (m *Manager) PauseQueue(kind, reason string, jobID *int64) (QueueState, boo
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.pauseQueueLocked(kind, reason, jobID)
+	return m.pauseQueueLocked(kind, reason, jobID, nil)
 }
 
-func (m *Manager) pauseQueueLocked(kind, reason string, jobID *int64) (QueueState, bool, error) {
+func (m *Manager) pauseQueueLocked(kind, reason string, jobID *int64, diskGB *[2]float64) (QueueState, bool, error) {
 	current, err := m.queueStateLocked()
 	if err != nil || current.Paused {
 		return current, false, err
@@ -47,6 +52,10 @@ func (m *Manager) pauseQueueLocked(kind, reason string, jobID *int64) (QueueStat
 	if jobID != nil {
 		id := *jobID
 		state.JobID = &id
+	}
+	if diskGB != nil {
+		avail, minLine := diskGB[0], diskGB[1]
+		state.DiskAvailableGB, state.DiskMinGB = &avail, &minLine
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -154,8 +163,9 @@ func (m *Manager) failFastPauseLocked(j *store.Job) (*QueueState, *store.Event, 
 		return nil, nil, err
 	}
 	id := j.ID
-	state := &QueueState{Paused: true, Kind: "fail_fast", Since: time.Now().Unix(), JobID: &id,
-		Reason: fmt.Sprintf("任务 #%d 启动 %d 秒后失败：%s", j.ID, *j.EndedAt-*j.StartedAt, j.FailReason)}
+	secs := *j.EndedAt - *j.StartedAt
+	state := &QueueState{Paused: true, Kind: "fail_fast", Since: time.Now().Unix(), JobID: &id, FailSeconds: &secs,
+		Reason: fmt.Sprintf("任务 #%d 启动 %d 秒后失败：%s", j.ID, secs, j.FailReason)}
 	data, err := json.Marshal(state)
 	if err != nil {
 		return nil, nil, err

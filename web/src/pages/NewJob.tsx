@@ -2,11 +2,13 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Check, FolderOpen, History, Minus, Plus } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { gpuBusy, strayLabel, useGpus } from '../components/GpuGrid'
+import { gpuBusy, useGpus } from '../components/GpuGrid'
+import { GpuPicker } from '../components/GpuPicker'
 import { modKey } from '../components/Shortcuts'
 import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
-import { failText, sameCodeFailKinds, type GPU, type Job, type Prefs } from '@danlu/core'
+import { apiErrorText, failText, sameCodeFailKinds, type Job, type Prefs } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { usePrefs } from '../lib/prefs'
 
 type JobFormMode = 'new' | 'copy' | 'rerun'
@@ -22,9 +24,9 @@ function parseEnv(text: string): Record<string, string> {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
     const i = line.indexOf('=')
-    if (i <= 0) throw new Error(`格式应为 KEY=VALUE：${line}`)
+    if (i <= 0) throw new Error(t('newjob.env_format', { line }))
     const k = line.slice(0, i).trim()
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`变量名只能用字母、数字和下划线，且不能以数字开头：${k}`)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(t('newjob.env_name_invalid', { name: k }))
     env[k] = line.slice(i + 1)
   }
   return env
@@ -46,6 +48,16 @@ interface Draft {
   envText: string
   inheritBashrc: boolean
   useSnapshot: boolean
+}
+
+/**
+ * 命令自己选卡的常见写法：直接给 CUDA_VISIBLE_DEVICES 赋值（引用变量本身的不算），
+ * 或 deepspeed --num_gpus（它会忽略 CUDA_VISIBLE_DEVICES，从 0 号卡开始用）。返回命中的写法
+ */
+function cmdPicksGpus(cmd: string): string | null {
+  if (/\bCUDA_VISIBLE_DEVICES\s*=\s*(?![\x22\x27]?\$)/.test(cmd)) return 'CUDA_VISIBLE_DEVICES='
+  const ds = /\bdeepspeed\b[^\n]*?(--num[_-]gpus)\b/.exec(cmd)
+  return ds ? `deepspeed ${ds[1]}` : null
 }
 
 function readDraft(key: string): Partial<Draft> | null {
@@ -123,6 +135,9 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
 
   // 草稿：和刚打开时不一样才存。默认的 conda 环境是列表到了之后才选上的，不算用户改过
   const draft: Draft = { name, memo, workdir, condaEnv, cmd, mode, count, pinned, envText, inheritBashrc, useSnapshot }
+  const picksGpus = cmdPicksGpus(cmd)
+  // 严格限卡开着时程序只看得到分到的卡、从 0 编号，命令里自己选卡的提示要换个说法
+  const strictOn = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 }).data?.strict?.enabled ?? false
   const draftJson = JSON.stringify(draft)
   const pristine = useRef(saved ? null : draftJson)
   const submitted = useRef(false)
@@ -189,15 +204,15 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
     e.preventDefault()
     if (submit.isPending || (snapshotSelected && !canRestore)) return
     const errs: Partial<Record<Field, string>> = {}
-    if (!activeWorkdir.trim()) errs.workdir = '请填写工作目录'
-    if (!cmd.trim()) errs.cmd = '请填写要运行的命令'
-    if (mode === 'pinned' && !pinned.length) errs.gpu = '请至少选择一张卡'
-    if (Array.from(memo).length > 500) errs.memo = '备注最多 500 字'
+    if (!activeWorkdir.trim()) errs.workdir = t('newjob.workdir_required')
+    if (!cmd.trim()) errs.cmd = t('newjob.cmd_required')
+    if (mode === 'pinned' && !pinned.length) errs.gpu = t('gpus.pick_required')
+    if (Array.from(memo).length > 500) errs.memo = t('newjob.memo_max')
     let env: Record<string, string> = {}
     try {
       env = parseEnv(envText)
     } catch (err) {
-      errs.env = (err as Error).message
+      errs.env = apiErrorText(err)
     }
     setErrors(errs)
     // 焦点移到第一个出错的字段，读屏会读出它的错误说明
@@ -224,15 +239,19 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
 
   const need = mode === 'count' ? count : pinned.length
   const pick = (i: number) => gpuList.find((g) => g.index === i)
-  // 指定了被外部进程占着的卡：丹炉永远不会分配它，严格先来先跑下这个任务会一直堵在队首
-  const pinnedExternal = mode === 'pinned' ? pinned.filter((i) => pick(i)?.external.length) : []
+  // 指定了被预约或外部进程占着的卡：丹炉不会分配它，严格先来先跑下这个任务会一直堵在队首
+  const pinnedReserved = mode === 'pinned' ? pinned.flatMap((i) => {
+    const r = pick(i)?.reservation
+    return r ? [{ index: i, id: r.id }] : []
+  }) : []
+  const pinnedExternal = mode === 'pinned' ? pinned.filter((i) => pick(i)?.external.length && !pick(i)?.reservation) : []
   const pinnedUnknown = mode === 'pinned' ? pinned.filter((i) => (pick(i)?.unknown_mem_mb ?? 0) > 0) : []
   const pinnedBusy = mode === 'pinned' && pinned.some((i) => {
     const g = pick(i)
     return g && gpuBusy(g)
   })
   const willQueue = need > 0 && (mode === 'count' ? need > freeCount : pinnedBusy)
-  const condaHint = conda.data && !conda.data.available ? conda.data.error : conda.data?.error || '任务启动前自动激活。'
+  const condaHint = conda.data && !conda.data.available ? conda.data.error : conda.data?.error || t('newjob.conda_hint')
   const describe = (f: Field, hint = true) => cx(hint && `${ids[f]}-hint`, errors[f] && `${ids[f]}-err`) || undefined
 
   return (
@@ -243,22 +262,22 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
       className="mx-auto max-w-3xl space-y-4"
     >
       <div>
-        <h1 className="text-lg font-semibold">{source ? `${rerun ? '重跑' : '复制'}任务 #${source.id}` : '新建任务'}</h1>
+        <h1 className="text-lg font-semibold">{source ? t(rerun ? 'newjob.title_rerun' : 'newjob.title_copy', { id: source.id }) : t('newjob.title_new')}</h1>
         <p className="mt-0.5 text-ui text-fg-3">
           {source
-            ? `设置已从「${source.name}」复制过来，${rerun ? '可以先改参数再提交。' : '修改后提交为独立的新任务。'}`
-            : '提交后按顺序排队，有足够的空卡就自动开始。'}
+            ? t(rerun ? 'newjob.subtitle_rerun' : 'newjob.subtitle_copy', { name: source.name })
+            : t('newjob.subtitle_new')}
         </p>
         {rerun && source?.status === 'failed' && (
           <p className="mt-1 text-ui text-fail [overflow-wrap:anywhere]">
-            原任务失败：<span className="font-mono text-[12.5px]">{failText(source)}</span>
+            {t('newjob.source_failed')}<span className="font-mono text-[12.5px]">{failText(source)}</span>
           </p>
         )}
       </div>
       {saved && (
         <Alert>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-            <span className="min-w-0 flex-1">已恢复上次没提交的内容。</span>
+            <span className="min-w-0 flex-1">{t('newjob.draft_restored')}</span>
             <button
               type="button"
               className="relative shrink-0 font-medium text-fg underline decoration-fg/30 underline-offset-2 before:absolute before:-inset-x-2 before:-inset-y-3 hover:decoration-fg"
@@ -269,7 +288,7 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
                 onReset()
               }}
             >
-              重新填写
+              {t('newjob.draft_reset')}
             </button>
           </div>
         </Alert>
@@ -279,15 +298,15 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
       <Card className="divide-y divide-line">
         {rerun && source && (
           <FormRow
-            label="代码版本"
-            hint={snapshotSelected && !canRestore ? '快照已不可用。请选择现在的工作目录再提交。' : snapshotSelected
-              ? '在独立目录恢复代码。未收进快照的文件可能来自原目录，命令中写死的绝对路径也仍指向原处。conda 使用当前环境。'
-              : source.pruned_at ? '源任务的快照已清理。' : !canRestore ? '源任务的快照还不可用。' : '可改用原任务的快照，再调整这次运行的参数。'}
+            label={t('newjob.code_version')}
+            hint={snapshotSelected && !canRestore ? t('newjob.code_hint_unavailable') : snapshotSelected
+              ? t('newjob.code_hint_snapshot')
+              : source.pruned_at ? t('newjob.code_hint_pruned') : !canRestore ? t('newjob.code_hint_not_ready') : t('newjob.code_hint_default')}
           >
             <CodeSourcePicker name={`${uid}-code`} source={source} workdir={workdir} canRestore={canRestore} snapshot={snapshotSelected} onChange={setUseSnapshot} />
           </FormRow>
         )}
-        <FormRow label={snapshotSelected ? '原工作目录' : '工作目录'} hint={snapshotSelected ? '从这里补齐数据和权重。命令在恢复后的目录中执行。' : '服务器上的绝对路径，输入或按 ↓ 列出子目录。启动时会自动保存一份代码快照。'} htmlFor={ids.workdir}>
+        <FormRow label={snapshotSelected ? t('newjob.workdir_source') : t('newjob.workdir')} hint={snapshotSelected ? t('newjob.workdir_hint_snapshot') : t('newjob.workdir_hint')} htmlFor={ids.workdir}>
           {snapshotSelected ? (
             // 只读：衬底色、浅一级的强边线、次要文字色，悬停和聚焦时边线不变，看起来不像可以编辑的输入框
             <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="cursor-default border-line-strong! bg-subtle! font-mono text-[12.5px] text-fg-2! hover:border-line-strong! focus:border-line-strong! focus:ring-0!" />
@@ -302,9 +321,9 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
           <FieldError id={`${ids.workdir}-err`}>{errors.workdir}</FieldError>
         </FormRow>
 
-        <FormRow label="命令" hint={snapshotSelected
-          ? '用 bash 在恢复后的目录中执行，可以写多行。torchrun 的端口会自动分配。'
-          : '在工作目录下用 bash 执行，可以写多行。torchrun 不用写 --master_port，会自动分配。'} htmlFor={ids.cmd}>
+        <FormRow label={t('newjob.cmd')} hint={snapshotSelected
+          ? t('newjob.cmd_hint_snapshot')
+          : t('newjob.cmd_hint')} htmlFor={ids.cmd}>
           <Textarea
             id={ids.cmd}
             aria-describedby={describe('cmd')}
@@ -315,15 +334,20 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            placeholder="例如 torchrun --nproc_per_node 2 train.py --lr 3e-4"
+            placeholder={t('newjob.cmd_placeholder')}
             className="font-mono text-[12.5px]"
           />
           <FieldError id={`${ids.cmd}-err`}>{errors.cmd}</FieldError>
+          {picksGpus && (
+            <p className="mt-1.5 text-xs leading-relaxed text-warn">
+              {t(strictOn ? 'newjob.cmd_picks_gpus_strict' : 'newjob.cmd_picks_gpus', { what: picksGpus })}
+            </p>
+          )}
         </FormRow>
 
-        <FormRow label="conda 环境" hint={condaHint} htmlFor={ids.conda}>
+        <FormRow label={t('newjob.conda')} hint={condaHint} htmlFor={ids.conda}>
           <Select id={ids.conda} aria-describedby={`${ids.conda}-hint`} value={condaEnv} onChange={(e) => setCondaEnv(e.target.value)} disabled={conda.isLoading}>
-            <option value="">不使用 conda</option>
+            <option value="">{t('newjob.conda_none')}</option>
             {conda.data?.envs.map((e) => (
               <option key={e.path} value={e.name}>
                 {e.name}
@@ -333,69 +357,73 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
           </Select>
         </FormRow>
 
-        <FormRow label="GPU" hint={`共 ${total} 张，现在空闲 ${freeCount} 张。整卡独占。`} describedBy={errors.gpu && `${ids.gpu}-err`}>
+        <FormRow label="GPU" hint={t('newjob.gpu_hint', { total, free: freeCount, n: total })} describedBy={errors.gpu && `${ids.gpu}-err`}>
           <div className="space-y-3">
             <Segmented
-              label="GPU 分配方式"
+              label={t('newjob.gpu_mode_label')}
               value={mode}
               onChange={edit('gpu', setMode)}
               options={[
-                { value: 'count', label: '按张数' },
-                { value: 'pinned', label: '指定卡号' },
+                { value: 'count', label: t('gpus.mode_count') },
+                { value: 'pinned', label: t('gpus.mode_pinned') },
               ]}
             />
             {mode === 'count' ? (
               <div className="flex items-center gap-3">
                 {/* 步进器相当于一个数字输入框，边线和输入框一致 */}
-                <div role="group" aria-label="GPU 张数" className="inline-flex h-9 items-stretch overflow-hidden rounded-md border border-field-line max-sm:h-[46px]">
-                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40 max-sm:w-11" onClick={() => setCount((c) => Math.max(0, c - 1))} disabled={count <= 0} aria-label="少一张">
+                <div role="group" aria-label={t('newjob.gpu_count_label')} className="inline-flex h-9 items-stretch overflow-hidden rounded-md border border-field-line max-sm:h-[46px]">
+                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40 max-sm:w-11" onClick={() => setCount((c) => Math.max(0, c - 1))} disabled={count <= 0} aria-label={t('gpus.count_less')}>
                     <Minus className="size-4" aria-hidden />
                   </button>
                   <output aria-live="polite" className="grid w-10 place-items-center border-x border-field-line text-sm font-semibold">
                     {count}
                   </output>
-                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40 max-sm:w-11" onClick={() => setCount((c) => Math.min(total || 64, c + 1))} disabled={total > 0 && count >= total} aria-label="多一张">
+                  <button type="button" className="grid w-9 place-items-center text-fg-2 hover:bg-hover disabled:opacity-40 max-sm:w-11" onClick={() => setCount((c) => Math.min(total || 64, c + 1))} disabled={total > 0 && count >= total} aria-label={t('gpus.count_more')}>
                     <Plus className="size-4" aria-hidden />
                   </button>
                 </div>
-                <span className="text-ui text-fg-2">{count === 0 ? '不使用 GPU' : '张卡，自动挑空闲的'}</span>
+                <span className="text-ui text-fg-2">{count === 0 ? t('newjob.gpu_zero') : t('newjob.gpu_count_suffix', { n: count })}</span>
               </div>
             ) : (
               <GpuPicker id={ids.gpu} describedBy={errors.gpu && `${ids.gpu}-err`} gpus={gpuList} value={pinned} onChange={edit('gpu', setPinned)} />
             )}
             <FieldError id={`${ids.gpu}-err`}>{errors.gpu}</FieldError>
-            {pinnedExternal.length > 0 ? (
+            {pinnedReserved.length > 0 ? (
               <p className="text-xs leading-relaxed text-warn">
-                GPU {pinnedExternal.join(', ')} 被外部进程或别的任务的进程占用，丹炉不会分配它。任务会一直排在队首、挡住后面所有任务，直到那个进程退出。
+                {t('newjob.pinned_reserved_warning', { list: pinnedReserved.map((r) => t('newjob.pinned_reserved_item', { gpu: r.index, id: r.id })).join(t('newjob.reserved_sep')) })}
+              </p>
+            ) : pinnedExternal.length > 0 ? (
+              <p className="text-xs leading-relaxed text-warn">
+                {t('newjob.pinned_external_warning', { gpus: pinnedExternal.join(', ') })}
               </p>
             ) : pinnedUnknown.length > 0 ? (
               <p className="text-xs leading-relaxed text-warn">
-                GPU {pinnedUnknown.join(', ')} 有进程列表无法解释的显存占用，丹炉不会分配它。任务会排在队首，直到显存释放或状态恢复。
+                {t('newjob.pinned_unknown_warning', { gpus: pinnedUnknown.join(', ') })}
               </p>
             ) : (
-              willQueue && <p className="text-xs leading-relaxed text-warn">现在空闲的卡不够，提交后会排队，等卡空出来自动开始。</p>
+              willQueue && <p className="text-xs leading-relaxed text-warn">{t('newjob.will_queue')}</p>
             )}
           </div>
         </FormRow>
 
-        <FormRow label="任务名" hint="留空则用目录名加时间。" htmlFor={ids.name}>
-          <Input id={ids.name} aria-describedby={`${ids.name}-hint`} value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 vit-lr3e-4" maxLength={100} />
+        <FormRow label={t('newjob.name')} hint={t('newjob.name_hint')} htmlFor={ids.name}>
+          <Input id={ids.name} aria-describedby={`${ids.name}-hint`} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('newjob.name_placeholder')} maxLength={100} />
         </FormRow>
 
-        <FormRow label="备注" hint="可选，最多 500 字。" htmlFor={ids.memo}>
+        <FormRow label={t('newjob.memo')} hint={t('newjob.memo_hint')} htmlFor={ids.memo}>
           <Textarea id={ids.memo} rows={2} aria-describedby={describe('memo')} aria-invalid={!!errors.memo || undefined}
             value={memo} onChange={(e) => edit('memo', setMemo)(e.target.value)} />
           <FieldError id={`${ids.memo}-err`}>{errors.memo}</FieldError>
         </FormRow>
 
-        <FormRow label="手机推送" hint="失败仍会按服务器的推送设置提醒。">
+        <FormRow label={t('newjob.notify')} hint={t('newjob.notify_hint')}>
           <label className="inline-flex min-h-9 items-center gap-2 text-ui max-sm:min-h-11">
             <input type="checkbox" className="size-4 accent-inv" checked={notifyDone} onChange={(e) => setNotifyDone(e.target.checked)} />
-            结束时推送
+            {t('newjob.notify_done')}
           </label>
         </FormRow>
 
-        <FormRow label="环境变量" hint="可选，每行一个 KEY=VALUE。" htmlFor={ids.env}>
+        <FormRow label={t('newjob.env')} hint={t('newjob.env_hint')} htmlFor={ids.env}>
           <Textarea
             id={ids.env}
             aria-describedby={describe('env')}
@@ -407,12 +435,12 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
             autoCorrect="off"
             value={envText}
             onChange={(e) => edit('env', setEnvText)(e.target.value)}
-            placeholder={'例如 WANDB_PROJECT=vit\nOMP_NUM_THREADS=8'}
+            placeholder={t('newjob.env_placeholder')}
           />
           <FieldError id={`${ids.env}-err`}>{errors.env}</FieldError>
         </FormRow>
 
-        <FormRow label="Bash 环境" hint="缺失或加载超时会启动失败">
+        <FormRow label={t('newjob.bashrc')} hint={t('newjob.bashrc_hint')}>
           <label className="inline-flex min-h-8 items-center gap-2 text-ui text-fg-2 max-sm:min-h-11">
             <input
               type="checkbox"
@@ -420,7 +448,7 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
               onChange={(e) => setInheritBashrc(e.target.checked)}
               className="size-4 accent-fg"
             />
-            加载服务器 ~/.bashrc 导出的变量
+            {t('newjob.bashrc_load')}
           </label>
         </FormRow>
 
@@ -428,51 +456,15 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
         <div className="sticky bottom-0 z-10 flex flex-col-reverse gap-3 rounded-b-lg bg-subtle px-4 py-3 max-sm:bottom-[calc(3.5rem+env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:px-5">
           <ErrorBox error={submit.error} className="sm:mr-auto" />
           <div className="flex gap-2 sm:ml-auto">
-            <Button onClick={() => nav(-1)}>返回</Button>
+            <Button onClick={() => nav(-1)}>{t('newjob.back')}</Button>
             <Button type="submit" variant="primary" loading={submit.isPending} disabled={submit.isPending || (snapshotSelected && !canRestore)} className="flex-1 sm:flex-none">
-              提交任务
+              {t('newjob.submit')}
               <Kbd>{modKey} ↵</Kbd>
             </Button>
           </div>
         </div>
       </Card>
     </form>
-  )
-}
-
-function GpuPicker({ id, describedBy, gpus, value, onChange }: { id: string; describedBy?: string; gpus: GPU[]; value: number[]; onChange: (v: number[]) => void }) {
-  return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-      {gpus.map((g, n) => {
-        const on = value.includes(g.index)
-        const state = g.job ? `#${g.job.id} 在用` : g.external.length ? strayLabel(g.external[0]) : (g.unknown_mem_mb ?? 0) > 0 ? '未知显存占用' : '空闲'
-        const tone = g.job ? 'text-run' : g.external.length || (g.unknown_mem_mb ?? 0) > 0 ? 'text-warn' : 'text-ok'
-        return (
-          <button
-            type="button"
-            key={g.index}
-            // 第一张卡带上字段 id，校验失败时焦点落在这里，并读出错误说明
-            id={n === 0 ? id : undefined}
-            aria-describedby={n === 0 ? describedBy : undefined}
-            aria-pressed={on}
-            onClick={() => onChange(on ? value.filter((x) => x !== g.index) : [...value, g.index].sort((a, b) => a - b))}
-            className={cx(
-              'relative rounded-md border px-3 py-2 text-left transition-colors duration-150',
-              on ? 'border-fg bg-subtle ring-1 ring-fg' : 'border-line-strong hover:bg-subtle',
-            )}
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-ui font-semibold">GPU {g.index}</span>
-              {on && <Check className="size-3.5" strokeWidth={3} aria-hidden />}
-            </div>
-            <div className={cx('mt-0.5 truncate text-xs', tone)}>
-              {state}
-              <span className="text-fg-3"> · {g.util}%</span>
-            </div>
-          </button>
-        )
-      })}
-    </div>
   )
 }
 
@@ -486,14 +478,14 @@ function CodeSourcePicker({ name, source, workdir, canRestore, snapshot, onChang
     <>
       {branch && `${branch} @ `}
       <span className="font-mono">{commit?.slice(0, 7)}</span>
-      {dirty && <span className="text-warn"> · 有未提交改动</span>}
+      {dirty && <span className="text-warn">{t('newjob.dirty_mark')}</span>}
     </>
   )
-  const current = !workdir ? '先填工作目录' : head.isLoading ? '正在读取…' : head.data?.is_git && head.data.commit ? version(head.data.branch, head.data.commit, head.data.dirty) : '不是 git 仓库'
-  const snap = source.pruned_at ? '已清理' : !canRestore ? '还不可用' : source.git_commit ? version(source.git_branch, source.git_commit, source.git_dirty) : '非 git，已存快照'
+  const current = !workdir ? t('newjob.code_fill_workdir') : head.isLoading ? t('newjob.code_reading') : head.data?.is_git && head.data.commit ? version(head.data.branch, head.data.commit, head.data.dirty) : t('newjob.code_not_git')
+  const snap = source.pruned_at ? t('newjob.snap_pruned') : !canRestore ? t('newjob.snap_not_ready') : source.git_commit ? version(source.git_branch, source.git_commit, source.git_dirty) : t('newjob.snap_non_git')
   const options = [
-    { value: false, title: '现在的工作目录', detail: current, disabled: false },
-    { value: true, title: `任务 #${source.id} 的快照`, detail: snap, disabled: !canRestore },
+    { value: false, title: t('newjob.code_current'), detail: current, disabled: false },
+    { value: true, title: t('newjob.code_snapshot', { id: source.id }), detail: snap, disabled: !canRestore },
   ]
   return (
     <div className="grid grid-cols-2 gap-2">
@@ -524,36 +516,36 @@ function CodeChangeNotice({ source, workdir }: { source: Job; workdir: string })
   if (!head.data) return null
   const code = (
     <Link to={`/jobs/${source.id}?tab=code`} className="font-medium underline decoration-current/40 underline-offset-2 hover:decoration-current">
-      原任务的代码快照
+      {t('newjob.code_link')}
     </Link>
   )
   if (!head.data.is_git || !source.git_commit) {
     return (
       <Alert>
-        工作目录不是 git 仓库，没法比较代码。重跑会使用目录里现在的文件；{code}可以查看和下载。
+        {t('newjob.not_git_before')}{code}{t('newjob.code_view_after')}
       </Alert>
     )
   }
   const msgs: string[] = []
-  if (head.data.commit !== source.git_commit) msgs.push(`当前 commit 是 ${head.data.commit?.slice(0, 8)}，原任务是 ${source.git_commit.slice(0, 8)}`)
-  if (head.data.dirty) msgs.push('工作目录有未提交的改动，看不出和原任务运行时是否一样')
-  else if (source.git_dirty) msgs.push('原任务运行时有未提交的改动，现在工作目录是干净的')
+  if (head.data.commit !== source.git_commit) msgs.push(t('newjob.diff_commit', { current: head.data.commit?.slice(0, 8) ?? '', original: source.git_commit.slice(0, 8) }))
+  if (head.data.dirty) msgs.push(t('newjob.diff_dirty'))
+  else if (source.git_dirty) msgs.push(t('newjob.diff_source_dirty'))
   if (!msgs.length) {
     return (
       <Alert>
-        工作目录现在的代码和原任务相同：commit {source.git_commit.slice(0, 8)}，都没有未提交的改动。
+        {t('newjob.code_same', { commit: source.git_commit.slice(0, 8) })}
       </Alert>
     )
   }
   return (
     <Alert tone="warn">
-      重跑会使用工作目录<b>现在</b>的代码，不是原任务快照里的那份：
+      {t('newjob.diff_intro_before')}<b>{t('newjob.diff_now')}</b>{t('newjob.diff_intro_after')}
       <ul className="mt-1 list-disc pl-4">
         {msgs.map((m) => (
           <li key={m}>{m}</li>
         ))}
       </ul>
-      {code}可以查看和下载。
+      {code}{t('newjob.code_view_after')}
     </Alert>
   )
 }
@@ -640,7 +632,7 @@ function WorkdirInput({
               setClosed(true)
             }
           }}
-          placeholder="例如 /home/you/projects/vit"
+          placeholder={t('newjob.workdir_placeholder')}
           className="pl-8 font-mono text-[12.5px]"
           spellCheck={false}
           autoCapitalize="off"
@@ -651,7 +643,7 @@ function WorkdirInput({
           <div
             id={listId}
             role="listbox"
-            aria-label="子目录"
+            aria-label={t('newjob.subdirs')}
             className="absolute inset-x-0 top-full z-20 mt-1 max-h-64 overflow-auto rounded-md border border-line bg-surface py-1 shadow-[0_8px_24px_rgb(0_0_0/0.12)]"
           >
             {options.map((d, i) => (
@@ -675,7 +667,7 @@ function WorkdirInput({
       </div>
       {recent.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <History className="size-3.5 text-fg-3" aria-label="最近用过" />
+          <History className="size-3.5 text-fg-3" aria-label={t('newjob.recent')} />
           {recent.slice(0, 6).map((d) => (
             <button
               type="button"

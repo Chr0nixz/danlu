@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import { t } from '../lib/i18n'
 import { cx } from './ui'
 
 export type ChartPoint = { at: number; value: number | null }
@@ -63,7 +64,7 @@ export function ResourceChart({
   max,
   format,
   label,
-  empty = '正在积累历史数据…',
+  empty = t('resources.chart_empty'),
   binary = false,
   cursor = null,
   onCursor,
@@ -138,7 +139,7 @@ export function ResourceChart({
   }
 
   const latest = dots.find((d) => d.index === 0 && cursor == null)
-  const ariaLabel = latest ? `${label}，最新 ${format(latest.point.value as number)}` : label
+  const ariaLabel = latest ? t('resources.chart_aria_latest', { label, value: format(latest.point.value as number) }) : label
   const move = (clientX: number) => {
     const rect = plot.current?.getBoundingClientRect()
     if (!rect || rect.width <= 0 || !onCursor) return

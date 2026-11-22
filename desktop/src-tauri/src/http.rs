@@ -36,7 +36,7 @@ impl Http {
         if let Some(c) = self.conns.lock().unwrap().get(name) {
             return Ok(c.clone());
         }
-        let s = servers.get(name).ok_or_else(|| format!("没有 {name} 这台服务器"))?;
+        let s = servers.get(name).ok_or_else(|| crate::messages::t("http.no_server", &[("name", name)]))?;
         let c = Conn { client: build_client(&s)?, base: s.base_url.clone(), token: servers::load_token(name)? };
         self.conns.lock().unwrap().insert(name.to_string(), c.clone());
         Ok(c)
@@ -60,7 +60,7 @@ impl Http {
         let status = resp.status();
         let body = resp.text().await.map_err(|e| describe(&e))?;
         if status.as_u16() == 404 && body.is_empty() {
-            return Err("服务器不认这台电脑的令牌了（可能已被吊销），请删除后重新添加".into());
+            return Err(crate::messages::t("http.token_revoked", &[]));
         }
         let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| format!("HTTP {}", status.as_u16()))?;
         if !status.is_success() {
@@ -72,14 +72,15 @@ impl Http {
 
 /// CA 证书的 SHA-256 指纹，格式和服务器上 danlu info 显示的一样（大写、冒号分隔）
 fn fingerprint(pem: &str) -> Result<String, String> {
-    let der = CertificateDer::from_pem_slice(pem.as_bytes()).map_err(|e| format!("CA 证书格式错误：{e}"))?;
+    let der = CertificateDer::from_pem_slice(pem.as_bytes())
+        .map_err(|e| crate::messages::t("http.ca_format", &[("e", &e.to_string())]))?;
     let sum = Sha256::digest(der.as_ref());
     Ok(sum.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":"))
 }
 
 pub fn check_fingerprint(pem: &str, want: &str) -> Result<(), String> {
     if fingerprint(pem)? != want {
-        return Err("CA 证书和它的指纹对不上，拒绝连接".into());
+        return Err(crate::messages::t("http.ca_fingerprint", &[]));
     }
     Ok(())
 }
@@ -98,15 +99,15 @@ fn build_client(s: &Server) -> Result<reqwest::Client, String> {
         // file：服务器用的是正式证书，按系统的根证书校验；off：只用于本地测试的 HTTP
         _ => b,
     };
-    b.build().map_err(|e| format!("创建 HTTPS 客户端失败：{e}"))
+    b.build().map_err(|e| crate::messages::t("http.client_build", &[("e", &e.to_string())]))
 }
 
 /// 把 reqwest 的错误说成人话，带上底层原因（证书错误、连接被拒等都在 source 链里）
 fn describe(e: &reqwest::Error) -> String {
     let mut msg = if e.is_timeout() {
-        "超时".to_string()
+        crate::messages::t("http.timeout", &[])
     } else if e.is_connect() {
-        "连接失败".to_string()
+        crate::messages::t("http.connect_failed", &[])
     } else {
         e.to_string()
     };
@@ -130,14 +131,14 @@ pub async fn probe(s: &Server, token: &str) -> Result<(), String> {
         .await
         .map_err(|e| describe(&e))?;
     if !resp.status().is_success() {
-        return Err(format!("服务器返回 HTTP {}", resp.status().as_u16()));
+        return Err(crate::messages::t("http.http_status", &[("status", &resp.status().as_u16().to_string())]));
     }
     Ok(())
 }
 
 fn check_path(path: &str) -> Result<(), String> {
     if !path.starts_with("/api/") || path.contains("..") {
-        return Err(format!("不允许的路径 {path}"));
+        return Err(crate::messages::t("http.path_denied", &[("path", path)]));
     }
     Ok(())
 }
@@ -164,7 +165,7 @@ pub async fn api_request(
     let mut req = match method.as_str() {
         "GET" => c.client.get(url),
         "POST" => c.client.post(url),
-        m => return Err(format!("不支持的方法 {m}")),
+        m => return Err(crate::messages::t("http.method_unsupported", &[("m", m)])),
     };
     req = req.bearer_auth(&c.token).timeout(Duration::from_secs(20));
     if let Some(b) = body {
@@ -189,13 +190,13 @@ pub async fn save_file(
     use tauri::Manager;
     check_path(&path)?;
     if filename.contains(['/', '\\', ':']) || filename.starts_with('.') {
-        return Err(format!("文件名 {filename} 不合法"));
+        return Err(crate::messages::t("http.filename_invalid", &[("filename", &filename)]));
     }
     let c = http.conn(&servers, &server)?;
     let resp =
         c.client.get(format!("{}{}", c.base, path)).bearer_auth(&c.token).send().await.map_err(|e| describe(&e))?;
     if !resp.status().is_success() {
-        return Err(format!("下载失败：HTTP {}", resp.status().as_u16()));
+        return Err(crate::messages::t("http.download_failed", &[("status", &resp.status().as_u16().to_string())]));
     }
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
     let (stem, ext) = filename
@@ -210,7 +211,9 @@ pub async fn save_file(
         target = dir.join(format!("{stem} ({i}){ext}"));
     }
     let bytes = resp.bytes().await.map_err(|e| describe(&e))?;
-    std::fs::write(&target, &bytes).map_err(|e| format!("保存到 {} 失败：{e}", target.display()))?;
+    std::fs::write(&target, &bytes).map_err(|e| {
+        crate::messages::t("http.save_failed", &[("path", &target.display().to_string()), ("e", &e.to_string())])
+    })?;
     Ok(target.display().to_string())
 }
 

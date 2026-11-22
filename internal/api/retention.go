@@ -21,12 +21,12 @@ func (s *Server) starJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Starred == nil {
-		writeErr(w, 400, "缺少 starred（true 或 false）")
+		writeErrC(w, 400, "starred_required", "缺少 starred（true 或 false）", nil)
 		return
 	}
 	updated, err := s.Store.SetStarred(j.ID, *body.Starred)
 	if errors.Is(err, store.ErrPruning) {
-		writeErr(w, 409, err.Error())
+		writeErrE(w, 409, err)
 		return
 	}
 	if err != nil {
@@ -39,11 +39,11 @@ func (s *Server) starJob(w http.ResponseWriter, r *http.Request) {
 
 func prunedFiles(w http.ResponseWriter, j *store.Job) bool {
 	if j.PrunedAt != nil {
-		writeErr(w, 410, "日志和代码快照已按保留策略清理；任务记录、环境信息和训练产物仍保留")
+		writeErrC(w, 410, "job_pruned", "日志和代码快照已按保留策略清理；任务记录、环境信息和训练产物仍保留", nil)
 		return true
 	}
 	if j.Pruning {
-		writeErr(w, 409, "任务文件正在按保留策略清理，请稍后再试")
+		writeErrC(w, 409, "job_pruning", "任务文件正在按保留策略清理，请稍后再试", nil)
 		return true
 	}
 	return false

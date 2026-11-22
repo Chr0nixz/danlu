@@ -317,7 +317,7 @@ func TestAddOtherProcs(t *testing.T) {
 	}
 	jobs := map[int]int64{5001: 7, 5002: 7}
 	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024,
-		func(pid int) int64 { return jobs[pid] }, func(int) string { return "alice" })
+		func(pid int) (int64, *string) { return jobs[pid], nil }, func(int) string { return "alice" })
 	if len(gpus[0].Procs) != 1 {
 		t.Fatalf("Xorg 这类小的外部图形进程不应列出，compute-apps 里已有的进程不应重复: %+v", gpus[0].Procs)
 	}
@@ -332,7 +332,7 @@ func TestAddOtherProcs(t *testing.T) {
 
 	// 不属于任务但显存超过阈值的图形进程列成外部进程，和以前算未知占用一样让卡不可分配
 	gpus = []GPU{{Index: 2, BusID: "00000000:3D:00.0", MemUsedMB: 11264}}
-	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024, func(int) int64 { return 0 }, func(int) string { return "bob" })
+	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024, func(int) (int64, *string) { return 0, nil }, func(int) string { return "bob" })
 	if len(gpus[0].Procs) != 1 || gpus[0].Procs[0].PID != 5002 || gpus[0].Procs[0].JobID != 0 || !gpus[0].Procs[0].Graphics {
 		t.Fatalf("大的外部图形进程应列出: %+v", gpus[0].Procs)
 	}
@@ -400,5 +400,31 @@ func TestUnknownThresholdLive(t *testing.T) {
 	}
 	if got := (&SMI{}).unknownThreshold(); got != 1024 {
 		t.Fatalf("都没有时应是 1024，实际 %d", got)
+	}
+}
+
+func TestCardsInCVD(t *testing.T) {
+	str := func(s string) *string { return &s }
+	gpus := []GPU{
+		{Index: 0, UUID: "GPU-534f69f2-f0f9-50ca-4197-62cb1b49694d"},
+		{Index: 1, UUID: "GPU-fcba6bec-a222-167e-d5c2-9ea64cbf5282", Procs: []Proc{
+			{PID: 1, JobID: 82, CUDAVisible: str("GPU-534f69f2-f0f9-50ca-4197-62cb1b49694d,GPU-fcba6bec")},
+			{PID: 2, JobID: 82, CUDAVisible: str("2,3")},
+			{PID: 3, JobID: 82, CUDAVisible: str("GPU-ffffffff,MIG-abc")},
+			{PID: 4},
+		}},
+	}
+	cardsInCVD(gpus)
+	got := []string{}
+	for _, p := range gpus[1].Procs {
+		if p.CUDAVisible == nil {
+			got = append(got, "<nil>")
+		} else {
+			got = append(got, *p.CUDAVisible)
+		}
+	}
+	want := []string{"0,1", "2,3", "GPU-ffffffff,MIG-abc", "<nil>"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("UUID 应按前缀换成卡号，对不上的原样保留: %q", got)
 	}
 }

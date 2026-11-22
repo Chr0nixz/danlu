@@ -1,4 +1,5 @@
 import { projectOf, type JobStatus } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { AlertTriangle, Plus, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { FilterMenu } from '../components/Filters'
@@ -65,35 +66,35 @@ export function Overview({ view, onServer }: { view: FleetView; onServer: (name:
       {view.alerts.length > 0 && <Alerts alerts={view.alerts} />}
       <div className="flex shrink-0 items-center gap-1 px-2.5 pt-2.5 pb-1.5">
         {view.servers.length > 1 && (
-          <FilterMenu label="服务器" value={server} onChange={setServer} options={view.servers.map((s) => ({ value: s.name, label: s.name }))} />
+          <FilterMenu label={t('overview.filter_server')} value={server} onChange={setServer} options={view.servers.map((s) => ({ value: s.name, label: s.name }))} />
         )}
-        <FilterMenu label="项目" value={project} onChange={setProject} options={projects} />
+        <FilterMenu label={t('overview.filter_project')} value={project} onChange={setProject} options={projects} />
         <FilterMenu
-          label="状态"
+          label={t('overview.filter_status')}
           value={status}
           onChange={setStatus}
           options={[
-            { value: 'unread' as const, label: '没看过的失败', count: unread },
-            { value: 'running' as const, label: '运行中', count: count('running') },
-            { value: 'queued' as const, label: '排队', count: count('queued') },
-            { value: 'failed' as const, label: '失败', count: count('failed') },
-            { value: 'succeeded' as const, label: '成功', count: count('succeeded') },
-            { value: 'cancelled' as const, label: '已取消', count: count('cancelled') },
+            { value: 'unread' as const, label: t('overview.filter_unread'), count: unread },
+            { value: 'running' as const, label: t('status.running'), count: count('running') },
+            { value: 'queued' as const, label: t('overview.filter_queued'), count: count('queued') },
+            { value: 'failed' as const, label: t('status.failed'), count: count('failed') },
+            { value: 'succeeded' as const, label: t('status.succeeded'), count: count('succeeded') },
+            { value: 'cancelled' as const, label: t('status.cancelled'), count: count('cancelled') },
           ]}
         />
         <span className="num ml-auto pr-2 text-[11.5px] text-fg-3">
-          运行 {count('running')} · 排队 {count('queued')} · 空卡 {free}
+          {t('overview.summary', { running: count('running'), queued: count('queued'), free })}
         </span>
         <Button variant="primary" onClick={() => openSubmit()}>
           <Plus />
-          新建任务
+          {t('overview.new_job')}
           <Kbd className="border-on-primary/30 text-on-primary/70">N</Kbd>
         </Button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">
         {list.length === 0 ? (
-          <Empty title={all.length === 0 ? '炉火已熄' : '没有符合筛选的任务'}>
-            {all.length === 0 ? <p>24 小时内没有任务。按 N 新建一个。</p> : <p>换个筛选条件试试</p>}
+          <Empty title={all.length === 0 ? t('overview.empty_title') : t('overview.empty_filter_title')}>
+            {all.length === 0 ? <p>{t('overview.empty_body')}</p> : <p>{t('overview.empty_filter_body')}</p>}
           </Empty>
         ) : (
           <JobList jobs={list} selected={selected} cursor={cursor} read={read} onSelect={(f) => openJob(f.server, f.job.id)} />
@@ -114,7 +115,7 @@ function Alerts({ alerts }: { alerts: Alert[] }) {
             {a.text}
           </span>
           {(a.kind === 'external' || a.kind === 'blocked') && (
-            <button type="button" onClick={() => markRead([a.key])} className="grid size-5 place-items-center rounded-[4px] text-fg-3 hover:bg-hover hover:text-fg" aria-label="知道了" title="知道了">
+            <button type="button" onClick={() => markRead([a.key])} className="grid size-5 place-items-center rounded-[4px] text-fg-3 hover:bg-hover hover:text-fg" aria-label={t('overview.dismiss')} title={t('overview.dismiss')}>
               <X className="size-3.5" />
             </button>
           )}

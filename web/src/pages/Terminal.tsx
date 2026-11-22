@@ -8,6 +8,7 @@ import { Navigate, useSearchParams } from 'react-router'
 import { type TerminalSession } from '@danlu/core'
 import { Button, Card, cx, Dialog, ErrorBox, Spinner, Textarea } from '../components/ui'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { saveTerminalFontSize, storedTerminalFontSize } from '../lib/localPrefs'
 import { connectTerminal, TERMINAL_REPLACED, TERMINAL_UNAUTHORIZED, type TerminalSocket } from '../lib/terminal'
 
@@ -83,11 +84,11 @@ export function Terminal() {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-lg font-semibold">终端</h1>
+        <h1 className="text-lg font-semibold">{t('terminal.title')}</h1>
         <span className="text-xs text-fg-3">{items.length}/3</span>
         <Button size="sm" variant="secondary" className="ml-auto" disabled={maxed || open.isPending || settings.data?.terminal_enabled !== true} loading={open.isPending} onClick={() => requestOpen()}>
           <Plus />
-          新建终端
+          {t('terminal.new')}
         </Button>
       </div>
 
@@ -99,7 +100,7 @@ export function Terminal() {
         <div
           className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-line"
           role="tablist"
-          aria-label="终端会话"
+          aria-label={t('terminal.sessions_aria')}
           onKeyDown={(e) => {
             const i = items.findIndex((s) => s.id === selectedId)
             const to = ({ ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: items.length - 1 } as Record<string, number>)[e.key]
@@ -154,28 +155,28 @@ export function Terminal() {
       ) : (
         <Card className="flex min-h-64 flex-col items-center justify-center gap-3 border-dashed px-5 py-10 text-center">
           <TerminalIcon className="size-5 text-fg-3" aria-hidden />
-          <p className="text-ui font-medium">没有打开的终端</p>
+          <p className="text-ui font-medium">{t('terminal.empty')}</p>
           <Button size="sm" variant="primary" disabled={open.isPending} loading={open.isPending} onClick={() => requestOpen()}>
             <Plus />
-            打开终端
+            {t('terminal.open')}
           </Button>
         </Card>
       )}
       {closing && (
         <Dialog
-          title="关闭这个终端？"
+          title={t('terminal.close_title')}
           onClose={() => setClosing(null)}
           footer={
             <>
-              <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>保留终端</Button>
+              <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>{t('terminal.keep')}</Button>
               <Button variant="danger" loading={close.isPending} onClick={() => close.mutate(closing.id)}>
-                关闭终端
+                {t('terminal.close')}
               </Button>
             </>
           }
         >
           <p className="break-all font-mono text-[12.5px] text-fg">{closing.workdir}</p>
-          <p>终端里正在运行的进程会被结束，不能恢复。丹炉启动的训练任务不受影响。</p>
+          <p>{t('terminal.close_body')}</p>
           <ErrorBox error={close.error} />
         </Dialog>
       )}
@@ -343,7 +344,7 @@ function TerminalSessionPanel({
 
   const send = useCallback((data: Uint8Array) => {
     if (!socket.current?.send(data)) {
-      setSendError('连接恢复后再发送')
+      setSendError(t('terminal.send_wait'))
       return false
     }
     setSendError('')
@@ -396,7 +397,8 @@ function TerminalSessionPanel({
     }
   }
 
-  const displayStatus = { connecting: '连接中', connected: '已连接', reconnecting: '正在重连', replaced: '已在其他页面打开', closed: '已结束' }[status]
+  const statusKeys = { connecting: 'terminal.status_connecting', connected: 'terminal.status_connected', reconnecting: 'terminal.status_reconnecting', replaced: 'terminal.status_replaced', closed: 'terminal.status_closed' } as const
+  const displayStatus = t(statusKeys[status])
 
   return (
     <div className="space-y-2.5">
@@ -405,48 +407,48 @@ function TerminalSessionPanel({
         <span className="shrink-0">{displayStatus}</span>
         {status === 'replaced' && (
           <button type="button" className="shrink-0 font-medium text-fg hover:underline" onClick={() => reconnect.current()}>
-            在这里继续
+            {t('terminal.resume_here')}
           </button>
         )}
         <span className="min-w-0 truncate font-mono" title={session.workdir}>{session.workdir}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
-          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40 max-sm:size-11" title="缩小字号" aria-label="缩小字号" disabled={fontSize <= 11} onClick={() => onFontSize(Math.max(11, fontSize - 1))}><Minus className="size-4" /></button>
-          <span className="w-6 text-center font-mono text-[11px] sm:w-8" title="终端字号">{fontSize}</span>
-          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40 max-sm:size-11" title="放大字号" aria-label="放大字号" disabled={fontSize >= 20} onClick={() => onFontSize(Math.min(20, fontSize + 1))}><Plus className="size-4" /></button>
+          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40 max-sm:size-11" title={t('terminal.font_smaller')} aria-label={t('terminal.font_smaller')} disabled={fontSize <= 11} onClick={() => onFontSize(Math.max(11, fontSize - 1))}><Minus className="size-4" /></button>
+          <span className="w-6 text-center font-mono text-[11px] sm:w-8" title={t('terminal.font_size')}>{fontSize}</span>
+          <button type="button" className="grid size-8 place-items-center rounded text-fg-3 hover:bg-hover hover:text-fg disabled:opacity-40 max-sm:size-11" title={t('terminal.font_larger')} aria-label={t('terminal.font_larger')} disabled={fontSize >= 20} onClick={() => onFontSize(Math.min(20, fontSize + 1))}><Plus className="size-4" /></button>
           {/* 关闭和调字号是两类操作，用分隔线隔开，免得想放大字号时点到关闭 */}
           <span className="mx-1 h-4 w-px shrink-0 bg-line-strong" aria-hidden />
-          <Button size="icon-sm" variant="ghost" title="关闭终端（会先确认）" aria-label="关闭终端" disabled={closing} loading={closing} onClick={onClose}><X /></Button>
+          <Button size="icon-sm" variant="ghost" title={t('terminal.close_confirm_hint')} aria-label={t('terminal.close')} disabled={closing} loading={closing} onClick={onClose}><X /></Button>
         </span>
       </div>
 
       <div className="overflow-hidden rounded-lg border border-line bg-[#0b0b0b]">
-        <div ref={host} className="terminal-fit w-full overflow-hidden p-2.5" aria-label="交互式终端" />
+        <div ref={host} className="terminal-fit w-full overflow-hidden p-2.5" aria-label={t('terminal.pane_aria')} />
       </div>
 
       <div className="space-y-2 sm:hidden">
-        <div className="flex items-center gap-1 overflow-x-auto pb-0.5" aria-label="终端按键">
+        <div className="flex items-center gap-1 overflow-x-auto pb-0.5" aria-label={t('terminal.keys_aria')}>
           <KeyButton label="Esc" title="Escape" onClick={() => sendKey('Esc')} />
           <KeyButton label="Tab" title="Tab" onClick={() => sendKey('Tab')} />
-          <KeyButton label="Ctrl" pressed={ctrl} title="锁定 Ctrl，再按一个键" onClick={() => { setCtrl((v) => !v); requestAnimationFrame(() => draftInput.current?.focus({ preventScroll: true })) }} />
-          <KeyButton label="Alt" pressed={alt} title="锁定 Alt，再按一个键" onClick={() => { setAlt((v) => !v); requestAnimationFrame(() => draftInput.current?.focus({ preventScroll: true })) }} />
-          <KeyButton label="↑" title="上方向键" onClick={() => sendKey('↑', false, false)} />
-          <KeyButton label="↓" title="下方向键" onClick={() => sendKey('↓', false, false)} />
-          <KeyButton label="←" title="左方向键" onClick={() => sendKey('←', false, false)} />
-          <KeyButton label="→" title="右方向键" onClick={() => sendKey('→', false, false)} />
-          {['|', '~', '/', '-'].map((key) => <KeyButton key={key} label={key} title={`发送 ${key}`} onClick={() => sendKey(key)} />)}
+          <KeyButton label="Ctrl" pressed={ctrl} title={t('terminal.ctrl_lock')} onClick={() => { setCtrl((v) => !v); requestAnimationFrame(() => draftInput.current?.focus({ preventScroll: true })) }} />
+          <KeyButton label="Alt" pressed={alt} title={t('terminal.alt_lock')} onClick={() => { setAlt((v) => !v); requestAnimationFrame(() => draftInput.current?.focus({ preventScroll: true })) }} />
+          <KeyButton label="↑" title={t('terminal.key_up')} onClick={() => sendKey('↑', false, false)} />
+          <KeyButton label="↓" title={t('terminal.key_down')} onClick={() => sendKey('↓', false, false)} />
+          <KeyButton label="←" title={t('terminal.key_left')} onClick={() => sendKey('←', false, false)} />
+          <KeyButton label="→" title={t('terminal.key_right')} onClick={() => sendKey('→', false, false)} />
+          {['|', '~', '/', '-'].map((key) => <KeyButton key={key} label={key} title={t('terminal.send_key', { key })} onClick={() => sendKey(key)} />)}
         </div>
         <div className="flex items-end gap-2">
           <Textarea
             ref={draftInput}
             value={draft}
             rows={1}
-            aria-label="输入终端命令"
-            placeholder="输入命令，回车发送"
+            aria-label={t('terminal.input_aria')}
+            placeholder={t('terminal.input_placeholder')}
             className="max-h-28 min-h-11 flex-1 resize-y py-2.5 font-mono text-[13px]"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onDraftKey}
           />
-          <Button size="icon" variant="primary" title="发送命令" aria-label="发送命令" onClick={submit} disabled={!draft}><Send /></Button>
+          <Button size="icon" variant="primary" title={t('terminal.send')} aria-label={t('terminal.send')} onClick={submit} disabled={!draft}><Send /></Button>
         </div>
         {sendError && <p role="status" className="text-xs text-warn">{sendError}</p>}
       </div>

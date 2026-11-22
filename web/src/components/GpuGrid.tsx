@@ -1,6 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
+import { Lock } from 'lucide-react'
 import { Link } from 'react-router'
-import { mb, type GPU, type Proc } from '@danlu/core'
+import { apiErrorText, getLocale, mb, type GPU, type GPUReservationRef, type Proc } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { api } from '../lib/api'
 import { Alert, Card, cx, ErrorBox, Meter, Skeleton, StatusIcon } from './ui'
 
@@ -8,10 +10,34 @@ export function useGpus() {
   return useQuery({ queryKey: ['gpus'], queryFn: api.gpus, refetchInterval: 3000 })
 }
 
-export const gpuBusy = (g: GPU) => !!g.job || g.external.length > 0 || (g.unknown_mem_mb ?? 0) > 0
+export const gpuBusy = (g: GPU) => !!g.job || !!g.reservation || g.external.length > 0 || (g.unknown_mem_mb ?? 0) > 0
+
+/** "15:30"；不在今天时带上日期。按浏览器时区显示，服务端只给时间戳 */
+export function clock(ts: number) {
+  const d = new Date(ts * 1000)
+  const tm = d.toLocaleTimeString(getLocale(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  return d.toDateString() === new Date().toDateString() ? tm : `${d.getMonth() + 1}/${d.getDate()} ${tm}`
+}
+
+/** GPU 卡片上预约那一行的短说明：收卡中 / 到 15:30 / 手动释放 */
+export const reservationState = (r: GPUReservationRef) =>
+  r.status === 'waiting' ? t('gpus.res_claiming') : r.ends_at ? t('gpus.res_until', { time: clock(r.ends_at) }) : t('gpus.res_manual')
+
+/** 预约那一行：灰色加锁，不用状态色；用途放在最后，窄的时候先截掉它 */
+export function ReservationLine({ r, className }: { r: GPUReservationRef; className?: string }) {
+  return (
+    <span className={cx('flex min-w-0 items-center gap-1.5 text-fg-2', className)}
+      title={r.note ? t('gpus.res_line_title_note', { id: r.id, note: r.note }) : t('gpus.res_line_title', { id: r.id })}>
+      <Lock className="size-3 shrink-0" aria-hidden />
+      <span className="shrink-0">{t('gpus.reservation_label', { id: r.id })} · {reservationState(r)}</span>
+      {r.note && <span className="truncate text-fg-3">· {r.note}</span>}
+    </span>
+  )
+}
 
 /** 占着别人卡的进程叫什么：别的任务跑过来的进程写任务号，其余是外部进程 */
-export const strayLabel = (p: Proc) => `${p.job_id ? `#${p.job_id} 的` : '外部'}${p.graphics ? '图形' : ''}进程`
+export const strayLabel = (p: Proc) =>
+  p.job_id ? t(p.graphics ? 'gpus.proc_job_graphics' : 'gpus.proc_job', { id: p.job_id }) : t(p.graphics ? 'gpus.proc_external_graphics' : 'gpus.proc_external')
 
 type Stray = { key: string; job: number; user: string; procs: Proc[]; mem: number }
 
@@ -28,16 +54,23 @@ export function groupStray(procs: Proc[]): Stray[] {
   return out
 }
 
-export function strayTitle(s: Stray) {
+/** tooltip 的前半段（pid 列表、用户、图形进程数）；预约卡版本复用它，不去截已本地化的整句 */
+export function strayHead(s: Stray) {
   const pids = s.procs.map((p) => p.pid)
   const list = pids.slice(0, 12).join(', ') + (pids.length > 12 ? ' …' : '')
   const graphics = s.procs.filter((p) => p.graphics).length
-  const kinds = graphics
-    ? `，其中 ${graphics} 个是图形进程（EGL/OpenGL 渲染，按自己的设备编号选卡，不受 CUDA_VISIBLE_DEVICES 限制）`
-    : ''
+  // 任务进程启动时的选卡变量：和分配的卡对不上时，一眼就知道是启动器或脚本改写了它
+  const cvd = s.job ? s.procs.find((p) => !p.graphics && p.cuda_visible !== undefined)?.cuda_visible : undefined
+  const env = cvd === undefined ? '' : cvd ? t('gpus.stray_cvd', { cvd }) : t('gpus.stray_cvd_unset')
+  const kinds = (graphics ? t('gpus.stray_graphics', { n: graphics }) : '') + env
   return s.job
-    ? `任务 #${s.job} 的进程（pid ${list}${kinds}），但这张卡没有分给它：程序自己选了卡，或是已结束任务的残留。这张卡不会被分配`
-    : `外部进程（pid ${list}${s.user ? `，用户 ${s.user}` : ''}${kinds}）：不是 danlu 启动的，这张卡不会被分配`
+    ? t('gpus.stray_job_head', { job: s.job, pids: list, kinds })
+    : t('gpus.stray_external_head', { pids: list, user: s.user ? t('gpus.stray_user', { user: s.user }) : '', kinds })
+}
+
+export function strayTitle(s: Stray) {
+  const head = strayHead(s)
+  return s.job ? t('gpus.stray_job_title', { head }) : t('gpus.stray_external_title', { head })
 }
 
 /** "NVIDIA GeForce RTX 4090" → "RTX 4090" */
@@ -47,16 +80,18 @@ const gb = (used: number, total: number) => `${(used / 1024).toFixed(1)} / ${Mat
 
 function errorDuration(since: number) {
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - since))
-  if (seconds < 60) return `${seconds} 秒`
+  if (seconds < 60) return t('gpus.error_duration_s', { n: seconds })
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} 分钟`
+  if (minutes < 60) return t('gpus.error_duration_m', { n: minutes })
   const hours = Math.floor(minutes / 60)
-  return `${hours} 小时 ${minutes % 60} 分钟`
+  return t('gpus.error_duration_hm', { h: hours, m: minutes % 60 })
 }
 
-type State = 'job' | 'external' | 'unknown' | 'idle'
-const stateOf = (g: GPU): State => (g.job ? 'job' : g.external.length ? 'external' : (g.unknown_mem_mb ?? 0) > 0 ? 'unknown' : 'idle')
-const barColor: Record<State, string> = { job: 'bg-run', external: 'bg-warn', unknown: 'bg-warn', idle: 'bg-fg-4' }
+type State = 'job' | 'reserved' | 'external' | 'unknown' | 'idle'
+const stateOf = (g: GPU): State =>
+  g.job ? 'job' : g.reservation ? 'reserved' : g.external.length ? 'external' : (g.unknown_mem_mb ?? 0) > 0 ? 'unknown' : 'idle'
+// 预约的卡不是任务状态，用比空闲深一级的灰
+const barColor: Record<State, string> = { job: 'bg-run', reserved: 'bg-fg-3', external: 'bg-warn', unknown: 'bg-warn', idle: 'bg-fg-4' }
 
 export function GpuGrid() {
   const { data, isLoading, error } = useGpus()
@@ -69,7 +104,7 @@ export function GpuGrid() {
       </div>
     )
   }
-  if (error) return <ErrorBox error={`读取 GPU 失败：${(error as Error).message}`} />
+  if (error) return <ErrorBox error={t('gpus.load_failed', { message: apiErrorText(error) })} />
   const gpus = data?.gpus ?? []
   const models = new Set(gpus.map((g) => g.name))
   const mixed = models.size > 1
@@ -79,11 +114,11 @@ export function GpuGrid() {
       <h2 id="gpu-heading" className="sr-only">GPU</h2>
       {data?.error && (
         <Alert tone="warn">
-          GPU 信息读取失败，暂停分配新任务：{data.error}
-          {data.error_since && <span className="ml-1">（已持续 {errorDuration(data.error_since)}）</span>}
+          {t('gpus.sample_failed', { error: data.error })}
+          {data.error_since && <span className="ml-1">{t('gpus.error_since', { duration: errorDuration(data.error_since) })}</span>}
         </Alert>
       )}
-      {gpus.length === 0 && !data?.error && <Alert>没有检测到 GPU。只能提交不用 GPU 的任务。</Alert>}
+      {gpus.length === 0 && !data?.error && <Alert>{t('gpus.none_detected')}</Alert>}
 
       {/* 手机：每张卡一行 */}
       <Card className="divide-y divide-line overflow-hidden sm:hidden">
@@ -115,17 +150,20 @@ function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
         </Link>
       )}
       {g.job && procsKnown && !g.procs.some((p) => p.job_id === g.job!.id) && (
-        <div className="text-xs text-fg-3" title="这张卡分给了这个任务，但卡上还没有它的进程：可能还在启动，也可能程序没有用这张卡">
-          卡上暂无该任务的进程
+        <div className="text-xs text-fg-3" title={t('gpus.no_procs_title')}>
+          {t('gpus.no_procs')}
         </div>
       )}
+      {g.reservation && <ReservationLine r={g.reservation} />}
       {groupStray(g.external).map((s) => {
         const one = s.procs.length === 1 ? s.procs[0] : null
+        // 预约的卡上的外部进程多半是用户自己的任务，不算需要注意的事
+        const expected = !!g.reservation && !s.job
         const text = (
           <>
-            <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
+            <span className={cx('size-1.5 shrink-0 rounded-full', expected ? 'bg-fg-3' : 'bg-warn')} aria-hidden />
             <span className="truncate">
-              {one ? `${strayLabel(one)} ${one.pid}` : s.job ? `#${s.job} 的 ${s.procs.length} 个进程` : `${s.procs.length} 个外部进程`}
+              {one ? `${strayLabel(one)} ${one.pid}` : s.job ? t('gpus.job_proc_count', { job: s.job, n: s.procs.length }) : t('gpus.external_proc_count', { n: s.procs.length })}
               {!s.job && s.user && ` · ${s.user}`}
             </span>
             {/* 显存放在截断范围外，窄的时候宁可截掉用户名 */}
@@ -138,7 +176,8 @@ function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
             {text}
           </Link>
         ) : (
-          <div key={s.key} className="flex min-w-0 items-center gap-1.5 text-warn" title={strayTitle(s)}>
+          <div key={s.key} className={cx('flex min-w-0 items-center gap-1.5', expected ? 'text-fg-2' : 'text-warn')}
+            title={expected ? t('gpus.stray_reserved_title', { head: strayHead(s) }) : strayTitle(s)}>
             {text}
           </div>
         )
@@ -146,16 +185,16 @@ function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
       {(g.unknown_mem_mb ?? 0) > 0 && (
         <div
           className="flex items-center gap-1.5 text-warn"
-          title="nvidia-smi 列出的进程解释不了这部分显存（比如别的容器里的进程），这张卡不会被分配"
+          title={t('gpus.unknown_mem_title')}
         >
           <span className="size-1.5 shrink-0 rounded-full bg-warn" />
-          未知显存占用 · {mb(g.unknown_mem_mb ?? 0)}
+          {t('gpus.unknown_mem')} · {mb(g.unknown_mem_mb ?? 0)}
         </div>
       )}
-      {!g.job && !g.external.length && !(g.unknown_mem_mb ?? 0) && (
+      {!g.job && !g.reservation && !g.external.length && !(g.unknown_mem_mb ?? 0) && (
         <div className="flex items-center gap-1.5 text-ok">
           <span className="size-1.5 rounded-full bg-ok" />
-          空闲
+          {t('gpus.idle')}
         </div>
       )}
     </div>
@@ -180,14 +219,14 @@ function GpuPanel({ g, showModel, procsKnown }: { g: GPU; showModel: boolean; pr
       <div className="mt-2.5 grid grid-cols-[2fr_3fr] gap-3">
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between text-xs">
-            <span className="text-fg-3">利用率</span>
+            <span className="text-fg-3">{t('gpus.util')}</span>
             <span className="font-medium text-fg">{g.util}%</span>
           </div>
           <Meter value={g.util} className={barColor[s]} />
         </div>
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between gap-1 text-xs">
-            <span className="shrink-0 text-fg-3">显存</span>
+            <span className="shrink-0 text-fg-3">{t('gpus.mem')}</span>
             <span className="truncate font-medium text-fg">{gb(g.mem_used_mb, g.mem_total_mb)}</span>
           </div>
           <Meter value={memPct} className={barColor[s]} />

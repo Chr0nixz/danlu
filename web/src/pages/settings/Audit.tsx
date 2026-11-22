@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { fmtTime } from '@danlu/core'
 import { Button, cx, ErrorBox, hitArea, Skeleton } from '../../components/ui'
 import { api } from '../../lib/api'
+import { t } from '../../lib/i18n'
 import { actionLabel, Rows, Section } from './shared'
 
 const PAGE = 50 // 和服务器 /api/audit 每页条数一致
@@ -19,12 +20,12 @@ export function Audit() {
   const entries = (q.data?.pages.flatMap((p) => p.entries) ?? []).filter((e) => !seen.has(e.id) && !!seen.add(e.id))
   return (
     <Section
-      title="操作记录"
-      desc="登录、任务操作和设置改动，最近的在前。"
+      title={t('settings.group_audit')}
+      desc={t('settings.audit.desc')}
       footer={
         q.hasNextPage ? (
           <Button size="sm" className="ml-auto" loading={q.isFetchingNextPage} onClick={() => q.fetchNextPage()}>
-            加载更多
+            {t('settings.audit.load_more')}
           </Button>
         ) : undefined
       }
@@ -34,14 +35,14 @@ export function Audit() {
       ) : q.error ? (
         <ErrorBox error={q.error} />
       ) : entries.length === 0 ? (
-        <p className="text-ui text-fg-3">还没有记录。</p>
+        <p className="text-ui text-fg-3">{t('settings.audit.empty')}</p>
       ) : (
         <Rows>
           {entries.map((e) => (
             <div key={e.id} className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 px-4 py-2 text-ui sm:grid-cols-[140px_112px_1fr_auto] sm:px-5">
               <span className="text-fg-3">{fmtTime(e.ts).slice(5)}</span>
               <span className="order-first font-mono text-xs text-fg-3 sm:order-last sm:self-center">{e.ip}</span>
-              <span className={e.action === 'login_fail' || e.action === 'login_locked' ? 'font-medium text-fail' : 'font-medium'}>{actionLabel[e.action] ?? e.action}</span>
+              <span className={e.action === 'login_fail' || e.action === 'login_locked' ? 'font-medium text-fail' : 'font-medium'}>{actionLabel(e.action)}</span>
               {/* 设置改动的说明可能很长，手机上折行显示全；桌面上一行放不下时悬停看全文 */}
               <span className="col-span-2 min-w-0 text-fg-3 max-sm:break-all sm:col-span-1 sm:truncate" title={e.detail || undefined}>
                 <AuditDetail text={e.detail} />

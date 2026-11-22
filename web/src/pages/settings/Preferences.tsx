@@ -5,6 +5,7 @@ import { ShortcutList } from '../../components/Shortcuts'
 import { announce, Button, ErrorBox, FieldError, FormRow, Input, Segmented, Select } from '../../components/ui'
 import { api } from '../../lib/api'
 import { LOG_FONT_DEFAULT, LOG_FONT_SIZES, setLogFontSize, storedLogFontSize, storedTerminalFontSize, saveTerminalFontSize, TERMINAL_FONT } from '../../lib/localPrefs'
+import { setLang, storedLang, t, type LangPref } from '../../lib/i18n'
 import { PREF_DEFAULTS } from '../../lib/prefs'
 import { getTheme, setTheme, type Theme } from '../../lib/theme'
 import { Rows, SaveFooter, Section, useSettingsCache } from './shared'
@@ -23,7 +24,7 @@ export function Preferences({ st }: { st: Settings }) {
       )}
       {/* 有鼠标或触控板的设备才显示（多半也有键盘） */}
       <div className="hidden pointer-fine:block">
-        <Section title="快捷键" desc="不在输入框里时生效。随时按 ? 也能打开这份一览。">
+        <Section title={t('settings.prefs.shortcuts')} desc={t('settings.prefs.shortcuts_desc')}>
           <ShortcutList />
         </Section>
       </div>
@@ -34,27 +35,44 @@ export function Preferences({ st }: { st: Settings }) {
 /** 跟屏幕有关的显示偏好，只存在当前浏览器，改了立即生效 */
 function AppearanceSection({ terminal }: { terminal: boolean }) {
   const [theme, setThemeState] = useState<Theme>(getTheme)
+  const [lang, setLangState] = useState<LangPref>(storedLang)
   const [logFont, setLogFont] = useState(storedLogFontSize)
   const [termFont, setTermFont] = useState(storedTerminalFontSize)
   return (
-    <Section title="外观" desc="只保存在当前浏览器，手机和电脑各设各的，改了立即生效。">
+    <Section title={t('settings.prefs.appearance')} desc={t('settings.prefs.appearance_desc')}>
       <Rows>
-        <FormRow label="主题" hint="日志和终端两种主题下都是深色。">
+        <FormRow label={t('settings.prefs.lang')} htmlFor="pref-lang" hint={t('settings.prefs.lang_hint')}>
+          <Select
+            id="pref-lang"
+            className="w-40!"
+            value={lang}
+            onChange={(e) => {
+              const v = e.target.value as LangPref
+              setLang(v)
+              setLangState(v)
+            }}
+          >
+            <option value="auto">{t('settings.prefs.lang_auto')}</option>
+            <option value="zh-CN">{t('settings.prefs.lang_zh')}</option>
+            <option value="en">{t('settings.prefs.lang_en')}</option>
+          </Select>
+        </FormRow>
+        <FormRow label={t('settings.prefs.theme')} hint={t('settings.prefs.theme_hint')}>
           <Segmented
-            label="主题"
+            label={t('settings.prefs.theme')}
             value={theme}
             onChange={(t) => {
               setTheme(t)
               setThemeState(t)
             }}
             options={[
-              { value: 'system', label: <><Monitor />跟随系统</> },
-              { value: 'light', label: <><Sun />浅色</> },
-              { value: 'dark', label: <><Moon />深色</> },
+              { value: 'system', label: <><Monitor />{t('settings.prefs.theme_system')}</> },
+              { value: 'light', label: <><Sun />{t('settings.prefs.theme_light')}</> },
+              { value: 'dark', label: <><Moon />{t('settings.prefs.theme_dark')}</> },
             ]}
           />
         </FormRow>
-        <FormRow label="日志和代码字号" htmlFor="pref-log-font" hint="任务日志、代码快照和差异的字号。">
+        <FormRow label={t('settings.prefs.log_font')} htmlFor="pref-log-font" hint={t('settings.prefs.log_font_hint')}>
           <Select
             id="pref-log-font"
             className="w-40!"
@@ -67,13 +85,13 @@ function AppearanceSection({ terminal }: { terminal: boolean }) {
           >
             {LOG_FONT_SIZES.map((v) => (
               <option key={v} value={v}>
-                {v} px{v === LOG_FONT_DEFAULT ? '（默认）' : ''}
+                {v} px{v === LOG_FONT_DEFAULT ? t('settings.prefs.default_suffix') : ''}
               </option>
             ))}
           </Select>
         </FormRow>
         {terminal && (
-          <FormRow label="网页终端字号" htmlFor="pref-term-font" hint="终端页工具栏上的 − / + 改的也是它。">
+          <FormRow label={t('settings.prefs.term_font')} htmlFor="pref-term-font" hint={t('settings.prefs.term_font_hint')}>
             <Select
               id="pref-term-font"
               className="w-40!"
@@ -86,7 +104,7 @@ function AppearanceSection({ terminal }: { terminal: boolean }) {
             >
               {Array.from({ length: TERMINAL_FONT.max - TERMINAL_FONT.min + 1 }, (_, i) => TERMINAL_FONT.min + i).map((v) => (
                 <option key={v} value={v}>
-                  {v} px{v === TERMINAL_FONT.default ? '（默认）' : ''}
+                  {v} px{v === TERMINAL_FONT.default ? t('settings.prefs.default_suffix') : ''}
                 </option>
               ))}
             </Select>
@@ -120,7 +138,7 @@ function validatePrefs<K extends keyof Prefs>(form: PrefForm<K>, changed: Record
     const rule = intRule[k]
     if (!rule || !changed[k]) continue
     const s = String(form[k]).trim()
-    if (!/^\d+$/.test(s) || Number(s) < rule[0] || Number(s) > rule[1]) found[k as keyof PrefForm<K> & string] = `需要是 ${rule[0]} 到 ${rule[1]} 之间的整数`
+    if (!/^\d+$/.test(s) || Number(s) < rule[0] || Number(s) > rule[1]) found[k as keyof PrefForm<K> & string] = t('settings.prefs.err_int_range', { min: rule[0], max: rule[1] })
   }
   return found
 }
@@ -142,7 +160,7 @@ function usePrefsForm<K extends keyof Prefs & string>(prefs: Prefs, keys: K[], t
     fromResult: (r) => toForm({ ...PREF_DEFAULTS, ...r.prefs }, keys),
     onSaved: (r) => {
       cache.merge({ prefs: r.prefs })
-      announce(`${title}已保存`)
+      announce(t('settings.section_saved', { title }))
     },
     onSettled: cache.refresh,
   })
@@ -162,7 +180,7 @@ function Footer({ saved, dirty, pending, isDefault, restore }: { saved: boolean;
     <SaveFooter saved={saved} dirty={dirty} pending={pending}>
       <Button size="sm" variant="ghost" disabled={isDefault} onClick={restore}>
         <RotateCcw />
-        恢复默认
+        {t('settings.prefs.restore_defaults')}
       </Button>
     </SaveFooter>
   )
@@ -180,52 +198,52 @@ function Check({ checked, onChange, children }: { checked: boolean; onChange: (v
 const defaultKeys = ['new_job_gpus', 'new_job_bashrc', 'new_job_notify_done', 'new_job_conda', 'jobs_page_size', 'log_wrap'] as const
 
 function DefaultsSection({ prefs }: { prefs: Prefs }) {
-  const form = usePrefsForm(prefs, [...defaultKeys], '默认值')
+  const form = usePrefsForm(prefs, [...defaultKeys], t('settings.prefs.defaults'))
   const { f } = form
   return (
     <form onSubmit={form.submit} noValidate>
-      <Section title="默认值" desc="存在服务器上，手机和电脑共用。只影响以后新打开的页面和新建的任务。" footer={<Footer saved={f.saved} dirty={f.dirty} pending={f.m.isPending} isDefault={form.isDefault} restore={form.restore} />}>
+      <Section title={t('settings.prefs.defaults')} desc={t('settings.prefs.defaults_desc')} footer={<Footer saved={f.saved} dirty={f.dirty} pending={f.m.isPending} isDefault={form.isDefault} restore={form.restore} />}>
         <Rows>
-          <FormRow label="新建任务的 GPU 数" htmlFor={f.id('new_job_gpus')} hint="复制和重跑任务时沿用原任务的数量。0 表示只用 CPU。">
+          <FormRow label={t('settings.prefs.new_job_gpus')} htmlFor={f.id('new_job_gpus')} hint={t('settings.prefs.new_job_gpus_hint')}>
             <span className="flex items-center gap-2 text-ui text-fg-2">
-              <Input {...f.field('new_job_gpus', true)} className="w-20!" inputMode="numeric" value={f.form.new_job_gpus} onChange={(e) => f.edit('new_job_gpus', e.target.value.trim())} />张
+              <Input {...f.field('new_job_gpus', true)} className="w-20!" inputMode="numeric" value={f.form.new_job_gpus} onChange={(e) => f.edit('new_job_gpus', e.target.value.trim())} />{t('settings.prefs.gpu_suffix', { n: Number(f.form.new_job_gpus) })}
             </span>
             <FieldError id={f.errId('new_job_gpus')}>{f.errors.new_job_gpus}</FieldError>
           </FormRow>
-          <FormRow label="新建任务的选项" hint="继承 .bashrc 会让启动慢几秒，需要 .bashrc 里的环境变量或 module load 时再打开。失败总会推送到手机，结束提醒控制成功和取消时要不要推送。">
+          <FormRow label={t('settings.prefs.new_job_options')} hint={t('settings.prefs.new_job_options_hint')}>
             <Check checked={f.form.new_job_bashrc} onChange={(v) => f.edit('new_job_bashrc', v)}>
-              默认继承 .bashrc
+              {t('settings.prefs.new_job_bashrc')}
             </Check>
             <Check checked={f.form.new_job_notify_done} onChange={(v) => f.edit('new_job_notify_done', v)}>
-              默认勾选结束提醒
+              {t('settings.prefs.new_job_notify')}
             </Check>
           </FormRow>
-          <FormRow label="新建任务的 conda 环境" hint="自动选择：环境列表加载后选第一个不是 base 的环境。">
+          <FormRow label={t('settings.prefs.new_job_conda')} hint={t('settings.prefs.new_job_conda_hint')}>
             <Segmented
-              label="新建任务的 conda 环境"
+              label={t('settings.prefs.new_job_conda')}
               value={f.form.new_job_conda}
               onChange={(v) => f.edit('new_job_conda', v)}
               options={[
-                { value: 'auto', label: '自动选择' },
-                { value: 'none', label: '不预选' },
+                { value: 'auto', label: t('settings.prefs.conda_auto') },
+                { value: 'none', label: t('settings.prefs.conda_none') },
               ]}
             />
           </FormRow>
-          <FormRow label="任务列表每页">
+          <FormRow label={t('settings.prefs.page_size')}>
             <Segmented
-              label="任务列表每页条数"
+              label={t('settings.prefs.page_size_aria')}
               value={f.form.jobs_page_size}
               onChange={(v) => f.edit('jobs_page_size', v)}
               options={[
-                { value: '20', label: '20 条' },
-                { value: '50', label: '50 条' },
-                { value: '100', label: '100 条' },
+                { value: '20', label: t('settings.prefs.page_size_option', { n: 20 }) },
+                { value: '50', label: t('settings.prefs.page_size_option', { n: 50 }) },
+                { value: '100', label: t('settings.prefs.page_size_option', { n: 100 }) },
               ]}
             />
           </FormRow>
-          <FormRow label="日志" hint="日志框上随时可以切换，这里决定打开时的默认值。">
+          <FormRow label={t('settings.prefs.log')} hint={t('settings.prefs.log_hint')}>
             <Check checked={f.form.log_wrap} onChange={(v) => f.edit('log_wrap', v)}>
-              打开时自动换行
+              {t('settings.prefs.log_wrap')}
             </Check>
           </FormRow>
           {f.m.error && (
@@ -240,22 +258,23 @@ function DefaultsSection({ prefs }: { prefs: Prefs }) {
 }
 
 const thresholdKeys = ['warn_cpu_percent', 'warn_mem_percent', 'warn_swap_percent', 'warn_gpu_temp_c'] as const
-const thresholdMeta: Record<(typeof thresholdKeys)[number], { label: string; unit: string }> = {
-  warn_cpu_percent: { label: 'CPU 使用率', unit: '%' },
-  warn_mem_percent: { label: '内存使用率', unit: '%' },
-  warn_swap_percent: { label: '交换区使用率', unit: '%' },
-  warn_gpu_temp_c: { label: 'GPU 温度', unit: '°C' },
+// 表里存目录键而不是文案，避免模块加载时冻结语言；单位符号不翻译
+const thresholdMeta: Record<(typeof thresholdKeys)[number], { labelKey: Parameters<typeof t>[0]; unit: string }> = {
+  warn_cpu_percent: { labelKey: 'settings.prefs.warn_cpu', unit: '%' },
+  warn_mem_percent: { labelKey: 'settings.prefs.warn_mem', unit: '%' },
+  warn_swap_percent: { labelKey: 'settings.prefs.warn_swap', unit: '%' },
+  warn_gpu_temp_c: { labelKey: 'settings.prefs.warn_gpu_temp', unit: '°C' },
 }
 
 function ThresholdsSection({ prefs }: { prefs: Prefs }) {
-  const form = usePrefsForm(prefs, [...thresholdKeys], '资源页告警阈值')
+  const form = usePrefsForm(prefs, [...thresholdKeys], t('settings.prefs.thresholds'))
   const { f } = form
   return (
     <form onSubmit={form.submit} noValidate>
-      <Section title="资源页告警阈值" desc="资源页上超过这些值时用告警色标出。只影响显示，不推送、不影响调度。存在服务器上，手机和电脑共用。" footer={<Footer saved={f.saved} dirty={f.dirty} pending={f.m.isPending} isDefault={form.isDefault} restore={form.restore} />}>
+      <Section title={t('settings.prefs.thresholds')} desc={t('settings.prefs.thresholds_desc')} footer={<Footer saved={f.saved} dirty={f.dirty} pending={f.m.isPending} isDefault={form.isDefault} restore={form.restore} />}>
         <Rows>
           {thresholdKeys.map((k) => (
-            <FormRow key={k} label={thresholdMeta[k].label} htmlFor={f.id(k)}>
+            <FormRow key={k} label={t(thresholdMeta[k].labelKey)} htmlFor={f.id(k)}>
               <span className="flex items-center gap-2 text-ui text-fg-2">
                 <Input {...f.field(k)} className="w-20!" inputMode="numeric" value={f.form[k]} onChange={(e) => f.edit(k, e.target.value.trim())} />
                 {thresholdMeta[k].unit}

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,12 +17,19 @@ pub struct Prefs {
     pub shortcut: String,
     /// 开机自启
     pub autostart: bool,
+    /// 界面和系统通知的语言："auto"（跟随系统）、"zh-CN" 或 "en"
+    #[serde(default = "default_lang")]
+    pub lang: String,
+}
+
+fn default_lang() -> String {
+    "auto".into()
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         let shortcut = if cfg!(target_os = "macos") { "Cmd+Alt+D" } else { "Ctrl+Alt+D" };
-        Prefs { notify: true, shortcut: shortcut.into(), autostart: true }
+        Prefs { notify: true, shortcut: shortcut.into(), autostart: true, lang: default_lang() }
     }
 }
 
@@ -65,6 +72,20 @@ impl LocalState {
 
     pub fn prefs(&self) -> Prefs {
         self.data.lock().unwrap().prefs.clone()
+    }
+
+    /// 当前生效的语言：显式选择优先，auto 按系统语言（中文系 → zh-CN，其余 → en），取不到按中文。
+    /// 通知在 Rust 里合成，界面在 webview 里合成，两边用同一份偏好。
+    pub fn resolved_lang(&self) -> String {
+        let lang = self.prefs().lang;
+        if lang == "zh-CN" || lang == "en" {
+            return lang;
+        }
+        match sys_locale::get_locale() {
+            Some(l) if l.to_lowercase().starts_with("zh") => "zh-CN".into(),
+            Some(_) => "en".into(),
+            None => "zh-CN".into(),
+        }
     }
 
     pub fn set_prefs(&self, p: Prefs) {
@@ -132,11 +153,42 @@ pub fn get_prefs(state: State<'_, LocalState>) -> Prefs {
     state.prefs()
 }
 
-/// 保存偏好，并立即应用：重新注册全局快捷键、打开或关闭开机自启
+/// 保存偏好，并立即应用：重新注册全局快捷键、打开或关闭开机自启。
+/// 语言改动广播给两个窗口，主窗和托盘一起切换。
 #[tauri::command]
 pub fn set_prefs(app: tauri::AppHandle, state: State<'_, LocalState>, prefs: Prefs) -> Result<(), String> {
     crate::apply_shortcut(&app, &prefs.shortcut)?;
     crate::apply_autostart(&app, prefs.autostart)?;
     state.set_prefs(prefs);
+    // 语言改动立即生效：Rust 侧文案目录、托盘菜单，再广播给两个窗口
+    crate::messages::set_lang(&state.resolved_lang());
+    crate::tray::refresh_language(&app);
+    let _ = app.emit("prefs-changed", state.prefs());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefs_lang_defaults_to_auto() {
+        // 旧版 state.json 没有 lang 字段，读出来必须是 auto，不能是空串
+        let p: Prefs = serde_json::from_str(r#"{"notify":true,"shortcut":"Ctrl+Alt+D","autostart":true}"#).unwrap();
+        assert_eq!(p.lang, "auto");
+        assert_eq!(Prefs::default().lang, "auto");
+    }
+
+    #[test]
+    fn resolved_lang_explicit_choice_wins() {
+        let s =
+            LocalState { path: std::env::temp_dir().join("danlu-lang-test.json"), data: Mutex::new(Data::default()) };
+        s.data.lock().unwrap().prefs.lang = "en".into();
+        assert_eq!(s.resolved_lang(), "en");
+        s.data.lock().unwrap().prefs.lang = "zh-CN".into();
+        assert_eq!(s.resolved_lang(), "zh-CN");
+        // auto 按系统语言解析，结果只能是两种之一
+        s.data.lock().unwrap().prefs.lang = "auto".into();
+        assert!(matches!(s.resolved_lang().as_str(), "zh-CN" | "en"));
+    }
 }

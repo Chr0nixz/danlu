@@ -1,21 +1,25 @@
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { bytes, fmtTime, type RetentionKey, type RetentionPreview, type RetentionSettings, type Settings, type SettingsPatch } from '@danlu/core'
+import { bytes, fmtTime, type RetentionKey, type RetentionPreview, type RetentionPreviewItem, type RetentionSettings, type Settings, type SettingsPatch } from '@danlu/core'
 import { Button, cx, Dialog, ErrorBox, hitArea } from '../../components/ui'
 import { api } from '../../lib/api'
+import { t } from '../../lib/i18n'
 import { RuntimeForm, type RowMeta } from './RuntimeForm'
 import { KV, Section } from './shared'
 
-const meta: Record<RetentionKey, RowMeta> = {
-  keep_days: {
-    label: '保留天数',
-    hint: '任务结束超过这么多天后，清理它的日志、代码快照和运行目录。',
-  },
-  max_total_gb: {
-    label: '总量上限',
-    hint: '这些任务文件加起来超过上限时，从最早结束的任务开始清理，直到回到上限以内。',
-  },
+/** 行标签和提示按当前语言取值：是函数不是模块级常量表，切换语言后重渲染即生效 */
+function rowMeta(): Record<RetentionKey, RowMeta> {
+  return {
+    keep_days: {
+      label: t('settings.retention.keep_days'),
+      hint: t('settings.retention.keep_days_hint'),
+    },
+    max_total_gb: {
+      label: t('settings.retention.max_total'),
+      hint: t('settings.retention.max_total_hint'),
+    },
+  }
 }
 
 /** 收紧了策略才需要预览：打开了某项，或者调低了 */
@@ -27,10 +31,22 @@ function tightens(items: RetentionSettings, patch: SettingsPatch<RetentionKey>) 
   })
 }
 
+// 清理原因按 reason_code 翻译（静态映射，不拼键）；旧版服务器没有码，回退 reason 原文
+const reasonKeys: Record<string, Parameters<typeof t>[0]> = {
+  resume: 'settings.retention.reason_resume',
+  age: 'settings.retention.reason_age',
+  size: 'settings.retention.reason_size',
+}
+
+function reasonText(e: RetentionPreviewItem): string {
+  const key = e.reason_code ? reasonKeys[e.reason_code] : undefined
+  return key ? t(key) : e.reason
+}
+
 export function Retention({ st }: { st: Settings }) {
   const [confirm, setConfirm] = useState<{ preview: RetentionPreview; save: () => void } | null>(null)
   const preview = useMutation({ mutationFn: (patch: SettingsPatch<RetentionKey>) => api.previewRetention(patch) })
-  if (!st.retention) return <Section title="数据保留">这台服务器的版本较旧，不支持在面板上修改。</Section>
+  if (!st.retention) return <Section title={t('settings.group_retention')}>{t('settings.old_server')}</Section>
   const items = st.retention
 
   const intercept = (patch: SettingsPatch<RetentionKey>, save: () => void) => {
@@ -43,16 +59,16 @@ export function Retention({ st }: { st: Settings }) {
   return (
     <>
       <RuntimeForm
-        title="保留策略"
-        desc="只清理已结束任务的日志、代码快照和运行目录。任务记录、标星的任务、正在用快照重跑的源任务和训练产物（输出目录）都保留。"
+        title={t('settings.retention.title')}
+        desc={t('settings.retention.desc')}
         items={items}
         keys={['keep_days', 'max_total_gb']}
-        meta={meta}
+        meta={rowMeta()}
         cacheKey="retention"
         update={(patch) => api.updateRetention(patch).then((r) => r.retention)}
         intercept={intercept}
         busy={preview.isPending}
-        savedText="已保存，正在后台按新策略清理"
+        savedText={t('settings.retention.saved')}
       >
         {preview.error && (
           <div className="px-4 py-3 sm:px-5">
@@ -61,24 +77,29 @@ export function Retention({ st }: { st: Settings }) {
         )}
       </RuntimeForm>
 
-      <Section title="自动清理" desc="服务每 6 小时按保留策略清理一次，在这里收紧策略后会马上清理一次。命令行用 danlu prune --dry-run 也能预览。">
+      <Section title={t('settings.retention.auto')} desc={t('settings.retention.auto_desc')}>
         <dl className="-my-2 divide-y divide-line">
           <KV
-            k="上次清理"
+            k={t('settings.retention.last_prune')}
             v={
               st.prune
-                ? `${fmtTime(st.prune.at)} · ${st.prune.jobs} 个任务、${st.prune.envs} 个环境文件，释放 ${bytes(st.prune.bytes)}`
+                ? t('settings.retention.last_prune_value', {
+                    at: fmtTime(st.prune.at),
+                    jobs: t('settings.retention.job_count', { n: st.prune.jobs }),
+                    envs: t('settings.retention.env_count', { n: st.prune.envs }),
+                    bytes: bytes(st.prune.bytes),
+                  })
                 : items.keep_days.value === 0 && items.max_total_gb.value === 0
-                  ? '保留策略都已关闭，不自动清理'
-                  : '服务启动后还没有清理过'
+                  ? t('settings.retention.all_off')
+                  : t('settings.retention.never')
             }
           />
-          {st.prune?.error && <KV k="出错" v={<span className="text-fail">{st.prune.error}</span>} />}
+          {st.prune?.error && <KV k={t('settings.retention.error')} v={<span className="text-fail">{st.prune.error}</span>} />}
           <KV
-            k="当前占用"
+            k={t('settings.retention.usage')}
             v={
               <Link to="/resources" className={cx(hitArea, 'text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg')}>
-                在资源页查看丹炉自身占用
+                {t('settings.retention.usage_link')}
               </Link>
             }
           />
@@ -93,11 +114,11 @@ export function Retention({ st }: { st: Settings }) {
 function ConfirmPrune({ preview: p, onConfirm, onClose }: { preview: RetentionPreview; onConfirm: () => void; onClose: () => void }) {
   return (
     <Dialog
-      title={`保存并清理 ${p.jobs} 个任务的文件？`}
+      title={t('settings.retention.confirm_title', { n: p.jobs })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>取消</Button>
+          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>{t('common.cancel')}</Button>
           <Button
             variant="danger"
             onClick={(e) => {
@@ -105,25 +126,26 @@ function ConfirmPrune({ preview: p, onConfirm, onClose }: { preview: RetentionPr
               e.currentTarget.closest('dialog')?.close()
             }}
           >
-            保存并清理
+            {t('settings.retention.confirm_save')}
           </Button>
         </>
       }
     >
       <p>
-        按新的保留策略，会删除这些已结束任务的日志、代码快照和运行目录，约释放 {bytes(p.bytes)}（现在任务文件共 {bytes(p.total_bytes)}）。任务记录、标星任务和训练产物都保留，但删掉的日志和快照找不回来。
+        {t('settings.retention.confirm_body', { bytes: bytes(p.bytes), total: bytes(p.total_bytes) })}
       </p>
       <ul className="divide-y divide-line rounded-md border border-line text-ui">
         {p.items.slice(0, 5).map((e) => (
           <li key={e.job_id} className="flex items-center gap-2 px-3 py-1.5">
             <span className="font-mono text-xs text-fg-3">#{e.job_id}</span>
             <span className="min-w-0 flex-1 truncate">{e.name}</span>
+            <span className="shrink-0 text-xs text-fg-3">{reasonText(e)}</span>
             <span className="shrink-0 font-mono text-xs text-fg-3">{bytes(e.bytes)}</span>
           </li>
         ))}
-        {p.jobs > 5 && <li className="px-3 py-1.5 text-fg-3">还有 {p.jobs - 5} 个任务</li>}
+        {p.jobs > 5 && <li className="px-3 py-1.5 text-fg-3">{t('settings.retention.more_jobs', { n: p.jobs - 5 })}</li>}
       </ul>
-      {p.errors.length > 0 && <p className="text-xs leading-relaxed text-fg-3">另有 {p.errors.length} 个任务统计时出错，这次不会清理它们：{p.errors[0]}</p>}
+      {p.errors.length > 0 && <p className="text-xs leading-relaxed text-fg-3">{t('settings.retention.preview_errors', { n: p.errors.length, first: p.errors[0] })}</p>}
     </Dialog>
   )
 }

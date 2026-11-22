@@ -6,10 +6,12 @@ import { GpuGrid, gpuBusy, shortName, useGpus } from '../components/GpuGrid'
 import { HostMetrics } from '../components/HostMetrics'
 import { JobList } from '../components/JobRow'
 import { QueueBanner, QueuePauseButton, QueuePauseError } from '../components/QueueControls'
+import { ReservationList, ReserveButton } from '../components/Reservations'
 import { StarError } from '../components/StarButton'
 import { Card, cx, ErrorBox, SkeletonRows, StatusIcon } from '../components/ui'
 import { now, type Job } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
 
 function Group({ icon, title, count, extra, children }: { icon: ReactNode; title: string; count?: number; extra?: ReactNode; children: ReactNode }) {
@@ -44,24 +46,24 @@ function Summary({ running, queued }: { running: number; queued: number }) {
       <span className="inline-flex items-center gap-1.5">
         <StatusIcon status="running" decorative />
         <b className="font-semibold">{running}</b>
-        <span className="text-fg-2">运行中</span>
+        <span className="text-fg-2">{t('status.running')}</span>
       </span>
       <span className="inline-flex items-center gap-1.5">
         <StatusIcon status="queued" decorative />
         <b className="font-semibold">{queued}</b>
-        <span className="text-fg-2">排队</span>
+        <span className="text-fg-2">{t('home.queued')}</span>
       </span>
       {failed > 0 && (
         // 手机上把点击区撑到 44px 高，不改变排版
-        <Link to="/jobs?status=failed&recent=24h" className="inline-flex items-center gap-1.5 hover:underline max-sm:-my-3 max-sm:py-3" title="最近 24 小时内失败的任务">
+        <Link to="/jobs?status=failed&recent=24h" className="inline-flex items-center gap-1.5 hover:underline max-sm:-my-3 max-sm:py-3" title={t('home.failed_title')}>
           <StatusIcon status="failed" decorative />
           <b className="font-semibold text-fail">{failed}</b>
           {/* 手机上写短的 24h，和"失败"之间不留整个间距，摘要才放得下一行 */}
           <span className="text-fail">
-            失败
+            {t('status.failed')}
             <span className="ml-1 text-[11px] text-fg-3 sm:hidden">24h</span>
           </span>
-          <span className="text-xs text-fg-3 max-sm:hidden">24 小时内</span>
+          <span className="text-xs text-fg-3 max-sm:hidden">{t('home.within_24h')}</span>
         </Link>
       )}
       {list.length > 0 && (
@@ -72,15 +74,19 @@ function Summary({ running, queued }: { running: number; queued: number }) {
             <span className="font-normal text-fg-3"> / {list.length}</span>
           </b>
           <span className="text-fg-2">
-            <span className="sm:hidden">空闲</span>
-            <span className="max-sm:hidden">张卡空闲</span>
+            <span className="sm:hidden">{t('home.free_short')}</span>
+            <span className="max-sm:hidden">{t('home.free_cards')}</span>
           </span>
           {models.length === 1 && <span className="hidden text-fg-3 sm:inline">· {models[0]}</span>}
         </span>
       )}
       {gpus.data && (
-        <span className={cx('ml-auto text-xs', stale ? 'text-warn' : 'text-fg-3 max-sm:hidden')} title="GPU 数据的更新时间">
-          {stale ? `GPU 数据 ${Math.round(age)} 秒没有更新` : '实时'}
+        <span className="ml-auto inline-flex items-center gap-3">
+          <span className={cx('text-xs', stale ? 'text-warn' : 'text-fg-3 max-sm:hidden')} title={t('home.gpu_updated_title')}>
+            {stale ? t('home.gpu_stale', { n: Math.round(age) }) : t('home.live')}
+          </span>
+          {/* 按钮比摘要的文字行高，用负外边距收回去，摘要行不因它变高 */}
+          {list.length > 0 && <ReserveButton className="-mr-2 -my-1.5 max-sm:-my-3" />}
         </span>
       )}
     </div>
@@ -103,11 +109,12 @@ export function Home() {
 
   return (
     <div className="space-y-4 sm:space-y-5">
-      <h1 className="sr-only">总览</h1>
+      <h1 className="sr-only">{t('home.title')}</h1>
       <QueueBanner />
       <StarError />
       <Summary running={running.length} queued={queued.length} />
       <GpuGrid />
+      <ReservationList />
 
       <ErrorBox error={active.error ?? recent.error} />
       <Card className="overflow-hidden [&>section+section]:border-t [&>section+section]:border-line">
@@ -115,27 +122,27 @@ export function Home() {
           <SkeletonRows rows={3} />
         ) : (
           <>
-            <Group icon={<StatusIcon status="running" decorative />} title="运行中" count={running.length}
-              extra={silent > 0 && <span className="text-xs text-warn">{silent} 个无新输出</span>}>
-              <JobList jobs={running} showCopy empty={<GroupEmpty>炉子空着，没有正在运行的任务</GroupEmpty>} />
+            <Group icon={<StatusIcon status="running" decorative />} title={t('status.running')} count={running.length}
+              extra={silent > 0 && <span className="text-xs text-warn">{t('home.silent_count', { n: silent })}</span>}>
+              <JobList jobs={running} showCopy empty={<GroupEmpty>{t('home.running_empty')}</GroupEmpty>} />
             </Group>
-            <Group icon={<StatusIcon status="queued" decorative />} title="排队" count={queued.length} extra={<QueuePauseButton />}>
+            <Group icon={<StatusIcon status="queued" decorative />} title={t('home.queued')} count={queued.length} extra={<QueuePauseButton />}>
               <QueuePauseError />
-              <JobList jobs={queued} showCopy empty={<GroupEmpty>队列是空的</GroupEmpty>} />
+              <JobList jobs={queued} showCopy empty={<GroupEmpty>{t('home.queued_empty')}</GroupEmpty>} />
             </Group>
           </>
         )}
         <Group
           icon={<StatusIcon status="succeeded" className="text-fg-3" decorative />}
-          title="最近完成"
+          title={t('home.recent_title')}
           extra={
             <Link to="/jobs" className="relative z-10 -mr-2 inline-flex h-9 items-center gap-1 px-2 text-xs text-fg-3 hover:text-fg max-sm:-my-1 max-sm:h-11">
-              全部任务
+              {t('home.all_jobs')}
               <ArrowRight className="size-3.5" aria-hidden />
             </Link>
           }
         >
-          {recent.isLoading ? <SkeletonRows rows={2} /> : <JobList jobs={done} showCopy empty={<GroupEmpty>还没有出炉的任务</GroupEmpty>} />}
+          {recent.isLoading ? <SkeletonRows rows={2} /> : <JobList jobs={done} showCopy empty={<GroupEmpty>{t('home.recent_empty')}</GroupEmpty>} />}
         </Group>
       </Card>
       <HostMetrics />

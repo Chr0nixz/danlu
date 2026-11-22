@@ -57,7 +57,7 @@ func (s *Server) updateSecurity(w http.ResponseWriter, r *http.Request) {
 	p.MaxFailures = body.MaxFailures
 	sec, changes, err := s.Auth.UpdateSecurity(w, r, p)
 	if settings.IsInputError(err) {
-		writeErr(w, 400, err.Error())
+		writeErrE(w, 400, err)
 		return
 	}
 	if err != nil {
@@ -93,12 +93,12 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if cur := s.Auth.CurrentSessionHash(r); cur != "" && store.SessionID(cur) == id {
-		writeErr(w, 400, "这是当前设备的会话，请用「退出登录」")
+		writeErrC(w, 400, "session_current", "这是当前设备的会话，请用「退出登录」", nil)
 		return
 	}
 	err := s.Store.DeleteSessionByID(id)
 	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, 404, "会话不存在或已经过期")
+		writeErrC(w, 404, "session_not_found", "会话不存在或已经过期", nil)
 		return
 	}
 	if err != nil {

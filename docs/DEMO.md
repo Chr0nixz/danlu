@@ -144,7 +144,8 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
 ### 4.3 调度
 
 - **严格的先来先跑**：按提交顺序检查排在最前面的任务，放得下就启动，放不下就继续等，**后面的任务不能插队**。这样大任务不会一直被小任务挤掉。（demo 先这样做，以后再加优先级和插队。）
-- 可用的卡 = 全部的卡 − 正在运行的 danlu 任务占用的卡 − 被外部进程占用的卡。
+- 可用的卡 = 全部的卡 − 正在运行的 danlu 任务占用的卡 − GPU 预约收下的卡 − 被外部进程占用的卡。
+- **GPU 预约**：给丹炉以外的任务占卡（FEATURES.md 第 5.2 节）。每轮先给预约收卡、再给排队任务分卡，两步用同一份 GPU 采样；按张数的预约只收没有任何进程的卡，指定卡号的预约只要丹炉没在用就收。预约收下的卡不分配，卡上的外部进程不算挡住队首。卡全部到位后开始计时，到期自动释放。预约不受队列暂停和磁盘保护影响。
 - "张数 N" 模式取编号最小的 N 张可用卡；"指定卡号" 模式要等这几张卡全部空闲才启动。
 - 调度循环在两种情况下触发：每 2 秒定时一次；以及提交、任务结束、取消时立即触发一次。
 - 正在排队的任务可以取消，取消后直接从队列里移除。
@@ -263,10 +264,14 @@ POST /api/logout
 GET  /api/me                           用户名、版本、api_version（接口版本号，不兼容的改动时加一）
 GET  /api/doctor                       机器体检，返回 checks 数组（ok / warn / fail）
 
-GET  /api/gpus                         GPU 状态和占用者；出错时含 error、error_since（unix 秒），恢复后清除
+GET  /api/gpus                         GPU 状态和占用者，每张卡的 reservation 是收下它的预约（id、note、status、ends_at）；出错时含 error、error_since（unix 秒），恢复后清除
 GET  /api/queue                        队列状态（paused、kind、reason、since、job_id）
 POST /api/queue/pause                  手动暂停队列（JSON {}，不影响已经占位或运行的任务）
 POST /api/queue/resume                 恢复队列（JSON {}）
+GET  /api/reservations                 未结束的 GPU 预约，按创建顺序（status：waiting 收卡中 / active 已就绪）
+POST /api/reservations                 新建预约：{gpus, pinned_gpus, duration（秒，600–604800，null 为手动释放）, note}；立刻收一次卡
+POST /api/reservations/{id}/release    手动释放（JSON {}）；已结束返回 409
+POST /api/reservations/{id}/extend     已就绪的定时预约延长 1 小时（JSON {}），最多到 7 天后
 GET  /api/system                       CPU、内存采样，以及磁盘余量和采集状态
 GET  /api/resources                    资源详情当前快照：主机、CPU、内存、网络、磁盘 I/O、进程、功耗、磁盘容量，以及丹炉自身占用
 GET  /api/resources/history?range=1m|5m|15m|1h  最近 1 小时的降采样历史，返回 points 和 peaks
@@ -304,6 +309,7 @@ POST /api/settings/runtime             修改调度与告警（JSON {"名字": �
 POST /api/settings/retention           修改保留策略（keep_days 天、max_total_gb GB，格式同上）；保存后马上按新策略清理一次，返回 retention
 POST /api/settings/retention/preview   按要改的保留策略预览（格式同上，不保存、不删除）：jobs、envs、bytes、total_bytes、items（最多 50 条）、errors；正在清理时返回 409
 POST /api/settings/prefs               修改面板偏好（JSON {"名字": 值或 null}，null 恢复默认），返回 prefs
+POST /api/settings/strict              开关严格限卡（JSON {"enabled": true|false}）；打开前经 sudo 查一次 root 助手，查不过返回 409 strict_unavailable；返回状态（GET /api/settings 的 strict）
 GET  /api/sessions                     用密码登录、还没到期的会话（id 是令牌哈希的前 16 位，current 标出当前会话）
 POST /api/sessions/{id}/revoke         注销一个会话；当前会话返回 400，请用退出登录
 POST /api/sessions/revoke-others       注销当前会话以外的所有会话，返回 revoked

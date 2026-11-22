@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -420,5 +421,86 @@ func TestManualTestDoesNotConsumeEvents(t *testing.T) {
 	s.publisher.Config.NTFY = ""
 	if err := s.Test(context.Background()); !errors.Is(err, ErrDisabled) {
 		t.Fatal("未配置推送应返回明确错误")
+	}
+}
+
+func TestReservationMessages(t *testing.T) {
+	st, s, r := fixture(t)
+	ts := time.Now().Unix()
+	future, past := ts+600, ts-1
+	for _, data := range []string{
+		`{"id":3,"gpus":[2,3],"note":"调试\n显存","duration":10800}`,
+		`{"id":4,"gpus":[1]}`,
+	} {
+		addEvent(t, st, ts, store.EventReservationReady, nil, data)
+	}
+	addEvent(t, st, ts, store.EventReservationExpiring, nil, fmt.Sprintf(`{"id":3,"gpus":[2,3],"ends_at":%d}`, future))
+	// 积压到已经过了到期时间的提醒不再发；结束事件不推送
+	addEvent(t, st, ts-900, store.EventReservationExpiring, nil, fmt.Sprintf(`{"id":5,"gpus":[0],"ends_at":%d}`, past))
+	addEvent(t, st, ts, store.EventReservationEnded, nil, `{"id":3,"gpus":[2,3],"reason":"手动释放"}`)
+	for range 10 {
+		step(t, s, ts)
+	}
+	if len(r.requests) != 3 {
+		t.Fatalf("预约推送数量错误: %+v", r.requests)
+	}
+	ready, untimed, expiring := r.requests[0], r.requests[1], r.requests[2]
+	if !strings.Contains(ready.title, "GPU 预约就绪") || ready.body != "预约 #3（调试 显存）已就绪：GPU 2, 3。3 小时后自动释放。" || ready.click != s.baseURL+"/" {
+		t.Fatalf("就绪推送: %+v", ready)
+	}
+	if untimed.body != "预约 #4 已就绪：GPU 1。手动释放前一直保留。" {
+		t.Fatalf("不定时的就绪推送: %+v", untimed)
+	}
+	if !strings.Contains(expiring.title, "即将到期") || expiring.body != "预约 #3 的 GPU 2, 3 约 10 分钟后自动释放，需要的话在面板上延长。" {
+		t.Fatalf("到期提醒: %+v", expiring)
+	}
+}
+
+func TestStrayMessages(t *testing.T) {
+	st, s, r := fixture(t)
+	ts := time.Now().Unix()
+	id := int64(82)
+	addEvent(t, st, ts, store.EventAlertRaised, &id, `{"type":"stray","gpus":[0,1],"pid":2398153,"assigned":[2,3,4,5],"reserved":[0,1],"cuda_visible":"0,1,2,3"}`)
+	addEvent(t, st, ts, store.EventAlertRaised, &id, `{"type":"stray","gpus":[0],"pid":7,"assigned":[2],"graphics":true}`)
+	addEvent(t, st, ts, store.EventAlertRaised, &id, `{"type":"stray","gpus":[3],"pid":8,"cuda_visible":""}`)
+	addEvent(t, st, ts, store.EventAlertCleared, &id, `{"type":"stray","gpus":[0,1],"pid":2398153}`)
+	for range 10 {
+		step(t, s, ts)
+	}
+	if len(r.requests) != 3 {
+		t.Fatalf("越界推送数量错误（清除不推送）: %+v", r.requests)
+	}
+	cvd, graphics, unset := r.requests[0], r.requests[1], r.requests[2]
+	if !strings.Contains(cvd.title, "任务用了没分给它的 GPU") || cvd.click != s.baseURL+"/jobs/82" ||
+		cvd.body != "任务 #82 的进程在 GPU 0, 1 上，分给它的是 GPU 2, 3, 4, 5。其中 GPU 0, 1 已被预约。进程的 CUDA_VISIBLE_DEVICES 指向 GPU 0,1,2,3，启动器、框架或脚本改写了它（如 deepspeed --num_gpus、accelerate 的 gpu_ids、按 nvidia-smi/NVML 的编号选卡、脚本里的 export）。" {
+		t.Fatalf("选卡变量被改写: %+v", cvd)
+	}
+	if !strings.HasSuffix(graphics.body, "这些是图形渲染进程（EGL/OpenGL），不受 CUDA_VISIBLE_DEVICES 限制，要在程序里指定渲染用的卡。") {
+		t.Fatalf("图形进程: %+v", graphics)
+	}
+	if unset.body != "任务 #82 没分到 GPU，进程却在 GPU 3 上。进程没有 CUDA_VISIBLE_DEVICES，启动器或脚本把它去掉了。" {
+		t.Fatalf("选卡变量被去掉: %+v", unset)
+	}
+}
+
+func TestStrictUnavailableMessage(t *testing.T) {
+	st, s, r := fixture(t)
+	ts := time.Now().Unix()
+	addEvent(t, st, ts, store.EventAlertRaised, nil, `{"type":"strict_unavailable","reason":"no_sudo"}`)
+	addEvent(t, st, ts, store.EventAlertRaised, nil, `{"type":"strict_unavailable","reason":"failed"}`)
+	addEvent(t, st, ts, store.EventAlertCleared, nil, `{"type":"strict_unavailable","reason":"failed"}`)
+	for range 10 {
+		step(t, s, ts)
+	}
+	if len(r.requests) != 2 {
+		t.Fatalf("严格限卡推送数量错误（恢复不推送）: %+v", r.requests)
+	}
+	if !strings.Contains(r.requests[0].title, "严格限卡不可用") ||
+		r.requests[0].body != "严格限卡开着，但 root 助手不可用，排队的任务暂停启动。sudo 没有放行助手：在服务器上重新运行 sudo danlu strict install，或在面板设置里关掉严格限卡。" ||
+		r.requests[0].click != s.baseURL+"/" {
+		t.Fatalf("没放行 sudo 的推送: %+v", r.requests[0])
+	}
+	if !strings.HasSuffix(r.requests[1].body, "打开面板「设置 → 调度」查看原因。") {
+		t.Fatalf("其他原因不转发原始错误，只指路: %+v", r.requests[1])
 	}
 }

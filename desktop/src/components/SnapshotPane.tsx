@@ -1,4 +1,5 @@
 import { bytes, type Api } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, Download, FileText } from 'lucide-react'
 import { useState } from 'react'
@@ -27,8 +28,8 @@ export function SnapshotPane({ server, jobId, onDownload }: { server: string; jo
               value={hasDiff ? view : 'files'}
               onChange={setView}
               options={[
-                { value: 'diff', label: '未提交的改动', disabled: !hasDiff },
-                { value: 'files', label: `文件 ${meta.data?.meta.files.length ?? ''}` },
+                { value: 'diff', label: t('snapshot.tab_diff'), disabled: !hasDiff },
+                { value: 'files', label: t('snapshot.tab_files', { n: meta.data?.meta.files.length ?? '' }) },
               ]}
             />
           </div>
@@ -37,7 +38,7 @@ export function SnapshotPane({ server, jobId, onDownload }: { server: string; jo
         <button
           type="button"
           onClick={onDownload}
-          title="下载快照（tar.gz）"
+          title={t('snapshot.download')}
           className="inline-flex h-6 items-center rounded-[5px] px-1.5 hover:bg-white/10 hover:text-white [&_svg]:size-3.5"
         >
           <Download />
@@ -45,7 +46,7 @@ export function SnapshotPane({ server, jobId, onDownload }: { server: string; jo
       </div>
       <div className="selectable min-h-0 flex-1 overflow-auto font-mono text-[11.5px] leading-[1.6]">
         {meta.isLoading ? (
-          <p className="p-3 text-[#8b8e97]">读取中…</p>
+          <p className="p-3 text-[#8b8e97]">{t('log.loading')}</p>
         ) : meta.error ? (
           <ErrorText error={meta.error} className="p-3" />
         ) : file ? (
@@ -77,8 +78,8 @@ function FileList({ files, skipped, truncated, onOpen }: { files: { path: string
       ))}
       {(skipped > 0 || truncated) && (
         <p className="px-3 pt-2 pb-1 font-sans text-[#8b8e97]">
-          {skipped > 0 && `有 ${skipped} 个文件太大或被忽略，没有保存。`}
-          {truncated && '快照到了大小上限，后面的文件没有保存。'}
+          {skipped > 0 && t('snapshot.skipped', { n: skipped })}
+          {truncated && t('snapshot.truncated')}
         </p>
       )}
     </div>
@@ -87,9 +88,9 @@ function FileList({ files, skipped, truncated, onOpen }: { files: { path: string
 
 function FileView({ api, server, jobId, path }: { api: Api; server: string; jobId: number; path: string }) {
   const q = useQuery({ queryKey: ['snapshot-file', server, jobId, path], queryFn: () => api.snapshotFile(jobId, path), staleTime: Infinity })
-  if (q.isLoading) return <p className="p-3 text-[#8b8e97]">读取中…</p>
+  if (q.isLoading) return <p className="p-3 text-[#8b8e97]">{t('log.loading')}</p>
   if (q.error) return <ErrorText error={q.error} className="p-3" />
-  if (q.data!.binary) return <p className="p-3 font-sans text-[#8b8e97]">二进制文件，{bytes(q.data!.size)}</p>
+  if (q.data!.binary) return <p className="p-3 font-sans text-[#8b8e97]">{t('snapshot.binary', { size: bytes(q.data!.size) })}</p>
   const lines = q.data!.content.split('\n')
   return (
     <table className="w-full border-collapse">
@@ -107,7 +108,7 @@ function FileView({ api, server, jobId, path }: { api: Api; server: string; jobI
 
 function DiffView({ api, server, jobId }: { api: Api; server: string; jobId: number }) {
   const q = useQuery({ queryKey: ['snapshot-diff', server, jobId], queryFn: () => api.snapshotDiff(jobId), staleTime: Infinity })
-  if (q.isLoading) return <p className="p-3 text-[#8b8e97]">读取中…</p>
+  if (q.isLoading) return <p className="p-3 text-[#8b8e97]">{t('log.loading')}</p>
   if (q.error) return <ErrorText error={q.error} className="p-3" />
   return (
     <pre className="py-1">

@@ -1,4 +1,5 @@
-import type { Job, JobStatus } from './types'
+import { t } from './i18n.ts'
+import type { Job, JobStatus, QueueState } from './types'
 
 export function duration(sec: number): string {
   sec = Math.max(0, Math.floor(sec))
@@ -6,10 +7,10 @@ export function duration(sec: number): string {
   const h = Math.floor((sec % 86400) / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const s = sec % 60
-  if (d > 0) return `${d}天${h}小时`
-  if (h > 0) return `${h}小时${m}分`
-  if (m > 0) return `${m}分${s}秒`
-  return `${s}秒`
+  if (d > 0) return t('time.duration_dh', { d, h })
+  if (h > 0) return t('time.duration_hm', { h, m })
+  if (m > 0) return t('time.duration_ms', { m, s })
+  return t('time.duration_s', { s })
 }
 
 export const now = () => Date.now() / 1000
@@ -30,10 +31,10 @@ export function fmtTime(ts: number | null | undefined): string {
 export function timeAgo(ts: number | null | undefined): string {
   if (!ts) return '-'
   const diff = now() - ts
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
-  if (diff < 7 * 86400) return `${Math.floor(diff / 86400)} 天前`
+  if (diff < 60) return t('time.just_now')
+  if (diff < 3600) return t('time.minutes_ago', { n: Math.floor(diff / 60) })
+  if (diff < 86400) return t('time.hours_ago', { n: Math.floor(diff / 3600) })
+  if (diff < 7 * 86400) return t('time.days_ago', { n: Math.floor(diff / 86400) })
   return fmtTime(ts).slice(0, 10)
 }
 
@@ -50,25 +51,30 @@ export function bytes(n: number): string {
   return `${n} B`
 }
 
-export const statusLabel: Record<JobStatus, string> = {
-  queued: '排队中',
-  running: '运行中',
-  succeeded: '成功',
-  failed: '失败',
-  cancelled: '已取消',
+const statusKeys = {
+  queued: 'status.queued',
+  running: 'status.running',
+  succeeded: 'status.succeeded',
+  failed: 'status.failed',
+  cancelled: 'status.cancelled',
+} as const
+
+/** 是函数不是常量表：文案随当前语言取值，切换语言后重渲染即生效 */
+export function statusLabel(s: JobStatus): string {
+  return t(statusKeys[s])
 }
 
 export function jobStatusText(j: Job): string {
-  if (j.status === 'running' && j.cancel_requested) return '取消中'
-  return statusLabel[j.status]
+  if (j.status === 'running' && j.cancel_requested) return t('status.cancelling')
+  return statusLabel(j.status)
 }
 
 export const isActive = (j: Job) => j.status === 'queued' || j.status === 'running'
 
 export function gpuText(j: Job): string {
   if (j.gpus_assigned.length) return `GPU ${j.gpus_assigned.join(',')}`
-  if (j.gpus_pinned.length) return `指定 GPU ${j.gpus_pinned.join(',')}`
-  return j.gpus_req ? `${j.gpus_req} 张卡` : '不用 GPU'
+  if (j.gpus_pinned.length) return t('gpu.pinned', { list: j.gpus_pinned.join(',') })
+  return j.gpus_req ? t('gpu.count', { n: j.gpus_req }) : t('gpu.none')
 }
 
 /**
@@ -105,7 +111,7 @@ export function progressRemaining(line: string): string | null {
   const normalized = parts.length === 2
     ? `${Number(parts[0])}:${padded[0]}`
     : `${Number(parts[0])}:${padded[0]}:${padded[1]}`
-  return days ? `${Number(days)}天${normalized}` : normalized
+  return days ? t('time.days_time', { d: Number(days), t: normalized }) : normalized
 }
 
 /**
@@ -124,9 +130,79 @@ export function stripProgressTiming(text: string): string {
 
 /** 失败任务的原因：退出码加报错行（找不到报错行时用最后一行输出） */
 export function failText(j: Job): string {
-  const why = j.fail_reason || (j.exit_code !== null ? `退出码 ${j.exit_code}` : '失败')
+  const why = failReasonText(j)
   const line = j.error_line || (j.last_line && compactProgress(j.last_line).text)
   return line ? `${why} · ${line}` : why
+}
+
+const signalNames: Record<number, string> = {
+  2: 'SIGINT', 3: 'SIGQUIT', 4: 'SIGILL', 6: 'SIGABRT', 7: 'SIGBUS', 8: 'SIGFPE',
+  9: 'SIGKILL', 11: 'SIGSEGV', 13: 'SIGPIPE', 14: 'SIGALRM', 15: 'SIGTERM',
+}
+
+/**
+ * 失败原因文字：有机器码（fail_kind/fail_detail）就按当前语言合成，
+ * 旧记录没有分类时回退服务器持久化的 fail_reason 原文。
+ * start 类的详情是自由文本（诊断信息），译前缀后附原文。
+ */
+export function failReasonText(j: Job): string {
+  switch (j.fail_kind) {
+    case 'cuda_oom':
+      return j.ext_seen ? t('fail.cuda_oom_ext') : t('fail.cuda_oom')
+    case 'host_oom':
+      switch (j.fail_detail) {
+        case 'worker': return t('fail.host_oom_worker')
+        case 'guess137': return t('fail.host_oom_guess')
+        case 'confirmed': return t('fail.host_oom')
+        default: return j.fail_reason || t('fail.host_oom')
+      }
+    case 'nccl': return t('fail.nccl')
+    case 'exception': return t('fail.exception')
+    case 'reboot': return t('fail.reboot')
+    case 'killed': return t('fail.killed')
+    case 'signal': {
+      const n = j.exit_code !== null && j.exit_code > 128 ? j.exit_code - 128 : null
+      const sig = j.fail_detail || (n !== null ? signalNames[n] ?? t('fail.signal_num', { n }) : '')
+      return sig ? t('fail.signal', { sig }) : j.fail_reason || t('fail.signal_generic')
+    }
+    case 'exit':
+      return j.exit_code !== null ? t('fail.exit_code', { code: j.exit_code }) : j.fail_reason || t('fail.failed')
+    case 'start':
+      // fail_detail 是不带前缀的原始启动错误（诊断原文，不翻译）；旧服务器没有它时回退 fail_reason 原文
+      if (j.fail_detail) return t('fail.start_detail', { detail: j.fail_detail })
+      return j.fail_reason || t('fail.start')
+    default:
+      return j.fail_reason || (j.exit_code !== null ? t('fail.exit_code', { code: j.exit_code }) : t('fail.failed'))
+  }
+}
+
+/** 失败是否"只有退出码"（没有别的原因文字）：优先按机器码，旧服务器回退原文匹配 */
+export function exitCodeOnly(j: Job): boolean {
+  if (j.fail_kind) return j.fail_kind === 'exit'
+  return !j.fail_reason || /^退出码 -?\d+$/.test(j.fail_reason)
+}
+
+/**
+ * 队列暂停原因：按 kind 合成（本地化）；旧服务器没有结构化字段时回退 reason 原文。
+ * 磁盘暂停的具体余量数字在 disk_available_gb/disk_min_gb 里，没有就用通用文案。
+ */
+export function queuePauseText(q: QueueState): string {
+  if (!q.paused) return ''
+  switch (q.kind) {
+    case 'disk':
+      if (q.disk_available_gb != null && q.disk_min_gb != null) {
+        return t('queue.paused_disk', { available: q.disk_available_gb, min: q.disk_min_gb })
+      }
+      return q.reason || t('queue.paused_disk_generic')
+    case 'fail_fast':
+      if (q.job_id != null && q.fail_seconds != null) return t('queue.paused_fail_fast', { id: q.job_id, seconds: q.fail_seconds })
+      if (q.job_id != null) return t('queue.paused_fail_fast_plain', { id: q.job_id })
+      return q.reason || ''
+    case 'manual':
+      return t('queue.paused_manual')
+    default:
+      return q.reason || ''
+  }
 }
 
 /**

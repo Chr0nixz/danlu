@@ -34,6 +34,7 @@ import (
 	"danlu/internal/settings"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
+	"danlu/internal/strict"
 	"danlu/internal/system"
 	"danlu/internal/terminal"
 	"danlu/internal/tlsutil"
@@ -60,6 +61,7 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   cert --regen      重新生成本地 CA 和证书（公网 IP 变化后使用）
   ca                把本地 CA 证书打印到标准输出，首次接入时用：ssh <服务器> danlu ca > danlu-ca.crt
   install-service   安装为 systemd 用户服务（开机自启、退出 SSH 后继续运行）
+  strict            严格限卡：sudo danlu strict install | uninstall [--user 用户]；status 查看状态
   restart           重启服务（正在跑的训练不受影响）
   logs [-n 行数]    查看服务日志（journalctl）
   prune             按保留策略清理任务文件；--dry-run 预览，--older-than 72h 指定时长
@@ -74,6 +76,11 @@ const usage = `danlu — GPU 服务器训练任务管理面板
 `
 
 func main() {
+	// 严格限卡的 root 助手是这个程序的副本（/usr/local/libexec/danlu-gpu-helper），经 sudo 运行。
+	// 按程序名最先分流：之后的代码一行都不以 root 执行，不读配置、不碰数据目录
+	if filepath.Base(os.Args[0]) == strict.HelperName {
+		os.Exit(strict.RunHelper(os.Args[1:], os.Stdin, os.Stdout, version))
+	}
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
 		os.Exit(2)
@@ -119,6 +126,11 @@ func main() {
 		err = cmdReplace(args)
 	case "install-service":
 		err = cmdInstallService()
+	case "strict":
+		err = cmdStrict(args)
+	case "job-exec":
+		// 严格任务的服务入口，由 systemd 以用户身份执行，不在用法里列出
+		os.Exit(runner.JobExec(args))
 	case "version", "--version", "-v":
 		fmt.Println("danlu", version)
 	case "help", "--help", "-h":
@@ -325,6 +337,14 @@ func cmdServe(args []string) error {
 	defer stop()
 	hostname, _ := os.Hostname()
 	notifier := notify.New(st, c.Notify, hostname, c.BaseURL())
+	// 推送语言：面板可改的 ui.notify_lang 偏好（settings 表），发送时读取，改动对未发批次也生效
+	notifier.Lang = func() string {
+		v, err := st.GetSetting("ui.notify_lang")
+		if err != nil {
+			return ""
+		}
+		return v
+	}
 	if err := notifier.Initialize(); err != nil {
 		log.Printf("初始化手机推送失败，将在后台重试: %v", err)
 	}
@@ -388,12 +408,27 @@ func cmdServe(args []string) error {
 	}
 	go resources.Run(ctx)
 
-	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, EnvRoot: p.Envs, CondaBase: c.Runtime.CondaBase}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	run := &runner.Runner{RunRoot: p.Run, LogRoot: p.Logs, EnvRoot: p.Envs, CondaBase: c.Runtime.CondaBase,
+		Exe: exe, StrictStart: strict.Start}
 	terminals := terminal.NewManager()
 	terminals.SetLifetime(func() time.Duration { return rt.Current().TerminalLifetime })
 	defer terminals.Close()
 	live := schedulerLive(rt.Current())
-	mgr := scheduler.New(st, mon, run, scheduler.Options{
+	// 严格限卡助手的状态：开着时启动后查一次，不可用期间定时复查，恢复后叫醒调度器
+	var mgr *scheduler.Manager
+	strictMon := strict.NewMonitor(strict.Check, func() bool { return rt.Current().Strict }, func() {
+		if mgr != nil {
+			mgr.Wake()
+		}
+	})
+	mgr = scheduler.New(st, mon, run, scheduler.Options{
 		SnapshotDir:     p.Snapshots,
 		RunRoot:         p.Run,
 		OutputRoot:      outputRoot,
@@ -406,7 +441,10 @@ func cmdServe(args []string) error {
 		DiskMinBytes:    live.DiskMinBytes,
 		ManifestTimeout: 10 * time.Second,
 		Live:            func() scheduler.LiveOptions { return schedulerLive(rt.Current()) },
+		Strict:          live.Strict,
+		StrictGate:      strictMon,
 	})
+	go strictMon.Run(ctx)
 	// 先占住端口再接管任务：端口被占用时直接退出，不碰任何任务
 	ln, err := net.Listen("tcp", net.JoinHostPort(c.Server.Bind, strconv.Itoa(c.Server.Port)))
 	if err != nil {
@@ -445,7 +483,7 @@ func cmdServe(args []string) error {
 	}
 	srv := &api.Server{Cfg: c, Paths: p, Store: st, Mgr: mgr, GPUs: mon, System: host, Auth: au, Runner: run, Terminal: terminals,
 		Static: webui.FS(), Version: version, Disks: disks, Resources: resources, Self: self, Notify: notifier,
-		Settings: rt, Pruner: pruner}
+		Settings: rt, Pruner: pruner, Strict: strictMon}
 
 	// 请求的 context 都从 base 派生：停止时先取消它，日志 SSE 这类长连接马上退出
 	base, cancelBase := context.WithCancel(context.Background())
@@ -563,6 +601,7 @@ func schedulerLive(v settings.Values) scheduler.LiveOptions {
 		FailFast:     v.FailFast,
 		SilenceAlert: v.SilenceAlert,
 		DiskMinBytes: uint64(max(v.DiskMinGB, 0)) << 30,
+		Strict:       v.Strict,
 		Snapshot: snapshot.Options{
 			MaxFile:  int64(v.SnapshotMaxFileMB) << 20,
 			MaxTotal: int64(v.SnapshotMaxTotalMB) << 20,
@@ -852,6 +891,62 @@ func setPassword(p config.Paths, pw string) error {
 		return err
 	}
 	return st.DeleteSessionsExcept("")
+}
+
+// cmdStrict 管理严格限卡的 root 助手。install、uninstall 要 sudo，只写 /usr/local/libexec 和 /etc/sudoers.d，
+// 不碰数据目录（以 root 打开数据库会留下 root 拥有的文件）；开关在面板「设置 → 调度」里。
+func cmdStrict(args []string) error {
+	if len(args) == 0 {
+		return errors.New("用法: sudo danlu strict install|uninstall [--user 用户]；danlu strict status")
+	}
+	fs := flag.NewFlagSet("strict "+args[0], flag.ExitOnError)
+	userFlag := fs.String("user", "", "授权的用户名或 uid，默认是执行 sudo 的用户")
+	fs.Parse(args[1:])
+	switch args[0] {
+	case "install", "uninstall":
+		target, err := strict.ResolveTarget(*userFlag)
+		if err != nil {
+			return err
+		}
+		if args[0] == "uninstall" {
+			return strict.Uninstall(target, os.Stdout)
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if resolved, err := filepath.EvalSymlinks(self); err == nil {
+			self = resolved
+		}
+		return strict.Install(target, self, os.Stdout)
+	case "status":
+		if os.Geteuid() != 0 {
+			st, err := store.Open(paths().DB)
+			if err != nil {
+				return err
+			}
+			v, err := st.GetSetting(settings.StrictKey)
+			st.Close()
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			fmt.Println("开关    ", map[bool]string{true: "开启", false: "关闭"}[v == "1"])
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		res := strict.Check(ctx)
+		if res.OK {
+			fmt.Println("助手     可用，版本", res.HelperVersion)
+			return nil
+		}
+		fmt.Printf("助手     不可用（%s）：%s\n", res.Reason, res.Detail)
+		if res.Reason == strict.ReasonNotInstalled || res.Reason == strict.ReasonNoSudo || res.Reason == strict.ReasonProtocol {
+			self, _ := os.Executable()
+			fmt.Printf("安装     sudo %s strict install\n", self)
+		}
+		return nil
+	}
+	return fmt.Errorf("未知子命令 %q", args[0])
 }
 
 // cmdEntrance 查看或重新生成安全入口。入口存在数据库里（面板上也能改），正在运行的服务几秒内跟上，不用重启。

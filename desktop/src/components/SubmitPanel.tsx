@@ -1,4 +1,5 @@
 import { projectOf, type GPU, type Job, type SubmitReq } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { useMutation, useQueries, useQuery } from '@tanstack/react-query'
 import { GitBranch, History, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
@@ -7,7 +8,7 @@ import { isOffline, jobKey } from '../lib/fleet'
 import { placementFor, rememberPlacement } from '../lib/local'
 import { MOD, modKey } from '../lib/platform'
 import { useWorkspace, type Draft } from '../lib/workspace'
-import { heatStyle } from './GpuStrip'
+import { externalBusy, freeCount, heatStyle } from './GpuStrip'
 import { Button, cx, ErrorText, Field, inputClass, Kbd, Segmented, useToast } from './ui'
 
 function blank(server: string): Draft {
@@ -25,7 +26,7 @@ function parseEnv(text: string): Record<string, string> | string {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
     const i = line.indexOf('=')
-    if (i <= 0) return `环境变量要写成 KEY=VALUE：${line}`
+    if (i <= 0) return t('submit.env_invalid', { line })
     env[line.slice(0, i).trim()] = line.slice(i + 1).trim()
   }
   return env
@@ -69,7 +70,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
     mutationFn: (req: SubmitReq) => api.submit(req),
     onSuccess: (job) => {
       rememberPlacement(projectOf(job.workdir), d.server, { workdir: job.workdir, conda_env: job.conda_env })
-      toast(`已提交 ${jobKey(d.server, job.id)}${job.status === 'queued' ? '，正在排队' : ''}`)
+      toast(job.status === 'queued' ? t('submit.submitted_queued', { key: jobKey(d.server, job.id) }) : t('submit.submitted', { key: jobKey(d.server, job.id) }))
       refreshFleet()
       openJob(d.server, job.id)
     },
@@ -81,8 +82,8 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
     setFormError(null)
     const env = parseEnv(envText)
     if (typeof env === 'string') return setFormError(env)
-    if (!d.workdir.trim()) return setFormError('选一个这台服务器上的工作目录')
-    if (!d.cmd.trim()) return setFormError('命令不能为空')
+    if (!d.workdir.trim()) return setFormError(t('submit.workdir_required'))
+    if (!d.cmd.trim()) return setFormError(t('submit.cmd_required'))
     submit.mutate({
       name: d.name.trim(),
       workdir: d.workdir.trim(),
@@ -106,25 +107,25 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
     >
       <div className="flex items-start gap-3 px-4 pt-4 pb-3">
         <div className="min-w-0 flex-1">
-          <h2 className="text-[15px] font-semibold">{d.source ? '复制任务' : '新建任务'}</h2>
+          <h2 className="text-[15px] font-semibold">{d.source ? t('submit.copy_title') : t('submit.new_title')}</h2>
           <p className="mt-0.5 text-fg-3">
             {d.source ? (
               <>
-                从 <span className="num text-fg-2">{d.source}</span> 复制，改完再提交
-                {d.rerun_of && '（记为重跑）'}
+                {t('submit.copy_before')}<span className="num text-fg-2">{d.source}</span>{t('submit.copy_after')}
+                {d.rerun_of && t('submit.rerun_mark')}
               </>
             ) : (
-              '代码先用 rsync / scp 同步到服务器上'
+              t('submit.sync_hint')
             )}
           </p>
         </div>
-        <Button variant="ghost" className="-mt-0.5 -mr-1.5 px-1.5" aria-label="关闭" onClick={closePane}>
+        <Button variant="ghost" className="-mt-0.5 -mr-1.5 px-1.5" aria-label={t('common.close')} onClick={closePane}>
           <X />
         </Button>
       </div>
 
       <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 pb-4">
-        <Field label="服务器">
+        <Field label={t('submit.server')}>
           <Segmented
             value={d.server}
             onChange={switchServer}
@@ -137,14 +138,14 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
           <p className="-mt-2 flex items-center gap-1.5 text-[11.5px] text-fg-3">
             <GitBranch className="size-3.5" />
             {git.isLoading ? (
-              '检查 git 状态…'
+              t('submit.git_checking')
             ) : git.data?.is_git ? (
               <span className="num">
                 {git.data.commit?.slice(0, 8)} · {git.data.branch}
-                {git.data.dirty && <span className="text-warn"> · 有未提交的改动，会存进快照</span>}
+                {git.data.dirty && <span className="text-warn">{t('submit.git_dirty')}</span>}
               </span>
             ) : (
-              '不是 git 仓库，只保存文件快照'
+              t('submit.not_git')
             )}
           </p>
         )}
@@ -152,9 +153,9 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
         <CommandField project={project} value={d.cmd} onChange={(cmd) => set({ cmd })} servers={servers} />
 
         <div className="grid grid-cols-2 gap-3">
-          <Field label="conda 环境" hint={envs.data && !envs.data.available ? '服务器没有配置 conda' : undefined}>
+          <Field label={t('submit.conda')} hint={envs.data && !envs.data.available ? t('submit.conda_missing') : undefined}>
             <select className={inputClass} value={d.conda_env} onChange={(e) => set({ conda_env: e.target.value })}>
-              <option value="">不激活</option>
+              <option value="">{t('submit.conda_none')}</option>
               {d.conda_env && !envs.data?.envs.some((x) => x.name === d.conda_env) && <option value={d.conda_env}>{d.conda_env}</option>}
               {envs.data?.envs.map((x) => (
                 <option key={x.path} value={x.name}>
@@ -163,7 +164,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
               ))}
             </select>
           </Field>
-          <Field label="名称" hint="留空用命令">
+          <Field label={t('submit.name')} hint={t('submit.name_hint')}>
             <input className={inputClass} value={d.name} onChange={(e) => set({ name: e.target.value })} placeholder="vit lr3e-4" />
           </Field>
         </div>
@@ -174,8 +175,8 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
               value={mode}
               onChange={setMode}
               options={[
-                { value: 'count', label: '按卡数' },
-                { value: 'pinned', label: '指定卡号' },
+                { value: 'count', label: t('submit.mode_count') },
+                { value: 'pinned', label: t('submit.mode_pinned') },
               ]}
             />
             {mode === 'count' ? (
@@ -189,7 +190,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
                   onChange={(e) => set({ gpus: Math.max(0, Number(e.target.value) || 0) })}
                 />
                 <span className="text-fg-3">
-                  张卡，空闲 {gpus.filter((g) => !g.job && !g.external.length && !(g.unknown_mem_mb ?? 0)).length} / {gpus.length}；不够时排队
+                  {t('submit.cards_suffix', { free: freeCount(gpus), total: gpus.length })}
                 </span>
               </div>
             ) : (
@@ -198,7 +199,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
           </div>
         </Field>
 
-        <Field label="环境变量" hint="每行一个 KEY=VALUE">
+        <Field label={t('submit.env')} hint={t('submit.env_hint')}>
           <textarea
             className={cx(inputClass, 'num h-auto min-h-[52px] resize-y py-1.5 text-[11.5px]')}
             rows={2}
@@ -209,7 +210,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
           />
         </Field>
 
-        <Field label="Bash 环境" hint="缺失或加载超时会启动失败">
+        <Field label={t('submit.bashrc')} hint={t('submit.bashrc_hint')}>
           <span className="flex min-h-7 items-center gap-2 text-[11.5px] text-fg-2">
             <input
               type="checkbox"
@@ -217,7 +218,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
               onChange={(e) => set({ inherit_bashrc: e.target.checked })}
               className="size-4 accent-fg"
             />
-            加载服务器 ~/.bashrc 导出的变量
+            {t('submit.bashrc_load')}
           </span>
         </Field>
       </div>
@@ -226,7 +227,7 @@ export function SubmitPanel({ initial, servers }: { initial: Draft | null; serve
         <ErrorText error={formError ?? submit.error} className="min-w-0 flex-1 truncate" />
         <span className="ml-auto" />
         <Button variant="primary" type="submit" loading={submit.isPending} disabled={!d.server}>
-          提交到 {d.server}
+          {t('submit.submit_to', { server: d.server })}
           <Kbd className="border-on-primary/30 text-on-primary/70">{MOD}+Enter</Kbd>
         </Button>
       </div>
@@ -257,7 +258,7 @@ function WorkdirField({ server, value, onChange, sourceProject }: { server: stri
 
   return (
     <div ref={box} className="relative" onBlur={(e) => !box.current?.contains(e.relatedTarget) && setOpen(false)}>
-      <Field label="工作目录" hint={sourceProject ? `第一次复制到 ${server}：选这台上 ${sourceProject} 的目录` : value ? `项目 ${projectOf(value)}` : undefined}>
+      <Field label={t('submit.workdir')} hint={sourceProject ? t('submit.workdir_first_copy', { server, project: sourceProject }) : value ? t('submit.workdir_project', { project: projectOf(value) }) : undefined}>
         <input
           className={cx(inputClass, 'num text-[11.5px]')}
           value={typed}
@@ -274,7 +275,7 @@ function WorkdirField({ server, value, onChange, sourceProject }: { server: stri
       </Field>
       {open && options.length > 0 && (
         <div className="absolute inset-x-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-[6px] border border-line-strong bg-panel py-1 shadow-float">
-          {!probe && <div className="px-2.5 pt-0.5 pb-1 text-[11px] text-fg-3">最近用过</div>}
+          {!probe && <div className="px-2.5 pt-0.5 pb-1 text-[11px] text-fg-3">{t('submit.recent')}</div>}
           {options.map((p) => (
             <button
               key={p}
@@ -321,7 +322,7 @@ function CommandField({ project, value, onChange, servers }: { project: string; 
   }, [results, project])
 
   return (
-    <Field label="命令">
+    <Field label={t('submit.cmd')}>
       <textarea
         className={cx(inputClass, 'num h-auto min-h-[68px] resize-y py-1.5 text-[11.5px]')}
         rows={3}
@@ -334,7 +335,7 @@ function CommandField({ project, value, onChange, servers }: { project: string; 
         <div className="mt-1.5 rounded-[6px] border border-line bg-card py-1">
           <div className="flex items-center gap-1.5 px-2.5 pt-0.5 pb-1 text-[11px] text-fg-3">
             <History className="size-3" />
-            {project} 最近用过的命令
+            {t('submit.cmd_recent', { project })}
           </div>
           {history.map((j) => (
             <button
@@ -355,13 +356,13 @@ function CommandField({ project, value, onChange, servers }: { project: string; 
 }
 
 function PinnedPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[]; onChange: (v: number[]) => void }) {
-  if (!gpus.length) return <p className="text-fg-3">这台服务器没有报告 GPU</p>
+  if (!gpus.length) return <p className="text-fg-3">{t('submit.no_gpu')}</p>
   return (
     <div className="flex flex-wrap gap-1.5">
       {gpus.map((g) => {
         const on = value.includes(g.index)
         const unknown = (g.unknown_mem_mb ?? 0) > 0
-        const note = g.job ? `任务 ${g.job.id}` : g.external.length ? '外部进程' : unknown ? '未知显存占用' : '空闲'
+        const note = g.job ? t('submit.gpu_job', { id: g.job.id }) : g.reservation ? t('submit.gpu_reservation', { id: g.reservation.id }) : g.external.length ? t('submit.gpu_external') : unknown ? t('submit.gpu_unknown') : t('submit.gpu_idle')
         return (
           <button
             key={g.index}
@@ -375,7 +376,7 @@ function PinnedPicker({ gpus, value, onChange }: { gpus: GPU[]; value: number[];
             )}
           >
             <span className="num text-[11.5px] font-medium">GPU {g.index}</span>
-            <span className={cx('text-[11px]', g.external.length || unknown ? 'text-warn' : 'text-fg-3')}>{note}</span>
+            <span className={cx('text-[11px]', externalBusy(g) ? 'text-warn' : 'text-fg-3')}>{note}</span>
           </button>
         )
       })}

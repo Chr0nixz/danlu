@@ -3,6 +3,7 @@ import { useMutation } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Download, Search, WrapText } from 'lucide-react'
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { usePrefs } from '../lib/prefs'
 import { LogSearchDialog } from './LogSearchDialog'
 import { cx, ErrorBox, Spinner } from './ui'
@@ -30,15 +31,15 @@ export function LogViewer({ jobId, offset, onJump }: { jobId: number; offset?: n
     <>
       <LogOutput key={offset ?? 'tail'} jobId={jobId} offset={offset} box={box} onTail={() => onJump()} compact={selected >= 0} tools={
         <>
-          <button type="button" className={toolbarButton} aria-label="搜索日志" title="搜索日志" onClick={() => setSearchOpen(true)}>
+          <button type="button" className={toolbarButton} aria-label={t('job.log_search')} title={t('job.log_search')} onClick={() => setSearchOpen(true)}>
             <Search aria-hidden />
-            <span className={selected >= 0 ? 'max-sm:hidden' : undefined}>搜索</span>
+            <span className={selected >= 0 ? 'max-sm:hidden' : undefined}>{t('job.search')}</span>
           </button>
           {selected >= 0 && (
-            <div className="flex items-center" aria-label={`第 ${selected + 1} 条命中，共 ${matches.length} 条`}>
-              <button type="button" className={toolbarButton} aria-label="上一个命中" title="上一个命中" disabled={selected === 0}
+            <div className="flex items-center" aria-label={t('job.log_match_position', { current: selected + 1, total: matches.length })}>
+              <button type="button" className={toolbarButton} aria-label={t('job.log_prev_match')} title={t('job.log_prev_match')} disabled={selected === 0}
                 onClick={() => jump(selected - 1)}><ChevronLeft aria-hidden /></button>
-              <button type="button" className={toolbarButton} aria-label="下一个命中" title="下一个命中" disabled={selected + 1 >= matches.length}
+              <button type="button" className={toolbarButton} aria-label={t('job.log_next_match')} title={t('job.log_next_match')} disabled={selected + 1 >= matches.length}
                 onClick={() => jump(selected + 1)}><ChevronRight aria-hidden /></button>
             </div>
           )}
@@ -111,9 +112,9 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
     const el = box.current
     if (!el) return
     const measure = () => {
-      const t = Math.round(el.getBoundingClientRect().top + window.scrollY)
-      setTop(t)
-      setCramped(window.innerWidth < 640 && window.innerHeight - t - 73 < 120)
+      const nextTop = Math.round(el.getBoundingClientRect().top + window.scrollY)
+      setTop(nextTop)
+      setCramped(window.innerWidth < 640 && window.innerHeight - nextTop - 73 < 120)
     }
     measure()
     const ro = new ResizeObserver(measure)
@@ -147,35 +148,35 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
     <div ref={card} className="overflow-hidden rounded-lg border border-line bg-[#0b0b0b] max-sm:scroll-mt-[7.5rem]">
       <div className="flex h-10 items-center gap-1 border-b border-white/10 px-2 text-xs text-[#8f8f8f] max-sm:h-11 max-sm:gap-0.5">
         <span className="flex shrink-0 items-center gap-1.5 px-1.5">
-          {offset !== undefined ? '定位浏览' : !ended ? (
+          {offset !== undefined ? t('job.log_positioned') : !ended ? (
             <>
               <span className="size-1.5 animate-pulse rounded-full bg-[#3dd68c]" aria-hidden />
-              实时
+              {t('job.log_live')}
             </>
           ) : (
             <>
               <span className="size-1.5 rounded-full bg-[#5a5a5a]" />
-              已结束
+              {t('job.log_ended')}
             </>
           )}
         </span>
-        {start === -1 && <span className="truncate px-1.5">只保留了最近的部分，完整日志请下载</span>}
-        {windowLimited && <span className="truncate px-1.5">定位窗口已读满</span>}
+        {start === -1 && <span className="truncate px-1.5">{t('job.log_window_hint')}</span>}
+        {windowLimited && <span className="truncate px-1.5">{t('job.log_window_full')}</span>}
         <span className="ml-auto" />
         {tools}
         {start > 0 && !windowLimited && (
-          <button type="button" className={tb} aria-label="加载更早" title="加载更早" disabled={loadingOlder} onClick={loadOlder}>
+          <button type="button" className={tb} aria-label={t('job.log_load_older')} title={t('job.log_load_older')} disabled={loadingOlder} onClick={loadOlder}>
             {loadingOlder ? <Spinner className="size-3.5" /> : <ArrowUp />}
-            <span className="hidden sm:inline">加载更早</span>
+            <span className="hidden sm:inline">{t('job.log_load_older')}</span>
           </button>
         )}
-        <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title="自动换行" onClick={() => setWrap(!wrap)}>
+        <button type="button" className={cx(tb, wrap && 'bg-white/10 text-white')} aria-pressed={wrap} title={t('job.log_wrap_title')} onClick={() => setWrap(!wrap)}>
           <WrapText />
-          <span className={label}>换行</span>
+          <span className={label}>{t('job.log_wrap')}</span>
         </button>
-        <a href={`/api/jobs/${jobId}/log/download`} className={tb} title="下载完整日志">
+        <a href={`/api/jobs/${jobId}/log/download`} className={tb} title={t('job.log_download_title')}>
           <Download />
-          <span className={label}>下载</span>
+          <span className={label}>{t('job.log_download')}</span>
         </a>
       </div>
       <div className="relative">
@@ -191,7 +192,7 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
           ) : error ? (
             <ErrorBox error={error} term />
           ) : raw === '' ? (
-            <span className="text-[#8f8f8f]">{ended ? '没有输出' : '等待输出…'}</span>
+            <span className="text-[#8f8f8f]">{ended ? t('job.log_empty') : t('job.log_waiting')}</span>
           ) : (
             <pre ref={pre} className={wrap ? 'whitespace-pre-wrap [overflow-wrap:anywhere]' : 'whitespace-pre'} />
           )}
@@ -203,7 +204,7 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
             className="absolute bottom-3 right-4 inline-flex h-8 items-center gap-1 rounded-md bg-white px-3 text-xs font-medium text-black shadow-[0_4px_12px_rgb(0_0_0/0.4)] hover:bg-[#e6e6e6] max-sm:h-11"
           >
             <ArrowDown className="size-3.5" />
-            {offset !== undefined ? '回到日志末尾' : '回到底部'}
+            {offset !== undefined ? t('job.log_back_to_tail') : t('job.log_back_to_bottom')}
           </button>
         )}
       </div>

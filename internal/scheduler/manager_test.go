@@ -44,6 +44,11 @@ type fakeExec struct {
 	packageErr error
 	packageFn  func(context.Context, runner.Spec, []string) ([]byte, error)
 	manifestFn func(dir string) error // 为空时立即返回
+	// 严格任务：strictErr 模拟助手失败；strictHook 在锁外启动期间调用（模拟 sudo 的几百毫秒）；
+	// jobOOM 是包装脚本记下的每个任务的 OOM 计数
+	strictErr  error
+	strictHook func(runner.Spec)
+	jobOOM     map[int64]int64
 }
 
 func newExec() *fakeExec {
@@ -67,7 +72,7 @@ func TestSnapshotRerunDoesNotStartWhenRestoreFails(t *testing.T) {
 	}
 	h.tick()
 	got := h.job(j.ID)
-	if got.Status != store.StatusFailed || got.FailKind != "start" || !strings.Contains(got.FailReason, "恢复任务") {
+	if got.Status != store.StatusFailed || got.FailKind != "start" || !strings.Contains(got.FailReason, "恢复任务") || !strings.HasPrefix(got.FailDetail, "恢复任务") {
 		t.Fatalf("恢复错误未记录为启动失败: %+v", got)
 	}
 	if len(h.ex.startedIDs()) != 0 {
@@ -87,17 +92,39 @@ func (f *fakeExec) LoadEnv(ctx context.Context, _ bool) ([]string, error) {
 	return []string{"PATH=/bin"}, nil
 }
 
-func (f *fakeExec) Start(s runner.Spec, _ []string) (int, uint64, error) {
+func (f *fakeExec) Start(s runner.Spec, _ []string) (runner.Started, error) {
+	if s.Strict {
+		f.mu.Lock()
+		hook := f.strictHook
+		f.mu.Unlock()
+		if hook != nil {
+			hook(s)
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.startErr != nil {
-		return 0, 0, f.startErr
+		return runner.Started{}, f.startErr
+	}
+	if s.Strict && f.strictErr != nil {
+		return runner.Started{}, f.strictErr
 	}
 	f.nextPID++
 	pid := f.nextPID
 	f.alive[pid], f.pidFile[s.JobID] = true, pid
 	f.started = append(f.started, s)
-	return pid, startOf(pid), nil
+	started := runner.Started{PID: pid, StartTime: startOf(pid)}
+	if s.Strict {
+		started.Unit = fmt.Sprintf("danlu-job-test-%d.service", s.JobID)
+	}
+	return started, nil
+}
+
+func (f *fakeExec) JobOOMKills(id int64) (int64, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n, ok := f.jobOOM[id]
+	return n, ok
 }
 
 func (f *fakeExec) Alive(_ int64, pid int, start uint64) bool {
@@ -253,6 +280,28 @@ type flakyStore struct {
 	failQueue      bool
 	failQueueRead  bool
 	failQueuedRead bool
+	failResSave    bool
+	failResRead    bool
+}
+
+func (f *flakyStore) SaveReservation(r *store.Reservation, events ...*store.Event) error {
+	f.mu.Lock()
+	fail := f.failResSave
+	f.mu.Unlock()
+	if fail {
+		return errors.New("模拟预约写库失败")
+	}
+	return f.Store.SaveReservation(r, events...)
+}
+
+func (f *flakyStore) OpenReservations() ([]*store.Reservation, error) {
+	f.mu.Lock()
+	fail := f.failResRead
+	f.mu.Unlock()
+	if fail {
+		return nil, errors.New("模拟预约读取失败")
+	}
+	return f.Store.OpenReservations()
 }
 
 func (f *flakyStore) GetSetting(key string) (string, error) {
@@ -628,7 +677,7 @@ func TestStartFailure(t *testing.T) {
 		t.Fatal("启动失败的任务不应留下待采集配方")
 	}
 	h.events(a, store.EventJobFinished)
-	if j := h.job(a); j.FailReason != "启动失败: fork 失败" || j.FailKind != "start" {
+	if j := h.job(a); j.FailReason != "启动失败: fork 失败" || j.FailKind != "start" || j.FailDetail != "fork 失败" {
 		t.Fatalf("启动失败原因或分类不正确: %+v", j)
 	}
 }
@@ -997,8 +1046,8 @@ func TestStuckManifestFailsOnlyItsJob(t *testing.T) {
 	within(t, 2*time.Second, "启动", h.m.launches.Wait)
 	h.m.captures.Wait()
 	h.expect(b, store.StatusRunning)
-	if j := h.job(a); j.Status != store.StatusFailed || j.FailKind != "start" || !strings.Contains(j.FailReason, "没有响应") {
-		t.Fatalf("卡住的输出目录应该让任务启动失败: %s %s %s", j.Status, j.FailKind, j.FailReason)
+	if j := h.job(a); j.Status != store.StatusFailed || j.FailKind != "start" || !strings.Contains(j.FailReason, "没有响应") || !strings.HasPrefix(j.FailDetail, "danlu.json: ") {
+		t.Fatalf("卡住的输出目录应该让任务启动失败: %s %s %s %q", j.Status, j.FailKind, j.FailReason, j.FailDetail)
 	}
 	if ids := h.ex.startedIDs(); !slices.Equal(ids, []int64{b}) {
 		t.Fatalf("只应启动另一个任务: %v", ids)

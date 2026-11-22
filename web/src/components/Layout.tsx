@@ -3,20 +3,22 @@ import { Activity, Flame, LayoutDashboard, ListChecks, Plus, Settings, Terminal 
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
 import { PageBoundary } from './ErrorBoundary'
 import { ShortcutDialog } from './Shortcuts'
 import { Announcer, buttonClass, cx, Kbd } from './ui'
 
-const nav = [
-  { to: '/', label: '总览', icon: LayoutDashboard, end: true },
-  { to: '/resources', label: '资源', icon: Activity, end: false },
-  { to: '/jobs', label: '任务', icon: ListChecks, end: false },
-  { to: '/terminal', label: '终端', icon: TerminalIcon, end: false },
-  { to: '/settings', label: '设置', icon: Settings, end: false },
-]
-const homeNav = nav.find((n) => n.to === '/')!
-const jobsNav = nav.find((n) => n.to === '/jobs')!
+// 导航文案在组件渲染时经 t() 取，不做模块级常量表，免得冻结语言
+function navItems() {
+  return [
+    { to: '/', label: t('layout.nav_overview'), icon: LayoutDashboard, end: true },
+    { to: '/resources', label: t('layout.nav_resources'), icon: Activity, end: false },
+    { to: '/jobs', label: t('layout.nav_jobs'), icon: ListChecks, end: false },
+    { to: '/terminal', label: t('layout.nav_terminal'), icon: TerminalIcon, end: false },
+    { to: '/settings', label: t('layout.nav_settings'), icon: Settings, end: false },
+  ]
+}
 
 export function Brand({ className }: { className?: string }) {
   return (
@@ -32,6 +34,9 @@ const isTyping = (t: EventTarget | null) =>
 export function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
+  const nav = navItems()
+  const homeNav = nav.find((n) => n.to === '/')!
+  const jobsNav = nav.find((n) => n.to === '/jobs')!
   const me = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 })
   const showTerminal = settings.data?.terminal_enabled === true
@@ -69,8 +74,8 @@ export function Layout() {
   const failed = useRecentFailures().data ?? 0
   const running = active.data?.jobs.filter((j) => j.status === 'running').length ?? 0
   useEffect(() => {
-    const parts = [running && `${running} 运行`, failed && `${failed} 失败`].filter(Boolean)
-    const base = me.data?.hostname ? `丹炉 · ${me.data.hostname}` : '丹炉 Danlu'
+    const parts = [running && t('layout.title_running', { n: running }), failed && t('layout.title_failed', { n: failed })].filter(Boolean)
+    const base = me.data?.hostname ? t('layout.title_host', { hostname: me.data.hostname }) : t('layout.title')
     document.title = parts.length ? `${parts.join(' · ')} — ${base}` : base
   }, [running, failed, me.data?.hostname])
 
@@ -80,20 +85,20 @@ export function Layout() {
         href="#main"
         className="sr-only z-40 rounded-md bg-inv px-3 py-2 text-ui font-medium text-inv-fg focus:not-sr-only focus:fixed focus:top-2 focus:left-2"
       >
-        跳到主要内容
+        {t('layout.skip_to_content')}
       </a>
       <header className="sticky top-0 z-30 border-b border-line bg-surface">
         <div className="mx-auto flex h-12 max-w-[1200px] items-center gap-3 px-4 sm:px-6">
           <Link to="/" className="flex h-full min-w-0 items-center gap-2">
             <Brand />
-            <span className="text-sm font-semibold tracking-tight">丹炉</span>
+            <span className="text-sm font-semibold tracking-tight">{t('layout.brand')}</span>
           </Link>
           {me.data?.hostname && (
             <>
               <span className="text-fg-4" aria-hidden>
                 /
               </span>
-              <span className="min-w-0 truncate text-ui text-fg-2" title="当前服务器">
+              <span className="min-w-0 truncate text-ui text-fg-2" title={t('layout.current_server')}>
                 {me.data.hostname}
               </span>
             </>
@@ -115,15 +120,15 @@ export function Layout() {
               </NavLink>
             ))}
           </nav>
-          <Link to="/new" className={cx(buttonClass('primary', 'sm'), 'ml-auto max-sm:hidden')} title="新建任务（N）">
+          <Link to="/new" className={cx(buttonClass('primary', 'sm'), 'ml-auto max-sm:hidden')} title={t('layout.new_job_title')}>
             <Plus />
-            新建任务
+            {t('layout.new_job')}
             <Kbd>N</Kbd>
           </Link>
           {showTerminal && (
             <NavLink
               to="/terminal"
-              aria-label="网页终端"
+              aria-label={t('layout.terminal_aria')}
               className={({ isActive }) => cx(buttonClass('ghost', 'icon'), 'ml-auto sm:hidden', isActive && 'bg-hover text-fg')}
             >
               <TerminalIcon className="size-5" />
@@ -131,7 +136,7 @@ export function Layout() {
           )}
           <NavLink
             to="/settings"
-            aria-label="设置"
+            aria-label={t('layout.nav_settings')}
             className={({ isActive }) => cx(buttonClass('ghost', 'icon'), '-mr-2 sm:hidden', !showTerminal && 'ml-auto', isActive && 'bg-hover text-fg')}
           >
             <Settings className="size-5" />
@@ -150,7 +155,7 @@ export function Layout() {
       {/* 手机底部导航：新建放在正中间，终端和设置在顶栏右侧 */}
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] sm:hidden">
         <div className="grid h-14 grid-cols-3">
-          {[homeNav, { to: '/new', label: '新建', icon: Plus, end: false }, jobsNav].map((n) => (
+          {[homeNav, { to: '/new', label: t('layout.nav_new'), icon: Plus, end: false }, jobsNav].map((n) => (
             <NavLink
               key={n.to}
               to={n.to}

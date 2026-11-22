@@ -29,7 +29,7 @@ func (m *Manager) transition(j *store.Job, to, reason string) error {
 	case store.StatusQueued:
 		j.PID, j.PIDStart, j.StartedAt, j.GPUsAssigned, j.MasterPort, j.BootID = 0, 0, nil, nil, 0, ""
 		j.EndedAt, j.ExitCode, j.CancelRequested, j.FailReason = nil, nil, false, ""
-		j.FailKind, j.ExtSeen, j.OOMBase, j.TracebackOffset = "", false, -1, nil
+		j.FailKind, j.FailDetail, j.ExtSeen, j.OOMBase, j.TracebackOffset = "", "", false, -1, nil
 		j.Recipe = nil
 		j.Profile = nil
 		delete(m.runStats, j.ID)
@@ -44,7 +44,7 @@ func (m *Manager) transition(j *store.Job, to, reason string) error {
 		if to == store.StatusFailed {
 			j.FailReason = reason
 		} else {
-			j.FailKind, j.TracebackOffset = "", nil
+			j.FailKind, j.FailDetail, j.TracebackOffset = "", "", nil
 		}
 		// danlu 可能在进程启动后、保存 pid 前退出；收尾时把启动事件一起补上。
 		if j.PID > 0 {
@@ -61,7 +61,7 @@ func (m *Manager) transition(j *store.Job, to, reason string) error {
 			tracebackOffset = j.TracebackOffset
 		}
 		events = append(events, jobEvent(j, store.EventJobFinished, map[string]any{
-			"status": to, "name": j.Name, "reason": reason, "fail_kind": j.FailKind, "error_line": errorLine,
+			"status": to, "name": j.Name, "reason": reason, "fail_kind": j.FailKind, "fail_detail": j.FailDetail, "error_line": errorLine,
 			"exit_code": j.ExitCode, "duration": duration, "ext_seen": j.ExtSeen,
 			"traceback_offset": tracebackOffset,
 		}))

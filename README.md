@@ -181,6 +181,7 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 | `danlu notify test` | 按当前配置发一条测试推送；设置页也有测试按钮 |
 | `danlu notify setup --disable` | 关闭推送，重启服务后生效 |
 | `danlu trace /path/to/checkpoint` | 从服务器上的产物路径反查任务，并打印面板链接 |
+| `sudo ~/bin/danlu strict install` / `danlu strict status` | 安装严格限卡的 root 助手、查看状态（见下文「严格限卡」） |
 | `danlu doctor` / `danlu doctor --json` | 检查 GPU、conda、systemd、磁盘、证书、端口和时间同步；有 fail 项时退出码为 1。`--json` 输出供工具读取，跑完即返回 0，结论看每项的 `level` |
 | `danlu totp enable` / `danlu totp disable` | 在服务器终端启用或关闭登录两步验证；启用时扫描二维码并确认一次验证码 |
 | `./danlu.new update` | 升级：自动定位运行中的旧程序，用当前新程序替换并重启服务 |
@@ -219,13 +220,30 @@ rm -rf ~/.danlu      # 会删除所有任务记录、日志和代码快照，按
 
 默认使用 ntfy.sh，也可以用 `danlu notify setup --server https://ntfy.example.com --topic training` 接入自建服务；需要令牌时加 `--token-stdin` 从标准输入读取。设置保存在 `[notify] ntfy` 和 `token` 中，topic 留空关闭。重复运行 setup 会保留原订阅，`--new-topic` 才会生成新 topic；订阅地址本身相当于密钥，不要公开。带鉴权的订阅还需在 ntfy App 中登录对应服务器。
 
-推送包括任务失败、自动队列暂停、磁盘余量不足、持续 60 秒的 GPU 采集错误及恢复、外部进程占卡、队首被外部进程阻塞和日志静默。提交时可勾选「结束时推送」，排队或运行中也可从详情修改。成功和取消按开关推送，失败照常提醒。30 秒窗口内的结束提醒合并发送，快速失败使用一条带原因的队列暂停通知。
+推送包括任务失败、自动队列暂停、磁盘余量不足、持续 60 秒的 GPU 采集错误及恢复、外部进程占卡、任务进程跑到没分给它的卡上（只推一次，写明是选卡变量被改写还是图形进程）、队首被外部进程阻塞、严格限卡助手不可用、日志静默，以及 GPU 预约的卡全部到位和自动释放前 10 分钟。提交时可勾选「结束时推送」，排队或运行中也可从详情修改。成功和取消按开关推送，失败照常提醒。30 秒窗口内的结束提醒合并发送，快速失败使用一条带原因的队列暂停通知。
 
 `[notify] queue_drained` 默认开启，队列排空且本批至少有两个结束任务时，发送一条跑完汇总。同批仍在合并窗口内的结束提醒并入汇总。点通知打开原批次的任务列表。设为 `false` 并重启即可关闭汇总。消息包含主机名、任务编号、名称、用时和结构化原因，链接需要手机已访问过安全入口。
 
 `[runtime] silence_alert` 默认 `"30m"`。任务日志持续无新输出时提示，阈值为下限与已观察到的最长输出间隔三倍中的较大值。恢复输出时面板清除提示，手机只在告警出现时收到消息。设为 `"0s"` 并重启即可关闭。
 
 首次开启或更换 topic 不补发历史事件。待发批次和消费游标持久化，正常重启不重复推送。网络发送首次失败后重试三次，仍失败就记录错误并继续；若发送中被强制中断、无法确认是否送达，重启会标明“结果未知”并跳过重发。支持序列更新的 ntfy 客户端可将同一请求的重试显示为一条通知；网络丢失回执时无法保证外部服务只收到一次请求。协议见 [ntfy 官方发布文档](https://docs.ntfy.sh/publish/)。
+
+## 严格限卡（可选）
+
+丹炉默认只用 `CUDA_VISIBLE_DEVICES` 告诉任务用哪几张卡。程序自己改写这个变量（比如 `deepspeed --num_gpus`、accelerate 配置里的 `gpu_ids`、框架按 nvidia-smi 编号选卡），或者用 EGL 渲染，就会跑到别的任务或预约的卡上，丹炉只能事后告警。严格限卡用 cgroup 设备控制把每个任务锁在分到的卡上，需要管理员装一次 root 助手：
+
+```bash
+sudo ~/bin/danlu strict install      # 用跑 danlu 的那个用户执行；换了路径就写完整路径
+```
+
+它把当前程序复制成 `/usr/local/libexec/danlu-gpu-helper`，并写一条只放行它两个子命令的 `/etc/sudoers.d/danlu-gpu-<uid>`。装好以后在面板「设置 → 调度 → 严格限卡」打开，只影响之后启动的任务：
+
+- 每个任务作为 `danlu-job-*.service` 临时服务运行在你自己的 `user-<uid>.slice` 下，身份、资源限制都和平常一样，只是打不开没分给它的 `/dev/nvidiaN`；
+- 程序里看到的卡从 0 编号（分到 GPU 2、3 的任务里 nvidia-smi 显示 GPU 0、1），丹炉注入的 `CUDA_VISIBLE_DEVICES` 也是 `0,1`；面板和日志开头仍写物理卡号；
+- 助手不可用时不启动任何任务，绝不退回不隔离运行：等待原因写明怎么修，手机推送一次；
+- 每次启动任务会在 `/var/log/auth.log` 留一行 sudo 记录。
+
+`danlu strict status` 查看开关和助手状态，`danlu doctor` 也会检查。卸载：先在面板关掉，再运行 `sudo ~/bin/danlu strict uninstall`。升级 danlu 不会更新这份 root 副本；版本不兼容时面板会提示重新运行安装命令。设计见 [docs/FEATURES.md](docs/FEATURES.md) 第 5.4 节。
 
 ## 本地开发
 

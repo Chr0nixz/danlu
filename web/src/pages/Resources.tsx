@@ -2,6 +2,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import {
+  apiErrorText,
   bytes,
   duration,
   mb,
@@ -15,17 +16,22 @@ import {
   type SelfUsagePart,
 } from '@danlu/core'
 import { ResourceChart, clock, nearestAt, type ChartSeries } from '../components/ResourceChart'
-import { gpuBusy, groupStray, shortName, strayLabel, strayTitle, useGpus } from '../components/GpuGrid'
+import { gpuBusy, groupStray, ReservationLine, shortName, strayLabel, strayTitle, useGpus } from '../components/GpuGrid'
 import { Alert, Button, Card, ErrorBox, Meter, Segmented, Skeleton, StatusIcon, buttonClass, cx } from '../components/ui'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { usePrefs } from '../lib/prefs'
 
-const RANGES: { value: ResourceRange; label: string }[] = [
-  { value: '1m', label: '1 分钟' },
-  { value: '5m', label: '5 分钟' },
-  { value: '15m', label: '15 分钟' },
-  { value: '1h', label: '1 小时' },
-]
+const RANGES: ResourceRange[] = ['1m', '5m', '15m', '1h']
+// 是函数不是常量表：档位文案随当前语言取值，切换语言后重渲染即生效
+function rangeOptions(): { value: ResourceRange; label: string }[] {
+  return [
+    { value: '1m', label: t('resources.range_1m') },
+    { value: '5m', label: t('resources.range_5m') },
+    { value: '15m', label: t('resources.range_15m') },
+    { value: '1h', label: t('resources.range_1h') },
+  ]
+}
 const RANGE_SECONDS: Record<ResourceRange, number> = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600 }
 // 曲线刷新随档位走：固定 10 秒时，1 分钟档的曲线会比上面每 3 秒刷新的大数字落后六分之一屏
 const HISTORY_REFETCH: Record<ResourceRange, number> = { '1m': 3000, '5m': 5000, '15m': 10_000, '1h': 20_000 }
@@ -41,7 +47,7 @@ function useWarnThresholds() {
 function readStoredRange(): ResourceRange | null {
   try {
     const v = localStorage.getItem(RANGE_KEY)
-    return RANGES.some((r) => r.value === v) ? (v as ResourceRange) : null
+    return RANGES.some((r) => r === v) ? (v as ResourceRange) : null
   } catch {
     return null
   }
@@ -81,7 +87,9 @@ function splitUnit(text: string): [string, string] {
 function peakPair(aLabel: string, a: number, bLabel: string, b: number) {
   const [an, au] = splitUnit(fmtRate(a))
   const [bn, bu] = splitUnit(fmtRate(b))
-  return au === bu ? [`峰值 ${aLabel} ${an}`, `${bLabel} ${bn} ${bu}`] : [`峰值 ${aLabel} ${an} ${au}`, `${bLabel} ${bn} ${bu}`]
+  return au === bu
+    ? [t('resources.peak', { label: aLabel, value: an }), t('resources.pair_value', { label: bLabel, value: bn, unit: bu })]
+    : [t('resources.peak', { label: aLabel, value: `${an} ${au}` }), t('resources.pair_value', { label: bLabel, value: bn, unit: bu })]
 }
 
 function average(points: ResourcePoint[], pick: (p: ResourcePoint) => number | null | undefined) {
@@ -136,18 +144,18 @@ function Fact({ label, value, detail, warn, title }: { label: string; value: Rea
 function PhoneSummary({ data }: { data: ResourceSnapshot }) {
   const warn = useWarnThresholds()
   const lowSpace = [...data.disks, ...(data.root_disk ? [data.root_disk] : [])].some((d) => d.warn)
-  const spaceText = lowSpace ? '偏低' : data.disks_error ? '读取失败' : null
+  const spaceText = lowSpace ? t('resources.space_low') : data.disks_error ? t('resources.read_failed') : null
   const ready = data.samples >= 2
   const items: { label: string; value: string; warn?: boolean }[] = [
-    { label: 'CPU', value: data.cpu.percent == null ? '采样中' : `${data.cpu.percent}%`, warn: data.cpu.percent != null && data.cpu.percent >= warn.cpu },
-    { label: '内存', value: `${data.memory.percent}%`, warn: data.memory.percent >= warn.mem },
-    { label: '负载', value: fmtLoad(data.cpu), warn: data.cpu.load_1 > data.host.cpu_cores },
-    { label: '交换', value: data.memory.swap_total_bytes === 0 ? '无' : `${data.memory.swap_percent}%`, warn: data.memory.swap_total_bytes > 0 && data.memory.swap_percent >= warn.swap },
-    { label: data.cpu.power_w == null && data.gpu_power_w != null ? 'GPU 功耗' : '功耗', value: data.power_w == null ? '—' : fmtWatts(data.power_w) },
-    ...(data.network.length ? [{ label: '网络', value: ready ? `↓ ${fmtRate(data.net_rx_bps)} ↑ ${fmtRate(data.net_tx_bps)}` : '采样中' }] : []),
-    ...(data.disk_io.length ? [{ label: '磁盘', value: ready ? `读 ${fmtRate(data.disk_read_bps)} 写 ${fmtRate(data.disk_write_bps)}` : '采样中' }] : []),
-    ...(spaceText ? [{ label: '磁盘空间', value: spaceText, warn: true }] : []),
-    ...(data.self ? [{ label: '丹炉', value: bytes(data.self.total_bytes) }] : []),
+    { label: 'CPU', value: data.cpu.percent == null ? t('resources.sampling') : `${data.cpu.percent}%`, warn: data.cpu.percent != null && data.cpu.percent >= warn.cpu },
+    { label: t('resources.memory'), value: `${data.memory.percent}%`, warn: data.memory.percent >= warn.mem },
+    { label: t('resources.load'), value: fmtLoad(data.cpu), warn: data.cpu.load_1 > data.host.cpu_cores },
+    { label: t('resources.swap'), value: data.memory.swap_total_bytes === 0 ? t('resources.none') : `${data.memory.swap_percent}%`, warn: data.memory.swap_total_bytes > 0 && data.memory.swap_percent >= warn.swap },
+    { label: data.cpu.power_w == null && data.gpu_power_w != null ? t('resources.gpu_power') : t('resources.power'), value: data.power_w == null ? '—' : fmtWatts(data.power_w) },
+    ...(data.network.length ? [{ label: t('resources.network'), value: ready ? `↓ ${fmtRate(data.net_rx_bps)} ↑ ${fmtRate(data.net_tx_bps)}` : t('resources.sampling') }] : []),
+    ...(data.disk_io.length ? [{ label: t('resources.disk'), value: ready ? t('resources.phone_disk_io', { read: fmtRate(data.disk_read_bps), write: fmtRate(data.disk_write_bps) }) : t('resources.sampling') }] : []),
+    ...(spaceText ? [{ label: t('resources.disk_space'), value: spaceText, warn: true }] : []),
+    ...(data.self ? [{ label: t('resources.brand'), value: bytes(data.self.total_bytes) }] : []),
   ]
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs sm:hidden">
@@ -246,7 +254,7 @@ function MetricWall({ data, history, gpus, from, to }: { data: ResourceSnapshot;
 
   // 磁盘
   const lowDisk = [...data.disks, ...(data.root_disk ? [data.root_disk] : [])].find((d) => d.warn)
-  const diskAlert = lowDisk ? `${lowDisk.path} 余量偏低` : data.disks_error ? '分区容量读取失败' : null
+  const diskAlert = lowDisk ? t('resources.disk_low', { path: lowDisk.path }) : data.disks_error ? t('resources.disks_read_failed') : null
   const readNow = hp ? hp.disk_read_bps : data.disk_read_bps
   const writeNow = hp ? hp.disk_write_bps : data.disk_write_bps
 
@@ -263,7 +271,7 @@ function MetricWall({ data, history, gpus, from, to }: { data: ResourceSnapshot;
   const powerLimit = gpus.reduce((sum, g) => sum + (g.power_limit_w ?? 0), 0)
   const powerSeries: ChartSeries[] = [
     { label: 'GPU', points: pointsOf(points, (p) => p.gpu_power_w) },
-    ...(hasCpuPower ? [{ label: 'CPU 封装', points: pointsOf(points, (p) => p.cpu_power_w), dashed: true }] : []),
+    ...(hasCpuPower ? [{ label: t('resources.cpu_package'), points: pointsOf(points, (p) => p.cpu_power_w), dashed: true }] : []),
   ]
   const noPowerSource = data.gpu_power_w == null && !hasCpuPower
 
@@ -272,104 +280,104 @@ function MetricWall({ data, history, gpus, from, to }: { data: ResourceSnapshot;
     <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-6 xl:grid-cols-5">
       <MetricTile
         title="CPU"
-        context={`${data.host.cpu_cores} 核`}
+        context={t('resources.cores', { n: data.host.cpu_cores })}
         hoverAt={at}
         className="md:col-span-2 xl:col-span-1"
         primary={{ text: cpuNow == null ? '—' : `${cpuNow}%`, warn: cpuNow != null && cpuNow >= warn.cpu }}
-        secondary={{ label: '负载', text: fmtLoad(data.cpu), warn: loadWarn, title: '1 / 5 / 15 分钟 load average；超过核数说明有进程在排队等 CPU' }}
-        stats={[`平均 ${cpuAvg == null ? '—' : fmtPercent(cpuAvg)}`, `峰值 ${peaks?.cpu_percent == null ? '—' : `${peaks.cpu_percent}%`}`]}
+        secondary={{ label: t('resources.load'), text: fmtLoad(data.cpu), warn: loadWarn, title: t('resources.load_title') }}
+        stats={[t('resources.avg', { value: cpuAvg == null ? '—' : fmtPercent(cpuAvg) }), t('resources.peak_value', { value: peaks?.cpu_percent == null ? '—' : `${peaks.cpu_percent}%` })]}
         from={from}
         to={to}
-        chart={<ResourceChart {...chartProps} series={[{ label: 'CPU', points: pointsOf(points, (p) => p.cpu_percent) }]} max={100} format={fmtPercent} label="CPU 使用率历史曲线" />}
+        chart={<ResourceChart {...chartProps} series={[{ label: 'CPU', points: pointsOf(points, (p) => p.cpu_percent) }]} max={100} format={fmtPercent} label={t('resources.chart_cpu')} />}
       />
       <MetricTile
-        title="内存"
+        title={t('resources.memory')}
         context={bytes(data.memory.total_bytes)}
         hoverAt={at}
         className="md:col-span-2 xl:col-span-1"
-        primary={{ label: '已用', mark: true, text: `${memNow}%`, warn: memNow >= warn.mem, title: `${bytes(data.memory.used_bytes)} / ${bytes(data.memory.total_bytes)}` }}
+        primary={{ label: t('resources.used'), mark: true, text: `${memNow}%`, warn: memNow >= warn.mem, title: `${bytes(data.memory.used_bytes)} / ${bytes(data.memory.total_bytes)}` }}
         secondary={{
-          label: '交换',
+          label: t('resources.swap'),
           mark: data.memory.swap_total_bytes > 0,
-          text: data.memory.swap_total_bytes === 0 ? '未启用' : `${swapNow}%${hp ? '' : ` · ${bytes(data.memory.swap_used_bytes)}`}`,
+          text: data.memory.swap_total_bytes === 0 ? t('resources.swap_off') : `${swapNow}%${hp ? '' : ` · ${bytes(data.memory.swap_used_bytes)}`}`,
           warn: data.memory.swap_total_bytes > 0 && swapNow >= warn.swap,
         }}
-        stats={[`平均 ${memAvg == null ? '—' : fmtPercent(memAvg)}`, `峰值 ${peaks ? `${peaks.memory_percent}%` : '—'}`]}
+        stats={[t('resources.avg', { value: memAvg == null ? '—' : fmtPercent(memAvg) }), t('resources.peak_value', { value: peaks ? `${peaks.memory_percent}%` : '—' })]}
         from={from}
         to={to}
         chart={
           <ResourceChart
             {...chartProps}
             series={[
-              { label: '内存', points: pointsOf(points, (p) => p.memory_percent) },
-              ...(data.memory.swap_total_bytes > 0 ? [{ label: '交换', points: pointsOf(points, (p) => p.swap_percent), dashed: true }] : []),
+              { label: t('resources.memory'), points: pointsOf(points, (p) => p.memory_percent) },
+              ...(data.memory.swap_total_bytes > 0 ? [{ label: t('resources.swap'), points: pointsOf(points, (p) => p.swap_percent), dashed: true }] : []),
             ]}
             max={100}
             format={fmtPercent}
-            label="内存和交换使用率历史曲线"
+            label={t('resources.chart_mem')}
           />
         }
       />
       <MetricTile
-        title="磁盘"
+        title={t('resources.disk')}
         // 容量告警占右上角：写在读写速率旁会被读成"I/O 出了问题"，单独占一行又把这张卡撑得比邻居高
-        context={diskAlert ? <span className="text-warn">{diskAlert}</span> : data.disk_io.length ? `${data.disk_io.length} 块物理盘` : undefined}
+        context={diskAlert ? <span className="text-warn">{diskAlert}</span> : data.disk_io.length ? t('resources.physical_disks', { n: data.disk_io.length }) : undefined}
         hoverAt={at}
         className="md:col-span-2 xl:col-span-1"
-        primary={{ label: '读', mark: true, text: rateReady || hp ? fmtRate(readNow) : '—' }}
-        secondary={{ label: '写', mark: true, text: rateReady || hp ? fmtRate(writeNow) : '等待第二次采样' }}
+        primary={{ label: t('resources.read'), mark: true, text: rateReady || hp ? fmtRate(readNow) : '—' }}
+        secondary={{ label: t('resources.write'), mark: true, text: rateReady || hp ? fmtRate(writeNow) : t('resources.wait_second_sample') }}
         // 长档位的曲线是桶均值，几秒的突发会被摊平；峰值按原始采样点算，单独写出来
-        stats={peaks ? peakPair('读', peaks.disk_read_bps, '写', peaks.disk_write_bps) : undefined}
+        stats={peaks ? peakPair(t('resources.read'), peaks.disk_read_bps, t('resources.write'), peaks.disk_write_bps) : undefined}
         from={from}
         to={to}
         chart={
           <ResourceChart
             {...chartProps}
             series={[
-              { label: '读', points: pointsOf(points, (p) => p.disk_read_bps) },
-              { label: '写', points: pointsOf(points, (p) => p.disk_write_bps), dashed: true },
+              { label: t('resources.read'), points: pointsOf(points, (p) => p.disk_read_bps) },
+              { label: t('resources.write'), points: pointsOf(points, (p) => p.disk_write_bps), dashed: true },
             ]}
             format={fmtRate}
             binary
-            label="物理盘读写速率历史曲线"
+            label={t('resources.chart_disk')}
           />
         }
       />
       <MetricTile
-        title="网络"
-        context={data.network.length ? `${data.network.length} 个网卡` : undefined}
+        title={t('resources.network')}
+        context={data.network.length ? t('resources.nic_count', { n: data.network.length }) : undefined}
         hoverAt={at}
         className="md:col-span-3 xl:col-span-1"
-        primary={{ label: '接收', mark: true, text: rateReady || hp ? fmtRate(rxNow) : '—' }}
-        secondary={{ label: '发送', mark: true, text: rateReady || hp ? fmtRate(txNow) : '等待第二次采样' }}
-        stats={peaks ? peakPair('收', peaks.net_rx_bps, '发', peaks.net_tx_bps) : undefined}
+        primary={{ label: t('resources.rx'), mark: true, text: rateReady || hp ? fmtRate(rxNow) : '—' }}
+        secondary={{ label: t('resources.tx'), mark: true, text: rateReady || hp ? fmtRate(txNow) : t('resources.wait_second_sample') }}
+        stats={peaks ? peakPair(t('resources.rx_short'), peaks.net_rx_bps, t('resources.tx_short'), peaks.net_tx_bps) : undefined}
         from={from}
         to={to}
         chart={
           <ResourceChart
             {...chartProps}
             series={[
-              { label: '接收', points: pointsOf(points, (p) => p.net_rx_bps) },
-              { label: '发送', points: pointsOf(points, (p) => p.net_tx_bps), dashed: true },
+              { label: t('resources.rx'), points: pointsOf(points, (p) => p.net_rx_bps) },
+              { label: t('resources.tx'), points: pointsOf(points, (p) => p.net_tx_bps), dashed: true },
             ]}
             format={fmtRate}
             binary
-            label="网络收发速率历史曲线"
+            label={t('resources.chart_net')}
           />
         }
       />
       <MetricTile
-        title="功耗"
-        context={powerLimit > 0 ? `GPU 上限 ${fmtWatts(powerLimit)}` : undefined}
+        title={t('resources.power')}
+        context={powerLimit > 0 ? t('resources.gpu_limit', { value: fmtWatts(powerLimit) }) : undefined}
         hoverAt={at}
         className="col-span-2 md:col-span-3 xl:col-span-1"
         primary={{ label: 'GPU', mark: hasCpuPower, text: gpuPowerNow == null ? '—' : fmtWatts(gpuPowerNow) }}
         secondary={
           hasCpuPower
-            ? { label: 'CPU 封装', mark: true, text: cpuPowerNow == null ? '—' : fmtWatts(cpuPowerNow) }
-            : { label: 'CPU 封装', text: data.cpu.power_error ? '读不到' : '—', title: data.cpu.power_error }
+            ? { label: t('resources.cpu_package'), mark: true, text: cpuPowerNow == null ? '—' : fmtWatts(cpuPowerNow) }
+            : { label: t('resources.cpu_package'), text: data.cpu.power_error ? t('resources.power_unreadable') : '—', title: data.cpu.power_error }
         }
-        stats={gpuPowerAvg == null ? undefined : [`平均 ${fmtWatts(gpuPowerAvg)}`, `峰值 ${peaks?.gpu_power_w == null ? '—' : fmtWatts(peaks.gpu_power_w)}`]}
+        stats={gpuPowerAvg == null ? undefined : [t('resources.avg', { value: fmtWatts(gpuPowerAvg) }), t('resources.peak_value', { value: peaks?.gpu_power_w == null ? '—' : fmtWatts(peaks.gpu_power_w) })]}
         from={from}
         to={to}
         chart={
@@ -377,9 +385,9 @@ function MetricWall({ data, history, gpus, from, to }: { data: ResourceSnapshot;
             {...chartProps}
             series={powerSeries}
             format={fmtWatts}
-            label={hasCpuPower ? 'GPU 和 CPU 功耗历史曲线' : 'GPU 功耗历史曲线'}
+            label={hasCpuPower ? t('resources.chart_power_both') : t('resources.chart_power_gpu')}
             // 首采样时实时功耗可能有值而历史还没积累：空态别说成"没有功耗来源"
-            empty={noPowerSource && data.samples >= 2 ? '没有功耗来源' : '正在积累历史数据…'}
+            empty={noPowerSource && data.samples >= 2 ? t('resources.no_power_source') : t('resources.chart_empty')}
           />
         }
       />
@@ -396,9 +404,9 @@ function GpuPanel({ gpus }: { gpus: ReturnType<typeof useGpus> }) {
   const cards = gpus.data?.gpus ?? []
   // 查询失败（网络）和服务端报错（驱动挂了）都保留面板外框；有旧卡列表时继续显示，不没收整块
   const err = gpus.error
-    ? `读取 GPU 失败：${(gpus.error as Error).message}`
+    ? t('resources.gpu_query_failed', { error: apiErrorText(gpus.error) })
     : gpus.data?.error
-      ? `GPU 信息读取失败：${gpus.data.error}`
+      ? t('resources.gpu_info_failed', { error: gpus.data.error })
       : null
   const procsKnown = !gpus.error && !gpus.data?.error
   const free = cards.filter((g) => !gpuBusy(g)).length
@@ -411,12 +419,12 @@ function GpuPanel({ gpus }: { gpus: ReturnType<typeof useGpus> }) {
       title="GPU"
       extra={
         <>
-          {err && <span className="text-warn">读取失败</span>}
+          {err && <span className="text-warn">{t('resources.read_failed')}</span>}
           {cards.length > 0 && (
             <span className="inline-flex items-center gap-1.5 text-fg">
               <span className={cx('size-1.5 rounded-full', free ? 'bg-ok' : 'bg-fg-4')} aria-hidden />
               <b className="font-semibold tabular-nums">{free}<span className="font-normal text-fg-3"> / {cards.length}</span></b>
-              <span className="text-fg-2">张卡空闲</span>
+              <span className="text-fg-2">{t('resources.cards_free_suffix')}</span>
             </span>
           )}
           {!mixed && models[0] && <span className="max-sm:hidden">{shortName(models[0])}</span>}
@@ -425,19 +433,19 @@ function GpuPanel({ gpus }: { gpus: ReturnType<typeof useGpus> }) {
     >
       {err && <Alert tone="warn" role="alert" className="m-3 sm:m-4">{err}</Alert>}
       {cards.length === 0 ? (
-        <p className="px-3 py-4 text-ui text-fg-3 sm:px-4">{err ? 'GPU 数据暂不可用，无法判断占用' : '没有检测到 GPU，只能提交不用 GPU 的任务'}</p>
+        <p className="px-3 py-4 text-ui text-fg-3 sm:px-4">{err ? t('resources.gpu_unavailable') : t('resources.no_gpu')}</p>
       ) : (
         <>
           <ColHead className="hidden lg:grid" style={{ gridTemplateColumns: columns }}>
-            <span>卡</span>
-            <span>利用率</span>
-            <span>显存</span>
-            <span className="text-right">温度</span>
-            <span className="text-right">功耗 / 上限</span>
-            <span className="text-right">风扇</span>
-            <span className="text-right">核心 / 显存</span>
+            <span>{t('resources.gpu_col_card')}</span>
+            <span>{t('resources.utilization')}</span>
+            <span>{t('resources.vram')}</span>
+            <span className="text-right">{t('resources.temp')}</span>
+            <span className="text-right">{t('resources.gpu_col_power')}</span>
+            <span className="text-right">{t('resources.fan')}</span>
+            <span className="text-right">{t('resources.gpu_col_clocks')}</span>
             <span>P-State</span>
-            <span>占用</span>
+            <span>{t('resources.gpu_col_occupant')}</span>
           </ColHead>
           <div className="divide-y divide-line">
             {cards.map((g) => (
@@ -453,7 +461,7 @@ function GpuPanel({ gpus }: { gpus: ReturnType<typeof useGpus> }) {
   )
 }
 
-const gpuBar = (g: GPU) => g.job ? 'bg-run' : g.external.length || (g.unknown_mem_mb ?? 0) > 0 ? 'bg-warn' : 'bg-fg-4'
+const gpuBar = (g: GPU) => g.job ? 'bg-run' : g.reservation ? 'bg-fg-3' : g.external.length || (g.unknown_mem_mb ?? 0) > 0 ? 'bg-warn' : 'bg-fg-4'
 const gpuMem = (g: GPU) => `${(g.mem_used_mb / 1024).toFixed(1)} / ${Math.round(g.mem_total_mb / 1024)} GB`
 const gpuMemPct = (g: GPU) => g.mem_total_mb ? (g.mem_used_mb / g.mem_total_mb) * 100 : 0
 const gpuPower = (g: GPU) => g.power_w <= 0 ? '—' : g.power_limit_w && g.power_limit_w > 0 ? `${Math.round(g.power_w)} / ${Math.round(g.power_limit_w)} W` : `${Math.round(g.power_w)} W`
@@ -473,12 +481,22 @@ function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
       </Link>
     )
   }
+  if (g.reservation) {
+    // 预约的卡上的外部进程多半是用户自己的任务，只写个数，不标成需要注意
+    const n = g.external.length
+    return (
+      <span className="flex min-w-0 items-center gap-1.5">
+        <ReservationLine r={g.reservation} />
+        {n > 0 && <span className="shrink-0 text-fg-3" title={groupStray(g.external).map(strayTitle).join('\n')}>· {t('resources.process_count', { n })}</span>}
+      </span>
+    )
+  }
   if (g.external.length > 0) {
     return (
       <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-warn">
         {groupStray(g.external).map((s) => {
           const one = s.procs.length === 1 ? s.procs[0] : null
-          const label = one ? `${strayLabel(one)} ${one.pid}` : s.job ? `#${s.job} 的 ${s.procs.length} 个进程` : `${s.procs.length} 个外部进程`
+          const label = one ? `${strayLabel(one)} ${one.pid}` : s.job ? t('resources.job_processes', { id: s.job, n: s.procs.length }) : t('resources.external_processes', { n: s.procs.length })
           const inner = (
             <>
               <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
@@ -496,11 +514,11 @@ function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
     )
   }
   if ((g.unknown_mem_mb ?? 0) > 0) {
-    return <span className="inline-flex items-center gap-1.5 text-warn"><span className="size-1.5 rounded-full bg-warn" aria-hidden />未知显存 {bytes((g.unknown_mem_mb ?? 0) * 2 ** 20)}</span>
+    return <span className="inline-flex items-center gap-1.5 text-warn"><span className="size-1.5 rounded-full bg-warn" aria-hidden />{t('resources.unknown_mem', { value: bytes((g.unknown_mem_mb ?? 0) * 2 ** 20) })}</span>
   }
   return procsKnown
-    ? <span className="inline-flex items-center gap-1.5 text-ok"><span className="size-1.5 rounded-full bg-ok" aria-hidden />空闲</span>
-    : <span className="text-fg-3">占用未知</span>
+    ? <span className="inline-flex items-center gap-1.5 text-ok"><span className="size-1.5 rounded-full bg-ok" aria-hidden />{t('resources.gpu_idle')}</span>
+    : <span className="text-fg-3">{t('resources.occupancy_unknown')}</span>
 }
 
 /** ≥1024px：每张卡一行，列和列头对齐 */
@@ -515,16 +533,16 @@ function GpuLine({ g, mixed, procsKnown, columns }: { g: GPU; mixed: boolean; pr
       </div>
       <div className="flex items-center gap-2">
         <div className="flex-1"><Meter value={g.util} className={gpuBar(g)} /></div>
-        <span className="w-9 text-right tabular-nums"><span className="sr-only">利用率 </span>{g.util}%</span>
+        <span className="w-9 text-right tabular-nums"><span className="sr-only">{t('resources.utilization')} </span>{g.util}%</span>
       </div>
       <div className="flex min-w-0 items-center gap-2">
         <div className="min-w-6 flex-1"><Meter value={gpuMemPct(g)} className={gpuBar(g)} /></div>
-        <span className="shrink-0 text-xs text-fg-2 tabular-nums"><span className="sr-only">显存 </span>{gpuMem(g)}</span>
+        <span className="shrink-0 text-xs text-fg-2 tabular-nums"><span className="sr-only">{t('resources.vram')} </span>{gpuMem(g)}</span>
       </div>
-      <span className={cx('text-right text-xs tabular-nums', tempWarn ? 'text-warn' : 'text-fg-2')}><span className="sr-only">温度 </span>{g.temp_c > 0 ? `${g.temp_c}°C` : '—'}</span>
-      <span className="text-right text-xs text-fg-2 tabular-nums"><span className="sr-only">功耗 </span>{gpuPower(g)}</span>
-      <span className="text-right text-xs text-fg-2 tabular-nums"><span className="sr-only">风扇 </span>{g.fan_percent && g.fan_percent > 0 ? `${g.fan_percent}%` : '—'}</span>
-      <span className="text-right text-xs text-fg-2 tabular-nums"><span className="sr-only">核心和显存频率 </span>{gpuClocks(g)}</span>
+      <span className={cx('text-right text-xs tabular-nums', tempWarn ? 'text-warn' : 'text-fg-2')}><span className="sr-only">{t('resources.temp')} </span>{g.temp_c > 0 ? `${g.temp_c}°C` : '—'}</span>
+      <span className="text-right text-xs text-fg-2 tabular-nums"><span className="sr-only">{t('resources.power')} </span>{gpuPower(g)}</span>
+      <span className="text-right text-xs text-fg-2 tabular-nums"><span className="sr-only">{t('resources.fan')} </span>{g.fan_percent && g.fan_percent > 0 ? `${g.fan_percent}%` : '—'}</span>
+      <span className="text-right text-xs text-fg-2 tabular-nums"><span className="sr-only">{t('resources.gpu_clocks_sr')} </span>{gpuClocks(g)}</span>
       <span className="text-xs text-fg-3">{g.pstate || '—'}</span>
       <div className="min-w-0"><Occupant g={g} procsKnown={procsKnown} /></div>
     </div>
@@ -537,9 +555,9 @@ function GpuStack({ g, mixed, procsKnown }: { g: GPU; mixed: boolean; procsKnown
   const metrics: { text: string; warn?: boolean }[] = []
   if (g.temp_c > 0) metrics.push({ text: `${g.temp_c}°C`, warn: g.temp_c >= warn.gpuTemp })
   if (g.power_w > 0) metrics.push({ text: gpuPower(g) })
-  if (g.fan_percent && g.fan_percent > 0) metrics.push({ text: `风扇 ${g.fan_percent}%` })
+  if (g.fan_percent && g.fan_percent > 0) metrics.push({ text: t('resources.fan_value', { n: g.fan_percent }) })
   if (g.clock_graphics_mhz) metrics.push({ text: `${(g.clock_graphics_mhz / 1000).toFixed(2)} GHz` })
-  if (g.clock_memory_mhz) metrics.push({ text: `显存 ${(g.clock_memory_mhz / 1000).toFixed(1)} GHz` })
+  if (g.clock_memory_mhz) metrics.push({ text: t('resources.vram_clock', { value: (g.clock_memory_mhz / 1000).toFixed(1) }) })
   if (g.pstate) metrics.push({ text: g.pstate })
   return (
     <div className="space-y-1.5 px-3 py-2.5 sm:px-4 lg:hidden">
@@ -560,18 +578,18 @@ function GpuStack({ g, mixed, procsKnown }: { g: GPU; mixed: boolean; procsKnown
 // ───────────────────────── 明细 ─────────────────────────
 
 function CoreGrid({ cores, summary }: { cores: number[]; summary?: string }) {
-  if (!cores.length) return <p className="text-xs text-fg-3">没有读到每核使用率</p>
+  if (!cores.length) return <p className="text-xs text-fg-3">{t('resources.no_per_core')}</p>
   // 一行 16 格，核号好数：第 3 行第 5 格就是核 37；核太多时一行 32 格
   const cols = cores.length <= 16 ? cores.length : cores.length <= 64 ? 16 : 32
   return (
     // role="img" 会把子格呈献性吞掉，所以读屏靠 summary（最高/平均/哪几核）；格子本身 aria-hidden，鼠标悬停仍有每核数值
-    <div role="img" aria-label={summary ?? `${cores.length} 个核心的当前使用率`} className="grid gap-[3px]" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+    <div role="img" aria-label={summary ?? t('resources.core_grid_aria', { n: cores.length })} className="grid gap-[3px]" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
       {cores.map((value, index) => {
         const known = value >= 0
         return (
           <span
             key={index}
-            title={known ? `CPU ${index}: ${value}%` : `CPU ${index}: 采样中`}
+            title={known ? `CPU ${index}: ${value}%` : t('resources.core_cell_sampling', { index })}
             aria-hidden
             className="h-3.5 rounded-[2px]"
             style={{ backgroundColor: known ? `color-mix(in oklab, var(--fg) ${Math.max(7, value)}%, var(--subtle))` : 'var(--subtle)' }}
@@ -590,24 +608,26 @@ function CpuDetail({ data }: { data: ResourceSnapshot }) {
   const avgCore = knownCores.length ? Math.round(knownCores.reduce((a, c) => a + c.v, 0) / knownCores.length) : null
   // 最忙的是哪几核：写成可见文字，触屏和读屏不用靠悬停
   const topCores = maxCore == null ? [] : knownCores.filter((c) => c.v === maxCore).map((c) => c.i)
-  const topText = topCores.length ? `（核 ${topCores.slice(0, 3).join('、')}${topCores.length > 3 ? ' 等' : ''}）` : ''
-  const coreSummary = maxCore == null ? undefined : `${data.cpu.cores.length} 个核心：最高 ${maxCore}%${topText}，平均 ${avgCore}%`
+  const topText = topCores.length
+    ? t(topCores.length > 3 ? 'resources.top_cores_more' : 'resources.top_cores', { list: topCores.slice(0, 3).join(t('resources.core_list_sep')) })
+    : ''
+  const coreSummary = maxCore == null ? undefined : t('resources.core_summary', { n: data.cpu.cores.length, max: maxCore, top: topText, avg: avgCore ?? 0 })
   return (
-    <Panel title="CPU 核心" className="h-full md:col-span-2 lg:col-span-1" extra={data.host.cpu_model && <span className="truncate" title={data.host.cpu_model}>{data.host.cpu_model}</span>}>
+    <Panel title={t('resources.cpu_cores_title')} className="h-full md:col-span-2 lg:col-span-1" extra={data.host.cpu_model && <span className="truncate" title={data.host.cpu_model}>{data.host.cpu_model}</span>}>
       <div className="space-y-3 p-3 sm:p-4">
         <dl className="grid grid-cols-3 gap-3">
-          <Fact label="平均频率" value={freq ?? '—'} />
+          <Fact label={t('resources.avg_freq')} value={freq ?? '—'} />
           {/* 此刻最快那个核的频率，不是睿频上限，写成"最快核"免得误读 */}
-          <Fact label="最快核" value={maxFreq ?? '—'} title="此刻最快那个核的频率，不是睿频上限" />
-          <Fact label="温度" value={fmtTemp(data.cpu.temp_c)} title="多路服务器取各颗 CPU 里最高的温度" />
+          <Fact label={t('resources.fastest_core')} value={maxFreq ?? '—'} title={t('resources.fastest_core_title')} />
+          <Fact label={t('resources.temp')} value={fmtTemp(data.cpu.temp_c)} title={t('resources.cpu_temp_title')} />
         </dl>
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between gap-2 text-xs text-fg-3">
-            <span className="shrink-0">{data.cpu.cores.length} 个核心</span>
-            <span className="truncate text-right">{maxCore == null ? '等待第二次采样' : `最高 ${maxCore}%${topText} · 平均 ${avgCore}%`}</span>
+            <span className="shrink-0">{t('resources.core_count', { n: data.cpu.cores.length })}</span>
+            <span className="truncate text-right">{maxCore == null ? t('resources.wait_second_sample') : t('resources.core_max_avg', { max: maxCore, top: topText, avg: avgCore ?? 0 })}</span>
           </div>
           <CoreGrid cores={data.cpu.cores} summary={coreSummary} />
-          <p className="text-[11px] text-fg-3">每格一个核心，越深越忙</p>
+          <p className="text-[11px] text-fg-3">{t('resources.core_grid_hint')}</p>
         </div>
       </div>
     </Panel>
@@ -621,17 +641,17 @@ function MemoryDetail({ data }: { data: ResourceSnapshot }) {
   const reclaim = Math.max(0, m.available_bytes - m.free_bytes)
   const total = m.total_bytes || m.used_bytes + reclaim + m.free_bytes || 1
   const parts = [
-    { label: '已用', value: m.used_bytes, swatch: 'bg-fg-2' },
-    { label: '可回收', value: reclaim, swatch: 'bg-fg-4', title: '页缓存等内核随时能收回的内存（可用 − 空闲）' },
-    { label: '空闲', value: m.free_bytes, swatch: 'bg-hover ring-1 ring-inset ring-line-strong' },
+    { label: t('resources.used'), value: m.used_bytes, swatch: 'bg-fg-2' },
+    { label: t('resources.reclaimable'), value: reclaim, swatch: 'bg-fg-4', title: t('resources.reclaimable_title') },
+    { label: t('resources.mem_free'), value: m.free_bytes, swatch: 'bg-hover ring-1 ring-inset ring-line-strong' },
   ]
   const swapWarn = m.swap_total_bytes > 0 && m.swap_percent >= warn.swap
   return (
-    <Panel title="内存构成" className="h-full" extra={<span>共 {bytes(m.total_bytes)}</span>}>
+    <Panel title={t('resources.mem_breakdown')} className="h-full" extra={<span>{t('resources.total_label')} {bytes(m.total_bytes)}</span>}>
       <div className="space-y-3 p-3 sm:p-4">
         <div
           role="img"
-          aria-label={`已用 ${bytes(m.used_bytes)}，可回收 ${bytes(reclaim)}，空闲 ${bytes(m.free_bytes)}`}
+          aria-label={t('resources.mem_bar_aria', { used: bytes(m.used_bytes), reclaim: bytes(reclaim), free: bytes(m.free_bytes) })}
           className="flex h-2.5 gap-0.5 overflow-hidden rounded-full"
         >
           <span className="bg-fg-2" style={{ width: `${(m.used_bytes / total) * 100}%` }} />
@@ -647,18 +667,18 @@ function MemoryDetail({ data }: { data: ResourceSnapshot }) {
           ))}
         </dl>
         <dl className="grid grid-cols-3 gap-3 border-t border-line pt-3">
-          <Fact label="可用" value={bytes(m.available_bytes)} />
-          <Fact label="缓存" value={bytes(m.cached_bytes)} />
-          <Fact label="缓冲" value={bytes(m.buffers_bytes)} />
+          <Fact label={t('resources.available')} value={bytes(m.available_bytes)} />
+          <Fact label={t('resources.cached')} value={bytes(m.cached_bytes)} />
+          <Fact label={t('resources.buffers')} value={bytes(m.buffers_bytes)} />
         </dl>
         <div className="flex items-center gap-3 text-xs">
-          <span className="shrink-0 text-fg-3">交换</span>
+          <span className="shrink-0 text-fg-3">{t('resources.swap')}</span>
           {m.swap_total_bytes ? (
             <>
               <div className="flex-1"><Meter value={m.swap_percent} className={swapWarn ? 'bg-warn' : 'bg-fg-3'} /></div>
               <span className={cx('shrink-0 tabular-nums', swapWarn && 'text-warn')}>{bytes(m.swap_used_bytes)} / {bytes(m.swap_total_bytes)}</span>
             </>
-          ) : <span className="text-fg-2">未启用</span>}
+          ) : <span className="text-fg-2">{t('resources.swap_off')}</span>}
         </div>
       </div>
     </Panel>
@@ -673,19 +693,19 @@ function PowerDetail({ data, history, gpus }: { data: ResourceSnapshot; history?
   const limit = gpus.reduce((sum, g) => sum + (g.power_limit_w ?? 0), 0)
   const tempWarn = data.gpu_temp_max_c != null && data.gpu_temp_max_c >= warn.gpuTemp
   return (
-    <Panel title="功耗与温度" className="h-full">
+    <Panel title={t('resources.power_temp')} className="h-full">
       <div className="space-y-3 p-3 sm:p-4">
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-          <Fact label="CPU 封装" title="来自 Intel RAPL 或 amd_energy" value={data.cpu.power_w == null ? '—' : fmtWatts(data.cpu.power_w)} detail={data.cpu.power_w == null ? (data.cpu.power_error ? '读不到' : undefined) : avgCPU == null ? undefined : `平均 ${fmtWatts(avgCPU)}`} />
-          <Fact label="GPU" value={data.gpu_power_w == null ? '—' : fmtWatts(data.gpu_power_w)} detail={avgGPU == null ? undefined : `平均 ${fmtWatts(avgGPU)}`} />
-          <Fact label="已知合计" value={data.power_w == null ? '—' : fmtWatts(data.power_w)} detail="CPU + GPU" />
-          <Fact label="服务启动以来" value={fmtEnergy(data.energy_wh)} detail="已知功耗积分" />
-          <Fact label="GPU 最高温度" value={fmtTemp(data.gpu_temp_max_c)} warn={tempWarn} detail={tempWarn ? '偏高' : data.gpu_power_w == null ? '功耗不可用' : '来自 nvidia-smi'} />
-          <Fact label="GPU 功耗上限" value={limit > 0 ? fmtWatts(limit) : '—'} detail={limit > 0 ? `${gpus.length} 张卡之和` : undefined} />
+          <Fact label={t('resources.cpu_package')} title={t('resources.rapl_title')} value={data.cpu.power_w == null ? '—' : fmtWatts(data.cpu.power_w)} detail={data.cpu.power_w == null ? (data.cpu.power_error ? t('resources.power_unreadable') : undefined) : avgCPU == null ? undefined : t('resources.avg', { value: fmtWatts(avgCPU) })} />
+          <Fact label="GPU" value={data.gpu_power_w == null ? '—' : fmtWatts(data.gpu_power_w)} detail={avgGPU == null ? undefined : t('resources.avg', { value: fmtWatts(avgGPU) })} />
+          <Fact label={t('resources.known_total')} value={data.power_w == null ? '—' : fmtWatts(data.power_w)} detail="CPU + GPU" />
+          <Fact label={t('resources.since_start')} value={fmtEnergy(data.energy_wh)} detail={t('resources.energy_integral')} />
+          <Fact label={t('resources.gpu_max_temp')} value={fmtTemp(data.gpu_temp_max_c)} warn={tempWarn} detail={tempWarn ? t('resources.temp_high') : data.gpu_power_w == null ? t('resources.power_unavailable') : t('resources.from_nvidia')} />
+          <Fact label={t('resources.gpu_power_limit')} value={limit > 0 ? fmtWatts(limit) : '—'} detail={limit > 0 ? t('resources.gpu_limit_sum', { n: gpus.length }) : undefined} />
         </dl>
         <p className="border-t border-line pt-3 text-[11px] leading-relaxed text-fg-3">
-          {data.cpu.power_w == null && data.cpu.power_error && <span className="text-fg-2">CPU 封装读不到：{data.cpu.power_error}。</span>}
-          合计只有 CPU 和 GPU，不含内存、硬盘、风扇和电源损耗。
+          {data.cpu.power_w == null && data.cpu.power_error && <span className="text-fg-2">{t('resources.power_cpu_error', { error: data.cpu.power_error })}</span>}
+          {t('resources.power_note')}
         </p>
       </div>
     </Panel>
@@ -701,41 +721,41 @@ function StoragePanel({ data }: { data: ResourceSnapshot }) {
   const ioCols = 'grid-cols-[minmax(0,1fr)_5rem_5rem_2.5rem] sm:grid-cols-[minmax(0,1fr)_6rem_6rem_6rem]'
   return (
     <Panel
-      title="存储"
+      title={t('resources.storage')}
       className="h-full"
-      extra={data.disks_updated_at ? <span>分区数据 {ago(data.disks_updated_at)} 秒前</span> : undefined}
+      extra={data.disks_updated_at ? <span>{t('resources.disks_age', { n: ago(data.disks_updated_at) })}</span> : undefined}
     >
       {/* 行内已经写出采集失败的分区时，不再在顶部重复同一句错误 */}
-      {data.disks_error && !rows.some((d) => d.error) && <Alert tone="warn" role="alert" className="m-3 sm:m-4">磁盘容量读取失败：{data.disks_error}</Alert>}
+      {data.disks_error && !rows.some((d) => d.error) && <Alert tone="warn" role="alert" className="m-3 sm:m-4">{t('resources.disk_capacity_failed', { error: data.disks_error })}</Alert>}
       <ColHead className="flex">
-        <span className="font-medium text-fg-2">分区</span>
-        <span className="ml-auto">可用 / 总量</span>
+        <span className="font-medium text-fg-2">{t('resources.partition')}</span>
+        <span className="ml-auto">{t('resources.free_total')}</span>
       </ColHead>
       <div className="divide-y divide-line">
-        {rows.length === 0 ? <p className="px-3 py-2 text-ui text-fg-3 sm:px-4">没有读到分区数据</p> : rows.map((disk, i) => <DiskRow key={disk.id || `${disk.path}:${i}`} disk={disk} />)}
+        {rows.length === 0 ? <p className="px-3 py-2 text-ui text-fg-3 sm:px-4">{t('resources.no_partitions')}</p> : rows.map((disk, i) => <DiskRow key={disk.id || `${disk.path}:${i}`} disk={disk} />)}
       </div>
       <ColHead className={cx('grid border-t', ioCols)}>
-        <span className="font-medium text-fg-2">物理盘 I/O</span>
-        <span className="text-right">读</span>
-        <span className="text-right">写</span>
-        <span className="text-right">繁忙</span>
+        <span className="font-medium text-fg-2">{t('resources.physical_io')}</span>
+        <span className="text-right">{t('resources.read')}</span>
+        <span className="text-right">{t('resources.write')}</span>
+        <span className="text-right">{t('resources.busy')}</span>
       </ColHead>
-      {data.disk_io_error ? <Alert tone="warn" role="alert" className="m-3 sm:m-4">磁盘 I/O 读取失败：{data.disk_io_error}</Alert> : io.length === 0 ? <p className="px-3 py-2 text-xs text-fg-3 sm:px-4">没有读到设备 I/O</p> : (
+      {data.disk_io_error ? <Alert tone="warn" role="alert" className="m-3 sm:m-4">{t('resources.disk_io_failed', { error: data.disk_io_error })}</Alert> : io.length === 0 ? <p className="px-3 py-2 text-xs text-fg-3 sm:px-4">{t('resources.no_device_io')}</p> : (
         <div className="divide-y divide-line text-xs">
           {io.map((d) => (
             <div key={d.name} className={cx('grid items-center gap-3 px-3 py-1.5 sm:px-4', ioCols)}>
               <span className="truncate font-mono" title={d.name}>{d.name}</span>
-              <span className="text-right tabular-nums"><span className="sr-only">读 </span>{fmtRate(d.read_bytes_per_sec)}</span>
-              <span className="text-right tabular-nums"><span className="sr-only">写 </span>{fmtRate(d.write_bytes_per_sec)}</span>
+              <span className="text-right tabular-nums"><span className="sr-only">{t('resources.read')} </span>{fmtRate(d.read_bytes_per_sec)}</span>
+              <span className="text-right tabular-nums"><span className="sr-only">{t('resources.write')} </span>{fmtRate(d.write_bytes_per_sec)}</span>
               <span className="flex items-center justify-end gap-2 tabular-nums">
                 <span className="w-10 max-sm:hidden"><Meter value={d.busy_percent} /></span>
-                <span className="w-8 text-right"><span className="sr-only">繁忙 </span>{d.busy_percent}%</span>
+                <span className="w-8 text-right"><span className="sr-only">{t('resources.busy')} </span>{d.busy_percent}%</span>
               </span>
             </div>
           ))}
         </div>
       )}
-      {data.disk_io.length > io.length && <p className="border-t border-line px-3 py-1.5 text-[11px] text-fg-3 sm:px-4">还有 {data.disk_io.length - io.length} 个设备</p>}
+      {data.disk_io.length > io.length && <p className="border-t border-line px-3 py-1.5 text-[11px] text-fg-3 sm:px-4">{t('resources.more_devices', { n: data.disk_io.length - io.length })}</p>}
     </Panel>
   )
 }
@@ -748,8 +768,8 @@ function DiskRow({ disk }: { disk: Disk }) {
       {/* 手机上路径独占一行：和容量挤在一起时，长路径会被从中间断开 */}
       <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 max-sm:basis-full">
         <span className="min-w-0 font-mono text-xs [overflow-wrap:anywhere]">{disk.paths.join(' · ') || disk.path}</span>
-        {disk.data && <span className="shrink-0 whitespace-nowrap text-[11px] text-fg-3">数据目录</span>}
-        {disk.warn && !disk.error && <span className="shrink-0 text-xs text-warn">余量偏低</span>}
+        {disk.data && <span className="shrink-0 whitespace-nowrap text-[11px] text-fg-3">{t('resources.data_dir')}</span>}
+        {disk.warn && !disk.error && <span className="shrink-0 text-xs text-warn">{t('resources.low_space')}</span>}
       </div>
       {disk.error ? <span className="text-xs text-warn">{disk.error}</span> : (
         <div className="flex items-center gap-2 max-sm:w-full sm:w-60">
@@ -763,8 +783,15 @@ function DiskRow({ disk }: { disk: Disk }) {
 
 // ───────────────────────── 丹炉自身占用 ─────────────────────────
 
-const SELF_LABELS: Record<string, string> = {
-  db: '数据库', logs: '日志', snapshots: '代码快照', run: '运行目录', envs: '环境记录', backup: '升级备份', other: '其他',
+// 静态键表 + 函数取值：文案随当前语言，切换语言后重渲染即生效；未知分类原样显示服务器给的名称
+const selfLabelKeys = {
+  db: 'resources.self_db', logs: 'resources.self_logs', snapshots: 'resources.self_snapshots',
+  run: 'resources.self_run', envs: 'resources.self_envs', backup: 'resources.self_backup', other: 'resources.self_other',
+} as const
+
+function selfLabel(name: string): string {
+  const key = selfLabelKeys[name as keyof typeof selfLabelKeys]
+  return key ? t(key) : name
 }
 
 function SelfPartRow({ part, total }: { part: SelfUsagePart; total: number }) {
@@ -773,11 +800,11 @@ function SelfPartRow({ part, total }: { part: SelfUsagePart; total: number }) {
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 sm:px-4">
       {/* 手机上名称独占一行，和 DiskRow 同一套排法 */}
       <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 max-sm:basis-full">
-        <span className="shrink-0 text-xs">{SELF_LABELS[part.name] ?? part.name}</span>
-        <span className="shrink-0 text-[11px] text-fg-3 tabular-nums">{part.files} 个文件</span>
+        <span className="shrink-0 text-xs">{selfLabel(part.name)}</span>
+        <span className="shrink-0 text-[11px] text-fg-3 tabular-nums">{t('resources.file_count', { n: part.files })}</span>
         {part.error && <span className="min-w-0 truncate text-xs text-warn" title={part.error}>{part.error}</span>}
       </div>
-      <div className="flex items-center gap-2 max-sm:w-full sm:w-60" title={`占总量 ${percent}%`}>
+      <div className="flex items-center gap-2 max-sm:w-full sm:w-60" title={t('resources.self_share', { percent })}>
         <div className="flex-1"><Meter value={percent} className="bg-fg-3" /></div>
         <span className="shrink-0 text-xs tabular-nums">{bytes(part.bytes)}</span>
       </div>
@@ -792,31 +819,31 @@ function SelfUsagePanel({ data, history, from, to }: { data: ResourceSnapshot; h
   const selfAge = data.self_updated_at ? ago(data.self_updated_at) : null
   const withSeconds = to - from <= 300
   const series: ChartSeries[] = [
-    { label: '数据目录', points: pointsOf(points, (p) => p.data_bytes) },
-    { label: '数据库', points: pointsOf(points, (p) => p.db_bytes), dashed: true },
+    { label: t('resources.data_dir'), points: pointsOf(points, (p) => p.data_bytes) },
+    { label: t('resources.self_db'), points: pointsOf(points, (p) => p.db_bytes), dashed: true },
   ]
   return (
     <Panel
-      title="丹炉占用"
+      title={t('resources.self_title')}
       extra={
         <>
-          {self && <span className="text-fg">共 <b className="font-semibold tabular-nums">{bytes(self.total_bytes)}</b></span>}
+          {self && <span className="text-fg">{t('resources.total_label')} <b className="font-semibold tabular-nums">{bytes(self.total_bytes)}</b></span>}
           {data.self_error
-            ? <span className="text-warn">统计失败</span>
-            : selfAge != null && <span>{selfAge} 秒前 · 每 30 秒统计</span>}
+            ? <span className="text-warn">{t('resources.self_scan_failed')}</span>
+            : selfAge != null && <span>{t('resources.self_age', { n: selfAge })}</span>}
         </>
       }
     >
-      {data.self_error && <Alert tone="warn" role="alert" className="m-3 sm:m-4">丹炉占用统计失败：{data.self_error}</Alert>}
+      {data.self_error && <Alert tone="warn" role="alert" className="m-3 sm:m-4">{t('resources.self_error', { error: data.self_error })}</Alert>}
       {!self ? (
-        <p className="px-3 py-4 text-ui text-fg-3 sm:px-4">{data.self_error ? '还没有成功的统计，原因见上方。' : '正在统计数据目录…'}</p>
+        <p className="px-3 py-4 text-ui text-fg-3 sm:px-4">{data.self_error ? t('resources.self_no_success') : t('resources.self_scanning')}</p>
       ) : (
         <>
           <div className="grid gap-0 divide-y divide-line lg:grid-cols-2 lg:divide-x lg:divide-y-0">
             <div className="min-w-0">
               <ColHead className="flex">
-                <span className="font-medium text-fg-2">数据目录构成</span>
-                <span className="ml-auto tabular-nums">{self.files} 个文件</span>
+                <span className="font-medium text-fg-2">{t('resources.self_breakdown')}</span>
+                <span className="ml-auto tabular-nums">{t('resources.file_count', { n: self.files })}</span>
               </ColHead>
               <div className="divide-y divide-line">
                 {self.parts.map((p) => <SelfPartRow key={p.name} part={p} total={self.total_bytes} />)}
@@ -824,28 +851,28 @@ function SelfUsagePanel({ data, history, from, to }: { data: ResourceSnapshot; h
             </div>
             <div className="min-w-0">
               <ColHead className="flex">
-                <span className="font-medium text-fg-2">数据库</span>
-                {self.db && <span className="ml-auto tabular-nums">{self.db.page_count} 页 × {bytes(self.db.page_size)}</span>}
+                <span className="font-medium text-fg-2">{t('resources.self_db')}</span>
+                {self.db && <span className="ml-auto tabular-nums">{t('resources.db_pages', { n: self.db.page_count, size: bytes(self.db.page_size) })}</span>}
               </ColHead>
               <div className="space-y-3 p-3 sm:p-4">
-                {self.db_error && <p role="alert" className="text-xs text-warn">数据库大小读取失败：{self.db_error}</p>}
+                {self.db_error && <p role="alert" className="text-xs text-warn">{t('resources.db_size_failed', { error: self.db_error })}</p>}
                 {self.db ? (
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-                    <Fact label="逻辑大小" value={bytes(self.db.logical_bytes)} title="页数 × 页大小，含空闲页" />
-                    <Fact label="空闲页" value={bytes(self.db.free_bytes)} title="VACUUM 可回收的部分" />
-                    <Fact label="WAL" value={bytes(self.db.wal_bytes)} title="预写日志，检查点后回落" />
-                    <Fact label="主文件" value={bytes(self.db.file_bytes)} />
+                    <Fact label={t('resources.db_logical')} value={bytes(self.db.logical_bytes)} title={t('resources.db_logical_title')} />
+                    <Fact label={t('resources.db_free_pages')} value={bytes(self.db.free_bytes)} title={t('resources.db_free_title')} />
+                    <Fact label="WAL" value={bytes(self.db.wal_bytes)} title={t('resources.wal_title')} />
+                    <Fact label={t('resources.db_main_file')} value={bytes(self.db.file_bytes)} />
                   </dl>
-                ) : !self.db_error && <p className="text-xs text-fg-3">没有读到数据库统计</p>}
+                ) : !self.db_error && <p className="text-xs text-fg-3">{t('resources.no_db_stats')}</p>}
                 <div>
-                  <ResourceChart series={series} from={from} to={to} format={bytes} binary className="h-16" label="数据目录与数据库大小历史曲线" />
+                  <ResourceChart series={series} from={from} to={to} format={bytes} binary className="h-16" label={t('resources.chart_self')} />
                   <div className="mt-1 flex justify-between text-[11px] leading-none text-fg-3 tabular-nums" aria-hidden>
                     <span>{clock(from, withSeconds)}</span>
                     <span>{clock(to, withSeconds)}</span>
                   </div>
                   <p className="mt-1.5 flex flex-wrap items-center gap-x-3 text-[11px] text-fg-3">
-                    <span className="inline-flex items-center gap-1"><SeriesMark />数据目录</span>
-                    <span className="inline-flex items-center gap-1"><SeriesMark dashed />数据库</span>
+                    <span className="inline-flex items-center gap-1"><SeriesMark />{t('resources.data_dir')}</span>
+                    <span className="inline-flex items-center gap-1"><SeriesMark dashed />{t('resources.self_db')}</span>
                   </p>
                 </div>
               </div>
@@ -853,7 +880,7 @@ function SelfUsagePanel({ data, history, from, to }: { data: ResourceSnapshot; h
           </div>
           <p className="border-t border-line px-3 py-2 text-[11px] leading-relaxed text-fg-3 sm:px-4">
             <span className="font-mono [overflow-wrap:anywhere]" title={self.path}>{self.path}</span>
-            ：硬链接只计一次，不跟随符号链接；任务写在运行目录里的产物也计入。数据库大小按页数×页大小，WAL 另计。
+            {t('resources.self_note')}
           </p>
         </>
       )}
@@ -867,17 +894,17 @@ function NetworkPanel({ data }: { data: ResourceSnapshot }) {
   // 1024–1279px 两栏并排时面板只有 480px 上下，数值列收窄、利用率只写数字，把宽度让给网卡名
   const cols = 'grid-cols-[4.5rem_minmax(0,1fr)_minmax(0,1fr)_2.5rem] sm:grid-cols-[minmax(0,1fr)_4.5rem_5.5rem_5.5rem_5.5rem] lg:grid-cols-[minmax(0,1fr)_4rem_5rem_5rem_2.5rem] xl:grid-cols-[minmax(0,1fr)_4.5rem_5.5rem_5.5rem_5.5rem]'
   return (
-    <Panel title="网卡" className="h-full" extra={data.network.length > 0 ? <span>{data.network.length} 个</span> : undefined}>
-      {data.network_error && <Alert tone="warn" role="alert" className="m-3 sm:m-4">网络数据读取失败：{data.network_error}</Alert>}
+    <Panel title={t('resources.nics')} className="h-full" extra={data.network.length > 0 ? <span>{t('resources.iface_count', { n: data.network.length })}</span> : undefined}>
+      {data.network_error && <Alert tone="warn" role="alert" className="m-3 sm:m-4">{t('resources.net_read_failed', { error: data.network_error })}</Alert>}
       <ColHead className={cx('hidden sm:grid', cols)}>
-        <span className="font-medium text-fg-2">接口</span>
-        <span className="text-right">链路</span>
-        <span className="text-right">接收</span>
-        <span className="text-right">发送</span>
-        <span className="text-right">利用率</span>
+        <span className="font-medium text-fg-2">{t('resources.iface')}</span>
+        <span className="text-right">{t('resources.link')}</span>
+        <span className="text-right">{t('resources.rx')}</span>
+        <span className="text-right">{t('resources.tx')}</span>
+        <span className="text-right">{t('resources.utilization')}</span>
       </ColHead>
-      {data.samples < 2 && <p className="px-3 pt-2 text-xs text-fg-3 sm:px-4">等待第二次采样后才有速率</p>}
-      {ifaces.length === 0 ? <p className="px-3 py-2 text-xs text-fg-3 sm:px-4">没有读到网卡数据</p> : (
+      {data.samples < 2 && <p className="px-3 pt-2 text-xs text-fg-3 sm:px-4">{t('resources.wait_rate')}</p>}
+      {ifaces.length === 0 ? <p className="px-3 py-2 text-xs text-fg-3 sm:px-4">{t('resources.no_nic_data')}</p> : (
         <div className="divide-y divide-line text-xs">
           {ifaces.map((n) => {
             const speed = fmtSpeed(n.speed_mbps)
@@ -890,24 +917,24 @@ function NetworkPanel({ data }: { data: ResourceSnapshot }) {
                   <span className="flex min-w-0 items-baseline gap-2">
                     {/* 网卡名优先完整显示，挤不下时先截掉后面的标记（标记有悬停提示） */}
                     <span className="max-w-full shrink-0 truncate font-mono" title={n.name}>{n.name}</span>
-                    {n.virtual && <span className="shrink-0 text-[11px] text-fg-3">虚拟</span>}
-                    {faults > 0 && <span className="min-w-0 truncate text-warn" title={`错误 ${n.rx_errors + n.tx_errors}，丢弃 ${n.rx_drops + n.tx_drops}`}>错误/丢弃 {faults}</span>}
+                    {n.virtual && <span className="shrink-0 text-[11px] text-fg-3">{t('resources.virtual')}</span>}
+                    {faults > 0 && <span className="min-w-0 truncate text-warn" title={t('resources.iface_faults_title', { errors: n.rx_errors + n.tx_errors, drops: n.rx_drops + n.tx_drops })}>{t('resources.iface_faults', { n: faults })}</span>}
                   </span>
-                  <span className="block truncate text-[11px] text-fg-3 tabular-nums max-sm:ml-auto" title="开机以来收发的总量">累计 ↓ {bytes(n.rx_total_bytes)} · ↑ {bytes(n.tx_total_bytes)}</span>
+                  <span className="block truncate text-[11px] text-fg-3 tabular-nums max-sm:ml-auto" title={t('resources.iface_total_title')}>{t('resources.iface_total', { rx: bytes(n.rx_total_bytes), tx: bytes(n.tx_total_bytes) })}</span>
                 </span>
-                <span className="text-fg-2 tabular-nums sm:text-right"><span className="sr-only">链路 </span>{speed ?? '—'}</span>
-                <span className="text-right tabular-nums"><span className="sm:hidden">↓ </span><span className="sr-only">接收 </span>{fmtRate(n.rx_bytes_per_sec)}</span>
-                <span className="text-right tabular-nums"><span className="sm:hidden">↑ </span><span className="sr-only">发送 </span>{fmtRate(n.tx_bytes_per_sec)}</span>
+                <span className="text-fg-2 tabular-nums sm:text-right"><span className="sr-only">{t('resources.link')} </span>{speed ?? '—'}</span>
+                <span className="text-right tabular-nums"><span className="sm:hidden">↓ </span><span className="sr-only">{t('resources.rx')} </span>{fmtRate(n.rx_bytes_per_sec)}</span>
+                <span className="text-right tabular-nums"><span className="sm:hidden">↑ </span><span className="sr-only">{t('resources.tx')} </span>{fmtRate(n.tx_bytes_per_sec)}</span>
                 <span className="flex items-center justify-end gap-2 tabular-nums">
                   {util != null && <span className="w-10 max-sm:hidden lg:max-xl:hidden"><Meter value={util} /></span>}
-                  <span className="w-8 text-right"><span className="sr-only">利用率 </span>{util == null ? '—' : `${util}%`}</span>
+                  <span className="w-8 text-right"><span className="sr-only">{t('resources.utilization')} </span>{util == null ? '—' : `${util}%`}</span>
                 </span>
               </div>
             )
           })}
         </div>
       )}
-      {data.network.length > ifaces.length && <p className="border-t border-line px-3 py-1.5 text-[11px] text-fg-3 sm:px-4">还有 {data.network.length - ifaces.length} 个网卡</p>}
+      {data.network.length > ifaces.length && <p className="border-t border-line px-3 py-1.5 text-[11px] text-fg-3 sm:px-4">{t('resources.more_nics', { n: data.network.length - ifaces.length })}</p>}
     </Panel>
   )
 }
@@ -918,20 +945,20 @@ function ProcessPanel({ data }: { data: ResourceSnapshot }) {
   const processAge = data.processes_at ? ago(data.processes_at) : null
   return (
     <Panel
-      title="进程"
+      title={t('resources.processes')}
       extra={
         <>
-          <span>CPU 为最近 10 秒</span>
-          {data.process_samples < 2 && <span className="text-warn">CPU 等待第二次采样</span>}
-          {processAge != null && <span>进程数据 {processAge} 秒前</span>}
+          <span>{t('resources.proc_cpu_window')}</span>
+          {data.process_samples < 2 && <span className="text-warn">{t('resources.proc_cpu_wait')}</span>}
+          {processAge != null && <span>{t('resources.processes_age', { n: processAge })}</span>}
         </>
       }
     >
       <div className="grid gap-0 divide-y divide-line lg:grid-cols-2 lg:divide-x lg:divide-y-0">
-        <ProcessList title="按 CPU 占用" sort="cpu" processes={byCpu} cpuKnown={data.process_samples >= 2} />
-        <ProcessList title="按内存占用" sort="mem" processes={byMem} cpuKnown={data.process_samples >= 2} />
+        <ProcessList title={t('resources.by_cpu')} sort="cpu" processes={byCpu} cpuKnown={data.process_samples >= 2} />
+        <ProcessList title={t('resources.by_mem')} sort="mem" processes={byMem} cpuKnown={data.process_samples >= 2} />
       </div>
-      {data.processes_error && <p role="alert" className="border-t border-line px-3 py-2 text-xs text-warn sm:px-4">进程数据读取失败：{data.processes_error}</p>}
+      {data.processes_error && <p role="alert" className="border-t border-line px-3 py-2 text-xs text-warn sm:px-4">{t('resources.proc_read_failed', { error: data.processes_error })}</p>}
     </Panel>
   )
 }
@@ -944,11 +971,11 @@ function ProcessList({ title, sort, processes, cpuKnown }: { title: string; sort
       <ColHead className={cx('flex', procCols)}>
         <span className="font-medium text-fg-2">{title}</span>
         <span className="text-right max-sm:hidden">PID</span>
-        <span className="max-sm:hidden">用户</span>
+        <span className="max-sm:hidden">{t('resources.user')}</span>
         <span className={cx('text-right max-sm:hidden', sort === 'cpu' && 'text-fg-2')}>CPU{sort === 'cpu' && ' ↓'}</span>
-        <span className={cx('text-right max-sm:hidden', sort === 'mem' && 'text-fg-2')}>内存{sort === 'mem' && ' ↓'}</span>
+        <span className={cx('text-right max-sm:hidden', sort === 'mem' && 'text-fg-2')}>{t('resources.memory')}{sort === 'mem' && ' ↓'}</span>
       </ColHead>
-      {processes.length === 0 ? <p className="px-3 py-3 text-ui text-fg-3 sm:px-4">没有读到进程信息</p> : (
+      {processes.length === 0 ? <p className="px-3 py-3 text-ui text-fg-3 sm:px-4">{t('resources.no_processes')}</p> : (
         <ul className="divide-y divide-line">
           {processes.map((p) => (
             <li key={p.pid} className={cx('flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-3 py-1.5 text-xs sm:items-center sm:gap-y-0 sm:px-4', procCols)}>
@@ -964,7 +991,7 @@ function ProcessList({ title, sort, processes, cpuKnown }: { title: string; sort
               <span className="text-fg-3 tabular-nums sm:text-right"><span className="sm:hidden">PID </span>{p.pid}</span>
               <span className="truncate text-fg-3" title={p.user}>{p.user || '—'}</span>
               <span className={cx('text-right tabular-nums max-sm:ml-auto', sort === 'cpu' && 'font-medium')}><span className="sr-only">CPU </span>{cpuKnown ? `${p.cpu_percent.toFixed(1)}%` : '—'}</span>
-              <span className={cx('text-right tabular-nums', sort === 'mem' && 'font-medium')}><span className="sr-only">内存 </span>{bytes(p.rss_bytes)}</span>
+              <span className={cx('text-right tabular-nums', sort === 'mem' && 'font-medium')}><span className="sr-only">{t('resources.memory')} </span>{bytes(p.rss_bytes)}</span>
             </li>
           ))}
         </ul>
@@ -980,7 +1007,7 @@ function Freshness({ age, stale, error, className }: { age: number | null; stale
     <span className={cx('inline-flex items-center gap-1.5 whitespace-nowrap text-xs', stale ? 'text-warn' : 'text-fg-3', className)}>
       <span className={cx('size-1.5 rounded-full', age == null ? 'bg-fg-4' : stale ? 'bg-warn' : 'bg-ok')} aria-hidden />
       {/* data.error 的 Alert 会解释原因，这里只报年龄，同一件事不说两遍 */}
-      {age == null ? '等待第一次采样' : stale ? (error ? `数据 ${age} 秒前` : `数据 ${age} 秒没有更新`) : `${age} 秒前 · 每 2 秒采样`}
+      {age == null ? t('resources.wait_first_sample') : stale ? (error ? t('resources.data_age', { n: age }) : t('resources.data_stale', { n: age })) : t('resources.fresh', { n: age })}
     </span>
   )
 }
@@ -988,7 +1015,7 @@ function Freshness({ age, stale, error, className }: { age: number | null; stale
 export function Resources() {
   const [params, setParams] = useSearchParams()
   const raw = params.get('range') as ResourceRange | null
-  const rawValid = RANGES.some((r) => r.value === raw)
+  const rawValid = RANGES.some((r) => r === raw)
   // URL 优先（可分享），其次记住上次选的档位，最后默认 15m
   const range = rawValid ? raw! : (readStoredRange() ?? '15m')
   const setRange = (value: ResourceRange) => {
@@ -1031,11 +1058,11 @@ export function Resources() {
   if (!current.data) {
     return (
       <div className="space-y-4">
-        <h1 className="text-lg font-semibold">服务器资源</h1>
-        <ErrorBox error={current.error ?? '没有读到资源数据'} />
+        <h1 className="text-lg font-semibold">{t('resources.title')}</h1>
+        <ErrorBox error={current.error ?? t('resources.no_data')} />
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => current.refetch()}>重试</Button>
-          <Link to="/" className={buttonClass('ghost')}>回到总览</Link>
+          <Button onClick={() => current.refetch()}>{t('common.retry')}</Button>
+          <Link to="/" className={buttonClass('ghost')}>{t('resources.back_home')}</Link>
         </div>
       </div>
     )
@@ -1049,7 +1076,7 @@ export function Resources() {
   const age = noSample ? null : ago(data.updated_at)
   const stale = age != null && age > 10
   const host = data.host
-  const hostLine = [host.hostname, host.os, host.kernel && `内核 ${host.kernel}`, host.uptime_seconds > 0 && `已运行 ${fmtUptime(host.uptime_seconds)}`].filter(Boolean).join(' · ')
+  const hostLine = [host.hostname, host.os, host.kernel && t('resources.host_kernel', { kernel: host.kernel }), host.uptime_seconds > 0 && t('resources.host_uptime', { uptime: fmtUptime(host.uptime_seconds) })].filter(Boolean).join(' · ')
   const gpuList = gpus.data?.gpus ?? []
 
   return (
@@ -1057,7 +1084,7 @@ export function Resources() {
       <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex items-center gap-3">
-            <h1 className="text-lg font-semibold">服务器资源</h1>
+            <h1 className="text-lg font-semibold">{t('resources.title')}</h1>
             {/* 手机上新鲜度和标题同一行，省出一行给下面的面板 */}
             <Freshness age={age} stale={stale} error={!!data.error} className="ml-auto sm:hidden" />
           </div>
@@ -1065,15 +1092,15 @@ export function Resources() {
         </div>
         <div className="flex items-center gap-3 max-sm:w-full">
           <Freshness age={age} stale={stale} error={!!data.error} className="max-sm:hidden" />
-          <Segmented options={RANGES} value={range} onChange={setRange} label="历史范围" className="max-sm:w-full" />
+          <Segmented options={rangeOptions()} value={range} onChange={setRange} label={t('resources.history_range')} className="max-sm:w-full" />
         </div>
       </div>
 
       {current.error && (
         <Alert tone="warn" role="alert">
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span>数据更新失败：{(current.error as Error).message}。显示的是 {age == null ? '最近一次' : `${age} 秒前`}的快照。</span>
-            <Button size="sm" className="-my-2" onClick={() => current.refetch()}>重试</Button>
+            <span>{age == null ? t('resources.refresh_failed_latest', { error: apiErrorText(current.error) }) : t('resources.refresh_failed_age', { error: apiErrorText(current.error), age })}</span>
+            <Button size="sm" className="-my-2" onClick={() => current.refetch()}>{t('common.retry')}</Button>
           </span>
         </Alert>
       )}
@@ -1085,7 +1112,7 @@ export function Resources() {
           <GpuPanel gpus={gpus} />
           <Card>
             <p className="px-3 py-8 text-center text-ui text-fg-3 sm:px-4">
-              {data.error ? '还没有采到 CPU、内存等主机数据，原因见上方。' : '正在进行第一次采样…'}
+              {data.error ? t('resources.no_host_data') : t('resources.first_sampling')}
             </p>
           </Card>
         </>
@@ -1108,7 +1135,7 @@ export function Resources() {
             <SelfUsagePanel data={data} history={history.data} from={from} to={to} />
           </div>
           <ProcessPanel data={data} />
-          <p className="text-[11px] text-fg-3">历史每 1 小时滚动一次，服务重启后清零；CPU/GPU 功耗为可用来源的估算值（CPU 来自 Intel RAPL 或 amd_energy），电量按本次服务启动以来的采样积分。曲线是区间桶均值，"平均"按曲线算，"峰值"按原始采样点算；在任一张曲线上悬停或横向拖动，所有指标卡一起显示那一刻的数值。</p>
+          <p className="text-[11px] text-fg-3">{t('resources.footnote')}</p>
         </>
       )}
     </div>

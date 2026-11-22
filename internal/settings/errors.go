@@ -12,12 +12,28 @@ import (
 )
 
 // InputError 是用户填的值不合要求，接口据此返回 400 而不是 500。
-type InputError struct{ msg string }
+// code/params 供前端本地化；msg 仍是中文原文，旧客户端直接显示它。
+type InputError struct {
+	msg    string
+	code   string
+	params map[string]any
+}
 
 func (e *InputError) Error() string { return e.msg }
 
-// Invalid 返回一个 InputError。
-func Invalid(msg string) error { return &InputError{msg} }
+// Invalid 返回一个不带机器码的 InputError。
+func Invalid(msg string) error { return &InputError{msg: msg} }
+
+// InvalidC 返回带机器码的 InputError；没有插值参数时 params 传 nil。
+func InvalidC(code, msg string, params map[string]any) error {
+	return &InputError{msg: msg, code: code, params: params}
+}
+
+// Code 是机器码；没给码的旧调用点返回空字符串。
+func (e *InputError) Code() string { return e.code }
+
+// Params 是本地化用的插值参数，可能为 nil。
+func (e *InputError) Params() map[string]any { return e.params }
 
 func IsInputError(err error) bool {
 	var ie *InputError

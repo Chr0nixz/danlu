@@ -21,14 +21,31 @@ const JobMarker = "DANLU_RUN_DIR"
 
 // JobOf 从进程的 JobMarker 取出任务编号；进程不属于 runRoot 下的任务时返回 0。
 func JobOf(pid int, runRoot string) int64 {
+	job, _ := JobEnv(pid, runRoot)
+	return job
+}
+
+// JobEnv 读一次 environ，同时取出任务编号和进程启动时的 CUDA_VISIBLE_DEVICES。
+// 只有属于 runRoot 下任务的进程才返回选卡变量；没设这个变量时是空串（CUDA 能看到全部卡）。
+// 读的是 exec 时的环境：程序运行中改 os.environ 看不到。
+func JobEnv(pid int, runRoot string) (int64, *string) {
 	if runRoot == "" {
-		return 0
+		return 0, nil
 	}
-	v, ok := EnvVar(pid, JobMarker)
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return 0, nil
+	}
+	v, ok := LookupEnv(b, JobMarker)
 	if !ok {
-		return 0
+		return 0, nil
 	}
-	return JobFromRunDir(runRoot, v)
+	job := JobFromRunDir(runRoot, v)
+	if job == 0 {
+		return 0, nil
+	}
+	cvd, _ := LookupEnv(b, "CUDA_VISIBLE_DEVICES")
+	return job, &cvd
 }
 
 // JobFromRunDir 解析 <runRoot>/<id>，不是这个形式时返回 0。

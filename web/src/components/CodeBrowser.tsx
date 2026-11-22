@@ -11,8 +11,9 @@ import python from 'highlight.js/lib/languages/python'
 import yaml from 'highlight.js/lib/languages/yaml'
 import 'highlight.js/styles/github-dark.css'
 import { useMemo, useState } from 'react'
-import { ApiError, bytes, type SnapshotMeta } from '@danlu/core'
+import { apiErrorText, bytes, type SnapshotMeta } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { buttonClass, Card, cx, ErrorBox, Segmented, Select, Spinner } from './ui'
 
 hljs.registerLanguage('python', python)
@@ -42,8 +43,7 @@ export function CodeBrowser({ jobId }: { jobId: number }) {
 
   if (q.isLoading) return <Spinner />
   if (q.error) {
-    const e = q.error as ApiError
-    return <div className="rounded-lg border border-dashed border-line-strong px-4 py-10 text-center text-ui text-fg-3">{e.message}</div>
+    return <div className="rounded-lg border border-dashed border-line-strong px-4 py-10 text-center text-ui text-fg-3">{apiErrorText(q.error)}</div>
   }
   const { meta, has_diff, note } = q.data!
   const g = meta.git
@@ -67,34 +67,34 @@ export function CodeBrowser({ jobId }: { jobId: number }) {
             )}
             {g.dirty && (
               <span className={cx(chip, 'border-warn/30 bg-warn/8 font-medium text-warn')}>
-                有未提交的改动
+                {t('job.snapshot_dirty')}
               </span>
             )}
           </>
         ) : (
-          <span className={chip}>不是 git 仓库，按扩展名保存了代码和配置文件</span>
+          <span className={chip}>{t('job.snapshot_not_git')}</span>
         )}
         <span className="text-fg-3">
-          {meta.files.length} 个文件 · {bytes(meta.total_size)}
+          {t('job.snapshot_file_count', { n: meta.files.length })} · {bytes(meta.total_size)}
         </span>
         <a
           href={`/api/jobs/${jobId}/snapshot/download`}
           className={cx(buttonClass('ghost', 'sm'), 'ml-auto')}
         >
           <Download />
-          下载 tar.gz
+          {t('job.snapshot_download')}
         </a>
       </div>
       {note && <div className="text-xs text-warn">{note}</div>}
 
       <Segmented
-        label="快照内容"
+        label={t('job.snapshot_contents')}
         value={tab}
         onChange={setTab}
         options={[
-          { value: 'files', label: '文件' },
-          ...(has_diff ? [{ value: 'diff' as const, label: '未提交的改动' }] : []),
-          ...(meta.skip_count ? [{ value: 'skipped' as const, label: `未保存 (${meta.skip_count})` }] : []),
+          { value: 'files', label: t('job.snapshot_files') },
+          ...(has_diff ? [{ value: 'diff' as const, label: t('job.snapshot_diff') }] : []),
+          ...(meta.skip_count ? [{ value: 'skipped' as const, label: t('job.snapshot_skipped', { n: meta.skip_count }) }] : []),
         ]}
       />
       {tab === 'files' && <Files jobId={jobId} meta={meta} />}
@@ -107,7 +107,7 @@ export function CodeBrowser({ jobId }: { jobId: number }) {
               <span className="shrink-0 text-xs text-fg-3">{s.reason}</span>
             </div>
           ))}
-          {meta.skip_count > meta.skipped.length && <div className="px-3 py-2 text-xs text-fg-3">……共 {meta.skip_count} 个</div>}
+          {meta.skip_count > meta.skipped.length && <div className="px-3 py-2 text-xs text-fg-3">{t('job.snapshot_skipped_total', { n: meta.skip_count })}</div>}
         </Card>
       )}
     </div>
@@ -148,12 +148,12 @@ function Files({ jobId, meta }: { jobId: number; meta: SnapshotMeta }) {
   const tree = useMemo(() => buildTree(meta.files), [meta.files])
   const [sel, setSel] = useState(() => pickDefault(meta.files))
   const expandAll = meta.files.length <= 60
-  if (!meta.files.length) return <div className="text-ui text-fg-3">快照里没有文件</div>
+  if (!meta.files.length) return <div className="text-ui text-fg-3">{t('job.snapshot_empty')}</div>
   return (
     <div className="grid overflow-hidden rounded-lg border border-line md:grid-cols-[260px_1fr]">
       {/* 手机：文件树换成系统的下拉选择，代码紧接在下面，打开代码标签页就能看到代码 */}
       <div className="border-b border-line bg-surface p-2 md:hidden">
-        <Select aria-label="选择文件" value={sel} onChange={(e) => setSel(e.target.value)} className="h-11 font-mono text-[12.5px]">
+        <Select aria-label={t('job.snapshot_select_file')} value={sel} onChange={(e) => setSel(e.target.value)} className="h-11 font-mono text-[12.5px]">
           {meta.files.map((f) => (
             <option key={f.path} value={f.path}>
               {f.path}
@@ -217,14 +217,14 @@ function FileView({ jobId, path }: { jobId: number; path: string }) {
   }, [q.data])
   return (
     <div className="term min-w-0">
-      <div className="sticky top-0 border-b border-white/10 px-3 py-2 font-mono text-xs text-[#8f8f8f] max-md:hidden">{path || '选择一个文件'}</div>
+      <div className="sticky top-0 border-b border-white/10 px-3 py-2 font-mono text-xs text-[#8f8f8f] max-md:hidden">{path || t('job.snapshot_pick_file')}</div>
       <div className="max-h-[68vh] overflow-auto p-3">
         {q.isLoading ? (
           <Spinner />
         ) : q.error ? (
           <ErrorBox error={q.error} term />
         ) : q.data?.binary ? (
-          <span className="text-[#8f8f8f]">二进制文件，不显示内容（{bytes(q.data.size)}）</span>
+          <span className="text-[#8f8f8f]">{t('job.snapshot_binary', { size: bytes(q.data.size) })}</span>
         ) : (
           <pre className="flex">
             {/* 行号要和 traceback 对得上，是信息不是装饰：#7a7a7a 在终端底上 4.6:1 */}

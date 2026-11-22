@@ -18,17 +18,25 @@ type completion struct {
 	Reason   string `json:"reason,omitempty"`
 	Status   string `json:"status,omitempty"`
 	Duration int64  `json:"duration,omitempty"`
+	// 结构化字段：发送时按当前语言合成文案。旧持久化批次没有它们，回退 Reason 原文。
+	FailKind   string `json:"fail_kind,omitempty"`
+	FailDetail string `json:"fail_detail,omitempty"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
 }
 
-func (c completion) line() string {
+// line 在发送时合成：有结构化字段就按当前语言生成，旧批次回退持久化的中文 Reason。
+func (s *Service) line(c completion) string {
 	switch c.Status {
 	case store.StatusSucceeded:
-		return fmt.Sprintf("#%d %s：成功，用时 %s", c.ID, c.Name, humanDuration(c.Duration))
+		return s.msg("line.succeeded", map[string]any{"id": c.ID, "name": c.Name, "duration": s.humanDuration(c.Duration)})
 	case store.StatusCancelled:
-		return fmt.Sprintf("#%d %s：已取消，用时 %s", c.ID, c.Name, humanDuration(c.Duration))
+		return s.msg("line.cancelled", map[string]any{"id": c.ID, "name": c.Name, "duration": s.humanDuration(c.Duration)})
 	default:
-		// 旧版持久化的批次只有失败项，没有 status。
-		return fmt.Sprintf("#%d %s：%s", c.ID, c.Name, c.Reason)
+		reason := c.Reason
+		if c.FailKind != "" {
+			reason = s.failureReason(c.FailKind, c.FailDetail, c.ExitCode)
+		}
+		return s.msg("line.failed", map[string]any{"id": c.ID, "name": c.Name, "reason": reason})
 	}
 }
 
@@ -98,6 +106,7 @@ func consumeFinished(next *state, e store.Event, paused bool) *completion {
 		Status     string `json:"status"`
 		Name       string `json:"name"`
 		FailKind   string `json:"fail_kind"`
+		FailDetail string `json:"fail_detail"`
 		ExitCode   *int   `json:"exit_code"`
 		Reason     string `json:"reason"`
 		Duration   int64  `json:"duration"`
@@ -109,9 +118,23 @@ func consumeFinished(next *state, e store.Event, paused bool) *completion {
 	item := completion{ID: *e.JobID, Name: oneLine(data.Name, 200), Status: data.Status, Duration: max(0, data.Duration)}
 	switch data.Status {
 	case store.StatusFailed:
-		item.Reason = failureReason(data.FailKind, data.ExitCode)
+		item.Reason = failureReasonZH(data.FailKind, data.ExitCode)
 		if data.FailKind == "host_oom" && data.Reason == logs.ReasonMaybeHostOOM {
 			item.Reason = "可能是主机内存不足"
+		}
+		item.FailKind, item.ExitCode = data.FailKind, data.ExitCode
+		// start 的 fail_detail 是自由文本的启动错误，推送不展示，也不必存进持久化批次
+		if data.FailKind != "start" {
+			item.FailDetail = data.FailDetail
+		}
+		if item.FailDetail == "" && data.FailKind == "host_oom" {
+			// 细分码上线前的事件：按中文原文推断三态
+			switch data.Reason {
+			case logs.ReasonMaybeHostOOM:
+				item.FailDetail = logs.DetailOOMGuess137
+			case logs.ReasonWorkerHostOOM:
+				item.FailDetail = logs.DetailOOMWorker
+			}
 		}
 	case store.StatusSucceeded, store.StatusCancelled:
 	default:
@@ -186,32 +209,28 @@ func (s *state) takeFailure(id int64) *completion {
 
 func (s *Service) flushBatch(next *state) {
 	b := mergeBatches(next.Batch, next.QueueBatch)
-	kind := "任务结束"
+	titleKey, verbKey := "title.finished", "verb.finished"
 	click := s.baseURL + "/jobs"
 	switch {
 	case b.Succeeded == b.Count:
-		kind = "任务完成"
+		titleKey = "title.succeeded"
 	case b.Cancelled == b.Count:
-		kind = "任务已取消"
+		titleKey = "title.cancelled"
 	case b.Succeeded+b.Cancelled == 0:
-		kind, click = "任务失败", click+"?status=failed"
+		titleKey, verbKey, click = "title.failed", "verb.failed", click+"?status=failed"
 	}
 	lines := make([]string, 0, len(b.Items)+1)
 	for _, item := range b.Items {
-		lines = append(lines, item.line())
+		lines = append(lines, s.line(item))
 	}
 	if b.Count > len(b.Items) {
-		verb := "结束"
-		if kind == "任务失败" {
-			verb = "失败"
-		}
-		lines = append(lines, fmt.Sprintf("另有 %d 个任务%s，请打开面板查看。", b.Count-len(b.Items), verb))
+		lines = append(lines, s.msg("batch.more", map[string]any{"n": b.Count - len(b.Items), "verb": s.msg(verbKey, nil)}))
 	}
 	if b.Count == 1 && len(b.Items) > 0 {
 		click = fmt.Sprintf("%s/jobs/%d", s.baseURL, b.Items[0].ID)
 	}
 	next.Outbox = append(next.Outbox, Message{ID: fmt.Sprintf("danlu-%s-%d", next.Instance, b.FirstID),
-		Title: s.hostname + " · " + kind, Body: strings.Join(lines, "\n"), Click: click, Priority: 3})
+		Title: s.hostname + " · " + s.msg(titleKey, nil), Body: strings.Join(lines, "\n"), Click: click, Priority: 3})
 	next.Batch, next.QueueBatch = nil, nil
 }
 
@@ -221,17 +240,31 @@ func (s *Service) drain(next *state, e store.Event) {
 		next.Batch = mergeBatches(next.Batch, next.QueueBatch)
 	} else {
 		failed := q.Count - q.Succeeded - q.Cancelled
-		lines := []string{fmt.Sprintf("%d 个任务，%d 成功，%d 失败，%d 取消。合计任务用时 %s。",
-			q.Count, q.Succeeded, failed, q.Cancelled, humanDuration(q.Duration))}
+		lines := []string{s.msg("drain.summary", map[string]any{
+			"total": q.Count, "ok": q.Succeeded, "failed": failed, "cancelled": q.Cancelled, "duration": s.humanDuration(q.Duration),
+		})}
 		for _, item := range q.Failures {
-			lines = append(lines, item.line())
+			lines = append(lines, s.line(item))
 		}
 		if failed > len(q.Failures) {
-			lines = append(lines, fmt.Sprintf("另有 %d 个任务失败，请打开面板查看。", failed-len(q.Failures)))
+			lines = append(lines, s.msg("drain.more", map[string]any{"n": failed - len(q.Failures)}))
 		}
 		next.Outbox = append(next.Outbox, Message{ID: fmt.Sprintf("danlu-%s-%d", next.Instance, e.ID),
-			Title: s.hostname + " · 队列已跑完", Body: strings.Join(lines, "\n"), Priority: 3,
+			Title: s.hostname + " · " + s.msg("title.drained", nil), Body: strings.Join(lines, "\n"), Priority: 3,
 			Click: fmt.Sprintf("%s/jobs?finished_from_event=%d&finished_to_event=%d", s.baseURL, q.FirstID, e.ID)})
 	}
 	next.QueueBatch, next.Summary = nil, nil
+}
+
+// failureReasonZH 是持久化批次里 Reason 字段的中文原文（历史格式，供旧批次回退）；
+// 发送时的本地化合成走 Service.failureReason。
+func failureReasonZH(kind string, exit *int) string {
+	if reason := map[string]string{"cuda_oom": "CUDA 显存不足", "host_oom": "主机内存不足", "nccl": "NCCL 通信超时或出错",
+		"exception": "Python 异常", "reboot": "服务器重启，任务中断", "killed": "进程被外部终止", "start": "任务启动失败", "signal": "进程被信号终止"}[kind]; reason != "" {
+		return reason
+	}
+	if exit != nil {
+		return fmt.Sprintf("退出码 %d", *exit)
+	}
+	return "任务异常结束"
 }

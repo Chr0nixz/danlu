@@ -1,4 +1,5 @@
-import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, projectOf, type Job } from '@danlu/core'
+import { apiErrorText, compactProgress, duration, failText, fmtTime, isActive, jobDuration, projectOf, type Job } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Copy, ExternalLink, RotateCcw, Square, X } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
@@ -50,17 +51,17 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
         rerun_of: job.id,
       }),
     onSuccess: (n) => {
-      toast(`已重跑为 ${jobKey(server, n.id)}`)
+      toast(t('job.rerun_toast', { key: jobKey(server, n.id) }))
       refreshFleet()
       openJob(server, n.id)
     },
-    onError: (e) => toast(`重跑失败：${e instanceof Error ? e.message : e}`, 'fail'),
+    onError: (e) => toast(t('job.rerun_failed', { error: apiErrorText(e) }), 'fail'),
   })
 
   const download = async (path: string, filename: string) => {
     try {
       const saved = await saveFile(server, path, filename)
-      toast(`已保存到 ${saved}`)
+      toast(t('job.saved_to', { path: saved }))
       revealFile(saved)
     } catch (e) {
       toast(String(e), 'fail')
@@ -71,11 +72,11 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
     return (
       <div className="flex h-full flex-col p-4">
         <div className="flex justify-end">
-          <Button variant="ghost" className="px-1.5" aria-label="关闭详情" onClick={closePane}>
+          <Button variant="ghost" className="px-1.5" aria-label={t('job.close_aria')} onClick={closePane}>
             <X />
           </Button>
         </div>
-        {q.error ? <ErrorText error={q.error} /> : <p className="text-fg-3">读取中…</p>}
+        {q.error ? <ErrorText error={q.error} /> : <p className="text-fg-3">{t('job.loading')}</p>}
       </div>
     )
   }
@@ -99,7 +100,7 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
             {d !== null && <span className="num ml-auto text-[11.5px] text-fg-3">{duration(d)}</span>}
           </div>
         </div>
-        <Button variant="ghost" className="-mt-0.5 -mr-1 px-1.5" title="关闭（Esc）" aria-label="关闭详情" onClick={closePane}>
+        <Button variant="ghost" className="-mt-0.5 -mr-1 px-1.5" title={t('job.close_title')} aria-label={t('job.close_aria')} onClick={closePane}>
           <X />
         </Button>
       </div>
@@ -108,18 +109,18 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
         {isActive(j) && (
           <Button variant="danger" disabled={j.cancel_requested} onClick={() => setCancelling(true)}>
             <Square />
-            {j.cancel_requested ? '正在结束…' : '取消'}
+            {j.cancel_requested ? t('job.cancelling') : t('common.cancel')}
           </Button>
         )}
         {!isActive(j) && (
-          <Button loading={rerun.isPending} onClick={() => rerun.mutate(j)} title="原样再跑一次">
+          <Button loading={rerun.isPending} onClick={() => rerun.mutate(j)} title={t('job.rerun_hint')}>
             <RotateCcw />
-            重跑
+            {t('job.rerun')}
           </Button>
         )}
-        <Button onClick={() => openSubmit(draftFrom(j, server))} title="复制到提交表单，改完再提交">
+        <Button onClick={() => openSubmit(draftFrom(j, server))} title={t('job.copy_hint')}>
           <Copy />
-          复制
+          {t('common.copy')}
           <Kbd className="ml-0.5">C</Kbd>
         </Button>
         {j.tracker_url && (
@@ -132,48 +133,48 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
 
       <dl className="grid grid-cols-[52px_1fr] gap-x-3 gap-y-1 rounded-[10px] border border-line bg-card px-3 py-2.5">
         {j.status === 'failed' && (
-          <Row k="原因">
+          <Row k={t('job.row_reason')}>
             <span className="selectable text-fail">{failText(j)}</span>
           </Row>
         )}
         {line && (
-          <Row k="进度">
+          <Row k={t('job.row_progress')}>
             <span className="num selectable text-[11.5px] text-fg-2">{line}</span>
           </Row>
         )}
-        <Row k="命令">
+        <Row k={t('job.row_cmd')}>
           <span className="num selectable text-[11.5px]">{j.cmd}</span>
         </Row>
-        <Row k="目录">
+        <Row k={t('job.row_dir')}>
           <span className="num selectable text-[11.5px]">
             {j.workdir}
             {j.conda_env && <span className="text-fg-3"> · conda {j.conda_env}</span>}
           </span>
         </Row>
-        <Row k="代码">
+        <Row k={t('job.row_code')}>
           {j.git_commit ? (
             <span className="num selectable text-[11.5px]">
               {j.git_commit.slice(0, 8)}
               {j.git_branch && <span className="text-fg-3"> · {j.git_branch}</span>}
-              {j.git_dirty && <span className="text-warn"> · 有未提交的改动</span>}
+              {j.git_dirty && <span className="text-warn">{t('job.dirty_mark')}</span>}
             </span>
           ) : (
-            <span className="text-fg-3">{j.snapshot_note || (j.started_at ? '不是 git 仓库' : '启动时记录')}</span>
+            <span className="text-fg-3">{j.snapshot_note || (j.started_at ? t('job.not_git') : t('job.snapshot_at_start'))}</span>
           )}
         </Row>
-        <Row k="卡">
+        <Row k={t('job.row_cards')}>
           <span className="num text-[11.5px]">
-            {j.gpus_assigned.length ? gpuRange(j.gpus_assigned) : j.gpus_pinned.length ? `指定 ${gpuRange(j.gpus_pinned)}` : `${j.gpus_req} 张`}
+            {j.gpus_assigned.length ? gpuRange(j.gpus_assigned) : j.gpus_pinned.length ? t('job.pinned', { range: gpuRange(j.gpus_pinned) }) : t('job.cards_count', { n: j.gpus_req })}
             {Object.keys(j.env).length > 0 && <span className="text-fg-3"> · {Object.entries(j.env).map(([k, v]) => `${k}=${v}`).join(' ')}</span>}
           </span>
         </Row>
-        {j.inherit_bashrc && <Row k="Bash">启动时加载服务器 ~/.bashrc</Row>}
-        <Row k="时间">
+        {j.inherit_bashrc && <Row k="Bash">{t('job.bashrc_value')}</Row>}
+        <Row k={t('job.row_time')}>
           <span className="num text-[11.5px] text-fg-2">
             {fmtTime(j.created_at).slice(5)}
-            {j.started_at && ` 开始 ${fmtTime(j.started_at).slice(11)}`}
-            {j.ended_at && ` 结束 ${fmtTime(j.ended_at).slice(11)}`}
-            {j.rerun_of && <span className="text-fg-3"> · 重跑自 {jobKey(server, j.rerun_of)}</span>}
+            {j.started_at && t('job.started_at', { time: fmtTime(j.started_at).slice(11) })}
+            {j.ended_at && t('job.ended_at', { time: fmtTime(j.ended_at).slice(11) })}
+            {j.rerun_of && <span className="text-fg-3">{t('job.rerun_of', { key: jobKey(server, j.rerun_of) })}</span>}
           </span>
         </Row>
       </dl>
@@ -185,8 +186,8 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
             onChange={setTab}
             className="self-start"
             options={[
-              { value: 'log', label: '日志' },
-              { value: 'code', label: '代码快照' },
+              { value: 'log', label: t('job.tab_log') },
+              { value: 'code', label: t('job.tab_code') },
             ]}
           />
           {tab === 'log' ? (
@@ -197,7 +198,7 @@ export function JobDetail({ server, id, initial }: { server: string; id: number;
         </>
       ) : (
         <div className="flex flex-1 items-center justify-center rounded-[8px] bg-term text-[#8b8e97]">
-          {j.status === 'queued' ? `排在第 ${j.queue_pos ?? '-'} 位，开始运行后显示日志` : '没有运行过'}
+          {j.status === 'queued' ? t('job.queued_pos', { pos: j.queue_pos ?? '-' }) : t('job.never_ran')}
         </div>
       )}
 
@@ -212,7 +213,7 @@ function CancelDialog({ server, job: j, onClose }: { server: string; job: Job; o
   const cancel = useMutation({
     mutationFn: () => apiFor(server).cancel(j.id),
     onSuccess: () => {
-      toast(`已取消 ${jobKey(server, j.id)}`)
+      toast(t('job.cancelled_toast', { key: jobKey(server, j.id) }))
       refreshFleet()
       onClose()
     },
@@ -221,13 +222,13 @@ function CancelDialog({ server, job: j, onClose }: { server: string; job: Job; o
   const d = jobDuration(j)
   return (
     <Dialog
-      title={`取消 ${jobKey(server, j.id)}？`}
+      title={t('job.cancel_title', { key: jobKey(server, j.id) })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={closeDialog}>{running ? '继续运行' : '保留排队'}</Button>
+          <Button onClick={closeDialog}>{running ? t('job.keep_running') : t('job.keep_queued')}</Button>
           <Button variant="danger" loading={cancel.isPending} onClick={() => cancel.mutate()}>
-            取消任务
+            {t('job.cancel_confirm')}
           </Button>
         </>
       }
@@ -235,8 +236,8 @@ function CancelDialog({ server, job: j, onClose }: { server: string; job: Job; o
       <p className="font-medium break-all text-fg">{j.name}</p>
       <p>
         {running
-          ? `已经运行 ${d !== null ? duration(d) : '-'}。确定后进程会被结束，不能恢复；日志和代码快照会保留。`
-          : `${j.queue_pos ? `排在第 ${j.queue_pos} 位，` : ''}取消后从队列里移除。`}
+          ? t('job.cancel_running_body', { duration: d !== null ? duration(d) : '-' })
+          : `${j.queue_pos ? t('job.cancel_queued_prefix', { pos: j.queue_pos }) : ''}${t('job.cancel_queued_body')}`}
       </p>
       <ErrorText error={cancel.error} />
     </Dialog>

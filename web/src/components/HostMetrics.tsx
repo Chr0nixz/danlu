@@ -2,8 +2,9 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Cpu, HardDrive, MemoryStick } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
-import { now, type HostMetricsResponse, type HostSample } from '@danlu/core'
+import { apiErrorText, now, type HostMetricsResponse, type HostSample } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { Card, cx, Meter, Skeleton } from './ui'
 
 export function useHostMetrics() {
@@ -21,19 +22,19 @@ export function HostMetrics() {
     <Card className="overflow-hidden">
       {/* 手机上标题栏 44px 高，这样右侧的「资源详情」整条都是可点区域；桌面仍是 36px */}
       <div className="flex h-9 items-center gap-2 border-b border-line bg-subtle px-3 text-ui max-sm:h-11 sm:px-4">
-        <h2 className="font-medium">主机资源</h2>
+        <h2 className="font-medium">{t('resources.host_title')}</h2>
         <span className={cx('ml-auto min-w-0 truncate text-xs', stale ? 'text-warn' : 'text-fg-3')}>
-          {stale ? `数据 ${Math.round(age)} 秒没有更新` : samples.length >= 31 ? '近 1 分钟 · 每 2 秒采样' : samples.length ? `采样中 ${samples.length}/31` : '每 2 秒采样'}
+          {stale ? t('resources.data_stale', { n: Math.round(age) }) : samples.length >= 31 ? t('resources.host_recent') : samples.length ? t('resources.host_sampling', { n: samples.length }) : t('resources.host_every_2s')}
         </span>
-        <Link to="/resources" className="-mr-2 flex h-full min-w-9 shrink-0 items-center justify-center gap-1 px-2 text-xs text-fg-3 hover:text-fg max-sm:min-w-11" title="服务器资源详情">
-          <span className="max-sm:sr-only">资源详情</span>
+        <Link to="/resources" className="-mr-2 flex h-full min-w-9 shrink-0 items-center justify-center gap-1 px-2 text-xs text-fg-3 hover:text-fg max-sm:min-w-11" title={t('resources.host_details_title')}>
+          <span className="max-sm:sr-only">{t('resources.host_details')}</span>
           <ArrowRight className="size-3.5" aria-hidden />
         </Link>
       </div>
       {error ? (
-        <div role="alert" className="px-3 py-3 text-ui text-fail sm:px-4">读取 CPU 和内存失败：{(error as Error).message}</div>
+        <div role="alert" className="px-3 py-3 text-ui text-fail sm:px-4">{t('resources.host_query_failed', { error: apiErrorText(error) })}</div>
       ) : data?.error ? (
-        <div role="alert" className="px-3 py-3 text-ui text-warn sm:px-4">CPU 和内存数据暂不可用：{data.error}</div>
+        <div role="alert" className="px-3 py-3 text-ui text-warn sm:px-4">{t('resources.host_unavailable', { error: data.error })}</div>
       ) : isLoading ? (
         <div className="grid grid-cols-2 divide-x divide-line p-3 sm:p-4">
           <Skeleton className="mr-3 h-[112px] sm:mr-4" />
@@ -48,17 +49,17 @@ export function HostMetrics() {
             percent={sample?.cpu_percent}
             samples={samples}
             getValue={(item) => item.cpu_percent}
-            emptyLabel="等待 CPU 数据"
+            emptyLabel={t('resources.wait_cpu')}
           />
           <Metric
-            title="内存"
+            title={t('resources.memory')}
             icon={<MemoryStick className="size-4" aria-hidden />}
             value={sample ? `${sample.memory_percent}%` : '—'}
             detail={sample ? `${gib(sample.memory_used_bytes)} / ${gib(sample.memory_total_bytes)} GiB` : undefined}
             percent={sample?.memory_percent}
             samples={samples}
             getValue={(item) => item.memory_percent}
-            emptyLabel="等待内存数据"
+            emptyLabel={t('resources.wait_mem')}
           />
         </div>
       )}
@@ -72,26 +73,26 @@ function DiskMetrics({ data }: { data: HostMetricsResponse }) {
     <section className="border-t border-line text-xs">
       <div className="flex h-8 items-center gap-1.5 bg-subtle px-3 sm:px-4">
         <HardDrive className="size-3.5 text-fg-3" aria-hidden />
-        <h3 className="font-medium">磁盘余量</h3>
-        <span className="ml-auto text-fg-3">同一分区合并 · 每分钟采样</span>
+        <h3 className="font-medium">{t('resources.disk_space_title')}</h3>
+        <span className="ml-auto text-fg-3">{t('resources.disk_merge_note')}</span>
       </div>
-      {data.disks_error && <p role="alert" className="px-3 py-2 text-warn sm:px-4">磁盘数据暂不可用：{data.disks_error}</p>}
+      {data.disks_error && <p role="alert" className="px-3 py-2 text-warn sm:px-4">{t('resources.disk_unavailable', { error: data.disks_error })}</p>}
       <div className="divide-y divide-line">
         {data.disks?.map((disk, index) => (
           <div key={disk.id || `${disk.path}:${index}`} className="flex flex-wrap items-start gap-x-3 gap-y-1 px-3 py-2 sm:px-4">
             <div className="min-w-0 flex-1 space-y-0.5 max-sm:basis-full">
               {disk.paths.map((path) => <div key={path} className="font-mono [overflow-wrap:anywhere]">{path}</div>)}
-              {disk.data && <span className="text-fg-3">数据目录所在分区</span>}
+              {disk.data && <span className="text-fg-3">{t('resources.data_dir_partition')}</span>}
             </div>
             <div className={cx('ml-auto shrink-0 text-right font-mono tabular-nums max-sm:flex max-sm:w-full max-sm:items-baseline max-sm:justify-between max-sm:gap-2 max-sm:text-left', disk.warn || disk.error ? 'text-warn' : 'text-fg-2')}>
-              {disk.error ? <span className="font-sans">采集失败</span> : <span><span>{gib(disk.available_bytes)} GiB 可用</span><span className="ml-2 text-fg-3">/ {gib(disk.total_bytes)} GiB</span></span>}
-              {disk.warn && !disk.error && <div className="font-sans">余量偏低</div>}
+              {disk.error ? <span className="font-sans">{t('resources.disk_scan_failed')}</span> : <span><span>{t('resources.disk_available', { value: gib(disk.available_bytes) })}</span><span className="ml-2 text-fg-3">/ {gib(disk.total_bytes)} GiB</span></span>}
+              {disk.warn && !disk.error && <div className="font-sans">{t('resources.low_space')}</div>}
             </div>
             {disk.error && <p role="alert" className="w-full break-words text-warn">{disk.error}</p>}
           </div>
         ))}
       </div>
-      {!data.disks?.length && !data.disks_error && <p className="px-3 py-2 text-fg-3 sm:px-4">正在采集磁盘数据…</p>}
+      {!data.disks?.length && !data.disks_error && <p className="px-3 py-2 text-fg-3 sm:px-4">{t('resources.disk_scanning')}</p>}
     </section>
   )
 }
@@ -122,10 +123,10 @@ function Metric({ title, icon, value, percent, detail, samples, getValue, emptyL
         <div className="flex h-[56px] flex-col justify-between text-[11px] leading-none text-fg-3" aria-hidden>
           <span>100%</span><span>50%</span><span>0</span>
         </div>
-        {hasValues ? <HistoryChart values={values} label={`${title} 最近 1 分钟使用率`} /> : <div className="flex h-[56px] items-center text-xs text-fg-3">{emptyLabel}</div>}
+        {hasValues ? <HistoryChart values={values} label={t('resources.host_chart_aria', { name: title })} /> : <div className="flex h-[56px] items-center text-xs text-fg-3">{emptyLabel}</div>}
       </div>
       <div className="ml-[2.5rem] mt-1 flex justify-between text-[11px] leading-none text-fg-3">
-        <span>{samples.length >= 31 ? '60 秒前' : '开始采样'}</span><span>现在</span>
+        <span>{samples.length >= 31 ? t('resources.host_axis_60s') : t('resources.host_axis_start')}</span><span>{t('resources.now')}</span>
       </div>
     </section>
   )

@@ -2,8 +2,9 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Copy, Star, X } from 'lucide-react'
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { compactProgress, duration, failText, fmtTime, isActive, jobDuration, jobStatusText, now, progressRemaining, stripProgressTiming, timeAgo, type Job } from '@danlu/core'
+import { compactProgress, duration, exitCodeOnly, failText, fmtTime, isActive, jobDuration, jobStatusText, now, progressRemaining, stripProgressTiming, timeAgo, type Job } from '@danlu/core'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { StarButton } from './StarButton'
 import { announce, Button, buttonClass, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
 
@@ -21,13 +22,13 @@ export function CancelDialog({ job: j, onClose }: { job: Job; onClose: () => voi
   const d = jobDuration(j)
   return (
     <Dialog
-      title={`取消任务 #${j.id}？`}
+      title={t('jobs.cancel_dialog_title', { id: j.id })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>{running ? '继续运行' : '保留排队'}</Button>
+          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>{running ? t('jobs.keep_running') : t('jobs.keep_queued')}</Button>
           <Button variant="danger" loading={cancel.isPending} onClick={() => cancel.mutate()}>
-            取消任务
+            {t('jobs.cancel_job')}
           </Button>
         </>
       }
@@ -35,8 +36,8 @@ export function CancelDialog({ job: j, onClose }: { job: Job; onClose: () => voi
       <p className="font-medium break-all text-fg">{j.name}</p>
       <p>
         {running
-          ? `已经运行 ${d !== null ? duration(d) : '-'}。确定后进程会被结束，不能恢复；日志和代码快照会保留。`
-          : `${j.queue_pos ? `排在第 ${j.queue_pos} 位，` : ''}取消后从队列里移除。`}
+          ? t('jobs.cancel_running_body', { duration: d !== null ? duration(d) : '-' })
+          : `${j.queue_pos ? t('jobs.cancel_queue_pos', { pos: j.queue_pos }) : ''}${t('jobs.cancel_queued_body')}`}
       </p>
       <ErrorBox error={cancel.error} />
     </Dialog>
@@ -54,10 +55,11 @@ function useFlash(j: Job) {
     const prev = seen.get(id)
     seen.set(id, status)
     if (prev === undefined || prev === status) return
-    announce(`任务 #${id} ${j.name}：${jobStatusText(j)}`)
+    announce(t('jobs.status_announce', { id, name: j.name, status: jobStatusText(j) }))
     setFlash(true)
-    const t = setTimeout(() => setFlash(false), 1200)
-    return () => clearTimeout(t)
+    // 局部变量不叫 t：避免遮蔽 i18n 的 t（上面 announce 用到）
+    const timer = setTimeout(() => setFlash(false), 1200)
+    return () => clearTimeout(timer)
     // 只在状态变化时触发，名字改了不算
   }, [id, status])
   return flash
@@ -66,11 +68,11 @@ function useFlash(j: Job) {
 /** 一行任务的说明文字：运行中显示最后一行日志，排队显示位置，失败显示原因 */
 function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: string; pct?: number | null; remaining?: string | null } {
   if (j.status === 'queued') {
-    const pos = j.queue_pos ? `第 ${j.queue_pos} 位` : '排队中'
-    const need = j.gpus_pinned.length ? `等 GPU ${j.gpus_pinned.join(',')}` : j.gpus_req ? `等 ${j.gpus_req} 张卡` : '不用 GPU'
+    const pos = j.queue_pos ? t('jobs.queue_pos', { pos: j.queue_pos }) : t('status.queued')
+    const need = j.gpus_pinned.length ? t('jobs.wait_pinned', { list: j.gpus_pinned.join(',') }) : j.gpus_req ? t('jobs.wait_gpus', { n: j.gpus_req }) : t('gpu.none')
     return { text: `${pos} · ${j.wait_reason || need}` }
   }
-  if (j.status === 'running' && j.cancel_requested) return { text: '正在结束进程…', tone: 'text-warn' }
+  if (j.status === 'running' && j.cancel_requested) return { text: t('jobs.cancelling_detail'), tone: 'text-warn' }
   const memo = j.memo?.split(/\r?\n/, 1)[0]?.trim()
   if (!isActive(j) && memo) {
     const why = j.status === 'failed' ? failText({ ...j, error_line: undefined, last_line: undefined }) : ''
@@ -78,12 +80,12 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
   }
   if (j.status === 'failed') {
     // 手机上已经有报错行时不再写"退出码 N ·"：失败图标已经说明了状态，宽度留给报错行
-    const exitOnly = !j.fail_reason || /^退出码 -?\d+$/.test(j.fail_reason)
+    const exitOnly = exitCodeOnly(j)
     // 没有报错行时用的是最后一行输出；它是 tqdm 进度条的话，已用时间和速率对失败的任务没有用，去掉
     const text = j.error_line ? failText(j) : stripProgressTiming(failText(j))
     return { text, short: j.error_line && exitOnly ? j.error_line : undefined, tone: 'text-fail' }
   }
-  if (j.pruned_at) return { text: '日志和代码快照已清理' }
+  if (j.pruned_at) return { text: t('jobs.pruned_detail') }
   if (j.last_line) {
     const p = compactProgress(j.last_line)
     const remaining = j.status === 'running' ? progressRemaining(j.last_line) : null
@@ -96,8 +98,8 @@ function detail(j: Job): { text: string; short?: string; mono?: boolean; tone?: 
       remaining,
     }
   }
-  if (!j.started_at) return { text: '未开始运行' }
-  return { text: j.status === 'running' ? '等待输出…' : '没有输出' }
+  if (!j.started_at) return { text: t('jobs.not_started') }
+  return { text: j.status === 'running' ? t('jobs.waiting_output') : t('jobs.no_output') }
 }
 
 /** 对比选择模式下这一行的勾选状态 */
@@ -126,8 +128,8 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
   const copy = showCopy && !select
   const info = detail(j)
   const ended = !isActive(j)
-  const time = j.status === 'queued' ? `等 ${duration(now() - j.created_at)}` : d !== null ? duration(d) : ''
-  const timeLabel = j.status === 'queued' ? '已等待' : j.status === 'running' ? '已运行' : '耗时'
+  const time = j.status === 'queued' ? t('jobs.waited', { duration: duration(now() - j.created_at) }) : d !== null ? duration(d) : ''
+  const timeLabel = j.status === 'queued' ? t('jobs.time_waited') : j.status === 'running' ? t('jobs.time_running') : t('jobs.duration')
   const canCancel = isActive(j) && !j.cancel_requested
   const code = select ? undefined : `/jobs/${j.id}?tab=code`
   const name = (
@@ -148,7 +150,7 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
           <input
             type="checkbox"
             className="size-4 focus-visible:outline-none disabled:opacity-40"
-            aria-label={`选择任务 #${j.id} ${j.name}`}
+            aria-label={t('jobs.select_job_label', { id: j.id, name: j.name })}
             checked={select.checked}
             disabled={select.disabled}
             onChange={select.onToggle}
@@ -174,7 +176,7 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
               {name}
             </Link>
           )}
-          {j.starred && <Star role="img" aria-label="已标星" className="size-3 shrink-0 self-center fill-current text-fg-3 md:hidden" />}
+          {j.starred && <Star role="img" aria-label={t('jobs.starred_label')} className="size-3 shrink-0 self-center fill-current text-fg-3 md:hidden" />}
           <Commit sha={j.git_commit} dirty={j.git_dirty} to={code} className="relative z-10 ml-auto shrink-0 pl-2 md:hidden" />
         </div>
         {/*
@@ -191,7 +193,7 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
             </span>
           )}
           {j.status === 'running' && j.silent_since && (
-            <span className="shrink-0 whitespace-nowrap text-warn max-md:mr-2">无输出 {duration(now() - j.silent_since)}</span>
+            <span className="shrink-0 whitespace-nowrap text-warn max-md:mr-2">{t('jobs.silent_for', { duration: duration(now() - j.silent_since) })}</span>
           )}
           {info.pct != null && (
             <span className="w-10 shrink-0 max-md:hidden" title={`${info.pct}%`}>
@@ -201,9 +203,9 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
           {info.remaining && (
             <span
               className="shrink-0 whitespace-nowrap text-fg-2 max-md:mr-2"
-              title="tqdm 对当前进度条的剩余时间估计；如果按 epoch 统计，这里是当前 epoch 的剩余时间"
+              title={t('jobs.remaining_title')}
             >
-              剩 {info.remaining}
+              {t('jobs.remaining', { remaining: info.remaining })}
             </span>
           )}
           <span title={info.text} className={cx('md:min-w-0 md:truncate', info.mono && 'font-mono', info.tone ?? 'text-fg-3')}>
@@ -226,7 +228,7 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
           <span className="w-[4.5rem] text-right" title={ended ? fmtTime(j.ended_at) : undefined}>
             {ended && (
               <>
-                <span className="sr-only">结束于 </span>
+                <span className="sr-only">{t('jobs.ended_at')} </span>
                 {timeAgo(j.ended_at)}
               </>
             )}
@@ -246,8 +248,8 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
             <Link
               to={`/new?copy=${j.id}`}
               className={cx(buttonClass('ghost', 'icon-sm'), 'text-fg-3 max-md:size-11', canCancel && 'max-md:hidden')}
-              title="复制任务"
-              aria-label={`复制任务 #${j.id}`}
+              title={t('jobs.copy_job')}
+              aria-label={t('jobs.copy_job_label', { id: j.id })}
             >
               <Copy aria-hidden />
             </Link>
@@ -260,8 +262,8 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
             size="icon-sm"
             variant="ghost"
             className="text-fg-3 hover:text-fail max-md:size-11 md:pointer-fine:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
-            title="取消任务"
-            aria-label={`取消任务 #${j.id}`}
+            title={t('jobs.cancel_job')}
+            aria-label={t('jobs.cancel_job_label', { id: j.id })}
             onClick={() => setConfirming(true)}
           >
             <X />
@@ -282,11 +284,11 @@ export function JobListHeader({ selecting = false, showCopy = false }: { selecti
       {selecting && <span className="w-5 shrink-0" />}
       <span className="w-4 shrink-0" />
       <div className="flex min-w-0 flex-1 items-center gap-4">
-        <span className={cx('shrink-0', showCopy ? 'w-[208px] xl:w-[248px]' : 'w-[240px] xl:w-[280px]')}>任务</span>
-        <span className="min-w-0 flex-1">卡 · 最新输出</span>
-        <span className="w-[5.5rem] shrink-0 text-right">耗时</span>
-        <span className="w-[4.5rem] shrink-0 text-right">结束于</span>
-        <span className="w-[4.5rem] shrink-0">代码</span>
+        <span className={cx('shrink-0', showCopy ? 'w-[208px] xl:w-[248px]' : 'w-[240px] xl:w-[280px]')}>{t('jobs.col_job')}</span>
+        <span className="min-w-0 flex-1">{t('jobs.col_output')}</span>
+        <span className="w-[5.5rem] shrink-0 text-right">{t('jobs.duration')}</span>
+        <span className="w-[4.5rem] shrink-0 text-right">{t('jobs.ended_at')}</span>
+        <span className="w-[4.5rem] shrink-0">{t('jobs.col_code')}</span>
       </div>
       {/* 标星、复制、取消各 32px；没有复制时和行里的占位一起收窄 */}
       <span className={cx('h-8 shrink-0', showCopy ? 'w-24' : 'w-16')} />

@@ -47,7 +47,7 @@ func (s *Server) panelSettings(resp map[string]any) error {
 func (s *Server) updateRuntime(g settings.Group) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.Settings == nil {
-			writeErr(w, 404, "接口不存在")
+			writeErrC(w, 404, "not_found", "接口不存在", nil)
 			return
 		}
 		var body settings.Patch
@@ -56,7 +56,7 @@ func (s *Server) updateRuntime(g settings.Group) http.HandlerFunc {
 		}
 		_, changes, err := s.Settings.Update(g, body)
 		if settings.IsInputError(err) {
-			writeErr(w, 400, err.Error())
+			writeErrE(w, 400, err)
 			return
 		}
 		if err != nil {
@@ -87,7 +87,7 @@ const previewTimeout = 20 * time.Second
 // previewRetention 按请求里的保留策略（和保存时同样的格式与校验）算一遍会清理什么，不删任何东西。
 func (s *Server) previewRetention(w http.ResponseWriter, r *http.Request) {
 	if s.Settings == nil || s.Pruner == nil {
-		writeErr(w, 404, "接口不存在")
+		writeErrC(w, 404, "not_found", "接口不存在", nil)
 		return
 	}
 	var body settings.Patch
@@ -96,7 +96,7 @@ func (s *Server) previewRetention(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := s.Settings.Preview(settings.GroupRetention, body)
 	if settings.IsInputError(err) {
-		writeErr(w, 400, err.Error())
+		writeErrE(w, 400, err)
 		return
 	}
 	if err != nil {
@@ -108,10 +108,10 @@ func (s *Server) previewRetention(w http.ResponseWriter, r *http.Request) {
 	rep, err := s.Pruner.Preview(ctx, v.KeepDays, v.MaxTotalGB<<30)
 	switch {
 	case errors.Is(err, retention.ErrBusy):
-		writeErr(w, 409, "正在自动清理，请稍后再预览")
+		writeErrC(w, 409, "retention_busy", "正在自动清理，请稍后再预览", nil)
 		return
 	case errors.Is(err, context.DeadlineExceeded):
-		writeErr(w, 504, "统计任务文件超时，存储可能很慢，请稍后再试")
+		writeErrC(w, 504, "retention_preview_timeout", "统计任务文件超时，存储可能很慢，请稍后再试", nil)
 		return
 	case err != nil && len(rep.Errors) == 0:
 		writeErr(w, 500, "预览失败: "+err.Error())
@@ -136,7 +136,7 @@ func (s *Server) updatePrefs(w http.ResponseWriter, r *http.Request) {
 	}
 	prefs, changes, err := settings.UpdatePrefs(s.Store, body)
 	if settings.IsInputError(err) {
-		writeErr(w, 400, err.Error())
+		writeErrE(w, 400, err)
 		return
 	}
 	if err != nil {

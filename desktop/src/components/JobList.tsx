@@ -1,4 +1,5 @@
 import { compactProgress, duration, jobDuration, projectOf, statusLabel, timeAgo, type Job, type JobStatus } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { useEffect, useRef } from 'react'
 import { isUnread, type FleetJob } from '../lib/fleet'
 import { cx, StatusIcon, statusVar } from './ui'
@@ -19,16 +20,16 @@ export function progressOf(j: Job): number | null {
 function stateText(j: Job): { text: string; tone?: string } {
   switch (j.status) {
     case 'running':
-      if (j.cancel_requested) return { text: '正在结束…', tone: 'text-warn' }
-      return { text: '运行中', tone: 'text-run' }
+      if (j.cancel_requested) return { text: t('job.cancelling'), tone: 'text-warn' }
+      return { text: t('status.running'), tone: 'text-run' }
     case 'queued': {
-      const need = j.gpus_pinned.length ? `等卡 ${gpuRange(j.gpus_pinned)}` : `需 ${j.gpus_req} 卡`
-      return { text: `排队 #${j.queue_pos ?? '-'} · ${need}` }
+      const need = j.gpus_pinned.length ? t('jobs.wait_cards', { range: gpuRange(j.gpus_pinned) }) : t('jobs.need_cards', { n: j.gpus_req })
+      return { text: t('jobs.queued', { pos: j.queue_pos ?? '-', need }) }
     }
     case 'failed':
-      return { text: j.exit_code !== null ? `失败 exit ${j.exit_code}` : '失败', tone: 'text-fail' }
+      return { text: j.exit_code !== null ? t('jobs.failed_exit', { code: j.exit_code }) : t('status.failed'), tone: 'text-fail' }
     default:
-      return { text: statusLabel[j.status], tone: j.status === 'succeeded' ? 'text-ok' : undefined }
+      return { text: statusLabel(j.status), tone: j.status === 'succeeded' ? 'text-ok' : undefined }
   }
 }
 
@@ -75,7 +76,7 @@ export function JobList({
   useEffect(() => cursorRef.current?.scrollIntoView({ block: 'nearest' }), [cursor])
   return (
     // 列表按自己的宽度取舍列：右侧详情打开、窗口又窄时，先收起项目和卡号，名字始终留着
-    <div role="listbox" aria-label="任务" className="@container space-y-px">
+    <div role="listbox" aria-label={t('jobs.list_aria')} className="@container space-y-px">
       {jobs.map((f) => {
         const j = f.job
         const s = stateText(j)
@@ -115,7 +116,7 @@ export function JobList({
               )}
             </span>
             <span className="num w-[72px] shrink-0 truncate text-right text-[11.5px] text-fg-3 @max-[640px]:w-[60px]">{timeText(j)}</span>
-            <span className={cx('size-1.5 shrink-0 rounded-full', unread ? 'bg-fail' : 'bg-transparent')} aria-label={unread ? '未读' : undefined} />
+            <span className={cx('size-1.5 shrink-0 rounded-full', unread ? 'bg-fail' : 'bg-transparent')} aria-label={unread ? t('jobs.unread') : undefined} />
           </div>
         )
       })}

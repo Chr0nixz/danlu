@@ -335,6 +335,88 @@ check "重复暂停和恢复不重复记队列事件" \
 check "暂停和恢复均记审计日志" \
   [ "$(api "$BASE/api/audit" | json "sorted(e['action'] for e in d['entries'] if e['action'].startswith('queue_'))")" = "['queue_pause', 'queue_resume']" ]
 
+echo "== GPU 预约 =="
+# reservation 预约id 表达式：表达式里用 r 指这条预约
+reservation() { api "$BASE/api/reservations" | json "(lambda r: $2)(next((r for r in d['reservations'] if r['id']==$1), None))"; }
+RA=$(submit "{\"name\":\"res-a\",\"workdir\":\"$W\",\"cmd\":\"while [ ! -e $T/res-go ]; do sleep 0.2; done\",\"gpus\":2}")
+check "预约前的任务占着 GPU 0、1" wait_started "$RA" 10
+RES=$(api -X POST "$BASE/api/reservations" -d '{"gpus":2,"duration":3600,"note":"e2e-调试"}')
+RID=$(echo "$RES" | json "d['id']")
+check "预约马上收下空闲的 GPU 2，有外部进程的 GPU 3 不收" [ "$(echo "$RES" | json "d['status']=='waiting' and d['held_gpus']==[2] and d['note']=='e2e-调试'")" = True ]
+RB=$(submit "{\"name\":\"res-b\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
+res_wait_reason() { [ "$(job "$RB" "'已被预约 #$RID' in d.get('wait_reason','')")" = True ]; }
+check "排队任务的等待原因写出预约" wait_until 10 res_wait_reason
+check "GPU 接口给预约收下的卡带上预约" [ "$(api "$BASE/api/gpus" | json "d['gpus'][2]['reservation']['id']==$RID and d['gpus'][2]['reservation']['status']=='waiting' and d['gpus'][0]['reservation'] is None")" = True ]
+touch "$T/res-go"
+check "占卡的任务结束" wait_status "$RA" succeeded 10
+res_ready() { [ "$(reservation "$RID" "(r['status'], r['held_gpus'])")" = "('active', [0, 2])" ]; }
+check "空出的卡先给预约，凑齐后就绪" wait_until 10 res_ready
+check "排队任务拿剩下的 GPU 1" wait_status "$RB" succeeded 10
+check "排队任务分到的是 GPU 1" [ "$(job "$RB" "d['gpus_assigned']")" = "[1]" ]
+ENDS=$(reservation "$RID" "r['ends_at']")
+check "从卡全部到位时开始计时，1 小时后到期" [ "$(reservation "$RID" "r['ends_at'] - r['ready_at']")" = 3600 ]
+check "延长 1 小时" [ "$(api -X POST "$BASE/api/reservations/$RID/extend" -d '{}' | json "d['ends_at']")" = $((ENDS + 3600)) ]
+UNTIMED=$(api -X POST "$BASE/api/reservations" -d '{"pinned_gpus":[1]}' | json "d['id']")
+check "不定时的预约不能延长" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/reservations/$UNTIMED/extend")" = 400 ]
+for bad_req in '{"gpus":0}' '{"gpus":9}' '{"pinned_gpus":[7]}' '{"gpus":1,"duration":60}' "{\"gpus\":1,\"note\":\"$(printf '长%.0s' $(seq 1 101))\"}"; do
+  check "预约参数不合法时返回 400：$bad_req" [ "$(code -X POST -H 'Content-Type: application/json' -d "$bad_req" "$BASE/api/reservations")" = 400 ]
+done
+kill -9 "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+start_server
+check "重启后预约仍占着卡" [ "$(reservation "$RID" "(r['status'], r['held_gpus'])")" = "('active', [0, 2])" ]
+RP=$(submit "{\"name\":\"res-pinned\",\"workdir\":\"$W\",\"cmd\":\"true\",\"pinned_gpus\":[2]}")
+sleep 2
+check "指定了预约卡的任务排队等着" [ "$(job "$RP" "d['status']")" = queued ]
+check "释放预约" [ "$(api -X POST "$BASE/api/reservations/$RID/release" -d '{}' | json "d['status']=='ended' and d['end_reason']=='手动释放'")" = True ]
+check "重复释放返回 409" [ "$(code -X POST -H 'Content-Type: application/json' -d '{}' "$BASE/api/reservations/$RID/release")" = 409 ]
+check "释放后指定那张卡的任务开始运行" wait_status "$RP" succeeded 10
+api -X POST "$BASE/api/reservations/$UNTIMED/release" -d '{}' >/dev/null
+check "预约都释放后列表为空" [ "$(api "$BASE/api/reservations" | json "len(d['reservations'])")" = 0 ]
+check "预约的创建、延长和释放记审计日志" \
+  [ "$(api "$BASE/api/audit" | json "sorted(set(e['action'] for e in d['entries'] if e['action'].startswith('reservation_')))")" = "['reservation_create', 'reservation_extend', 'reservation_release']" ]
+check "预约事件按就绪和结束各记一次" \
+  [ "$(python3 -c 'import sqlite3,sys; db=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); print(" ".join(r[0] for r in db.execute("SELECT kind FROM events WHERE key=? ORDER BY id",("reservation:"+sys.argv[2],))))' "$DANLU_HOME/danlu.db" "$RID")" = "reservation_ready reservation_ended" ]
+
+echo "== 严格限卡 =="
+# 要以 root 安装助手、写 /etc/sudoers.d：只在 CI（免密 sudo、systemd、cgroup v2）或显式 E2E_STRICT=1 时跑，
+# 免得在开发机上覆盖真在用的助手。CI 没有 GPU，只测不用卡的任务；设备拦截在真机上验（CHECKLIST G2）
+if [ -n "${CI:-}${E2E_STRICT:-}" ] && sudo -n true 2>/dev/null && [ -d /run/systemd/system ] \
+  && [ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ]; then
+  check "没装助手时打开严格限卡返回 409" \
+    [ "$(code -X POST -H 'Content-Type: application/json' -d '{"enabled":true}' "$BASE/api/settings/strict")" = 409 ]
+  if sudo "$BIN" strict install --user "$(id -un)" >"$T/strict-install.log" 2>&1; then ok "安装 root 助手"; else bad "安装 root 助手"; cat "$T/strict-install.log"; fi
+  check "设置里显示已安装" [ "$(api "$BASE/api/settings" | json "d['strict']['installed']")" = True ]
+  check "打开严格限卡" [ "$(api -X POST "$BASE/api/settings/strict" -d '{"enabled":true}' | json "d['enabled'] and d['ok']")" = True ]
+  SJ=$(submit "{\"name\":\"strict\",\"workdir\":\"$W\",\"cmd\":\"cat /proc/self/cgroup; echo cvd=[\${CUDA_VISIBLE_DEVICES-unset}] gpus=[\$DANLU_GPUS]\",\"gpus\":0}")
+  check "严格任务成功" wait_status "$SJ" succeeded 20
+  SUNIT=$(job "$SJ" "d['unit']")
+  check "严格任务记下 systemd 服务名" bash -c "[[ '$SUNIT' == danlu-job-$(id -u)-*.service ]]"
+  check "严格任务在自己用户 slice 下的服务里运行" grep -q "user-$(id -u).slice/$SUNIT" "$DANLU_HOME/logs/$SJ.log"
+  check "日志开头写明严格限卡" grep -q "严格限卡" "$DANLU_HOME/logs/$SJ.log"
+  check "不用卡的严格任务看不到任何卡" grep -q "cvd=\[\] gpus=\[\]" "$DANLU_HOME/logs/$SJ.log"
+  check "环境文件读完即删" [ ! -e "$DANLU_HOME/run/$SJ/env" ]
+  check "包装脚本记下这个任务自己的 OOM 计数" [ "$(cat "$DANLU_HOME/run/$SJ/oom_kill" 2>/dev/null)" = 0 ]
+  strict_manifest() { out=$(job "$SJ" "d.get('output_dir', '')"); [ -f "$out/danlu.json" ] && [ "$(manifest "$out/danlu.json" "d.get('gpu_isolation')")" = strict ]; }
+  check "danlu.json 记下严格限卡" wait_until 10 strict_manifest
+  SK=$(submit "{\"name\":\"strict-long\",\"workdir\":\"$W\",\"cmd\":\"sleep 300\",\"gpus\":0}")
+  check "严格长任务开始运行" wait_started "$SK" 20
+  kill -9 "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+  start_server
+  check "重启 danlu 后严格任务仍在运行" [ "$(job "$SK" "d['status']")" = running ]
+  api -X POST "$BASE/api/jobs/$SK/cancel" -d '{}' >/dev/null
+  check "严格任务能取消" wait_status "$SK" cancelled 20
+  check "关闭严格限卡" [ "$(api -X POST "$BASE/api/settings/strict" -d '{"enabled":false}' | json "d['enabled']")" = False ]
+  NJ=$(submit "{\"name\":\"after-strict\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":0}")
+  check "关闭后新任务回到普通启动" wait_status "$NJ" succeeded 10
+  check "关闭后的任务没有服务名" [ "$(job "$NJ" "d['unit']")" = "" ]
+  if sudo "$BIN" strict uninstall --user "$(id -un)" >"$T/strict-uninstall.log" 2>&1; then ok "卸载 root 助手"; else bad "卸载 root 助手"; cat "$T/strict-uninstall.log"; fi
+  check "卸载后显示未安装" [ "$(api "$BASE/api/settings" | json "d['strict']['installed']")" = False ]
+  check "开关记审计日志" \
+    [ "$(api "$BASE/api/audit" | json "sorted(set(e['action'] for e in d['entries'] if e['action'].startswith('strict_')))")" = "['strict_disable', 'strict_enable']" ]
+else
+  echo "  （跳过：要在 CI 或 E2E_STRICT=1 下，且有免密 sudo、systemd 和 cgroup v2）"
+fi
+
 echo "== 快速失败自动暂停 =="
 FF=$(submit "{\"name\":\"fail-fast\",\"workdir\":\"$W\",\"cmd\":\"while [ ! -f $T/finish-fast ]; do sleep 0.1; done; exit 7\",\"gpus\":3}")
 check "快速失败测试任务已启动" wait_started "$FF" 10

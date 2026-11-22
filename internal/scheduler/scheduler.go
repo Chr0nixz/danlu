@@ -24,6 +24,7 @@ import (
 	"danlu/internal/runner"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
+	"danlu/internal/strict"
 	"danlu/internal/system"
 )
 
@@ -32,8 +33,8 @@ import (
 type Executor interface {
 	// LoadEnv 返回任务的基础环境，勾选了"Bash 环境"时要加载 ~/.bashrc，可能要好几秒
 	LoadEnv(ctx context.Context, inheritBashrc bool) ([]string, error)
-	// Start 写脚本并 fork/exec，毫秒级
-	Start(s runner.Spec, env []string) (pid int, start uint64, err error)
+	// Start 写脚本并 fork/exec，毫秒级；严格任务（Spec.Strict）要经 sudo 调助手，调度器在锁外调用
+	Start(s runner.Spec, env []string) (runner.Started, error)
 	Alive(jobID int64, pid int, start uint64) bool
 	// Adopt 找回启动途中 danlu 退出时留下的进程（读 pid 文件并核对 DANLU_RUN_DIR）
 	Adopt(jobID int64) (pid int, start uint64, ok bool)
@@ -43,6 +44,8 @@ type Executor interface {
 	KillAll(jobID int64, pgid int) int
 	ReadExitCode(jobID int64) (int, bool)
 	OOMKills() (int64, bool)
+	// JobOOMKills 是严格任务自己 cgroup 的 OOM 计数（包装脚本结束前记下），普通任务 ok 为 false
+	JobOOMKills(jobID int64) (int64, bool)
 	CapturePackages(context.Context, runner.Spec, []string) ([]byte, error)
 	StorePackages([]byte) (string, error)
 	WriteManifest(outputDir string, data []byte) error
@@ -76,6 +79,10 @@ type JobStore interface {
 	JobsByStatus(string) ([]*store.Job, error)
 	JobsWithPendingRecipe() ([]*store.Job, error)
 	TouchWorkdir(string)
+	InsertReservation(*store.Reservation) error
+	SaveReservation(*store.Reservation, ...*store.Event) error
+	OpenReservations() ([]*store.Reservation, error)
+	GetReservation(int64) (*store.Reservation, error)
 }
 
 type Options struct {
@@ -94,6 +101,17 @@ type Options struct {
 	// Live 返回面板上能改的几项的当前值（见 LiveOptions），为 nil 时一直用上面的值。
 	// 调度器每一轮在加锁前调用它，所以它可以读库，但不能反过来调用调度器。
 	Live func() LiveOptions
+	// Strict 是严格限卡开关，StrictGate 是 root 助手的可用状态（strict.Monitor）。
+	// 开启但助手不可用时不启动任何任务，绝不退回不隔离运行
+	Strict     bool
+	StrictGate StrictGate
+}
+
+// StrictGate 是严格限卡助手的可用状态。调度器在锁里只读缓存的状态，sudo 由 strict.Monitor 在后台执行；
+// 启动失败时调度器在锁外调用 Fail，让它马上复查。
+type StrictGate interface {
+	Status() strict.Status
+	Fail(error)
 }
 
 // LiveOptions 是面板「调度与告警」里能改、保存后下一轮就生效的几项，会盖住 Options 里的同名项。
@@ -103,6 +121,7 @@ type LiveOptions struct {
 	SilenceAlert time.Duration
 	DiskMinBytes uint64
 	Snapshot     snapshot.Options
+	Strict       bool
 }
 
 type Manager struct {
@@ -146,9 +165,26 @@ type Manager struct {
 	snap func(ctx context.Context, j *store.Job, limits snapshot.Options) (*snapshot.Meta, error)
 	// live 即 Options.Live，构造后不变，可以在锁外读
 	live func() LiveOptions
+	// res 是没有结束的 GPU 预约（加上已结束但还没保存的），按创建顺序；resReady 之前不分配需要 GPU 的任务
+	res      []*store.Reservation
+	resReady bool
+	resError string
+	// resDirty 是写库失败、等下一轮重试的预约和它们的事件
+	resDirty map[int64][]*store.Event
+	// resWarned 记着已经为哪个到期时间提醒过，免得每轮都去写同一个去重键
+	resWarned map[int64]int64
+	resView   atomic.Pointer[[]store.Reservation]
+	// strictRetried 是严格启动失败后放回过队列的任务：助手复查通过后再失败就判失败，免得来回重试
+	strictRetried map[int64]bool
 }
 
 type launchState struct{ cancelled bool }
+
+// launchMode 是占位时定下的启动方式：严格限卡开关在占位那一刻读，卡的总线号取自同一份 GPU 采样
+type launchMode struct {
+	strict bool
+	buses  []string
+}
 
 func New(st JobStore, gpus GPUSource, ex Executor, opt Options) *Manager {
 	if opt.ManifestTimeout <= 0 {
@@ -158,6 +194,9 @@ func New(st JobStore, gpus GPUSource, ex Executor, opt Options) *Manager {
 		cancelAt: map[int64]time.Time{}, noTracker: map[int64]bool{}, starting: map[int64]*launchState{}, pending: map[int64]*store.Job{},
 		pendingEvents: map[int64][]*store.Event{},
 		runStats:      map[int64]*runStat{},
+		resDirty:      map[int64][]*store.Event{},
+		resWarned:     map[int64]int64{},
+		strictRetried: map[int64]bool{},
 		ctx:           context.Background(), live: opt.Live}
 	m.snap = func(ctx context.Context, j *store.Job, limits snapshot.Options) (*snapshot.Meta, error) {
 		return snapshot.Take(ctx, j.Workdir, opt.SnapshotDir, j.ID, limits)
@@ -181,14 +220,27 @@ func (m *Manager) applyLiveLocked(l *LiveOptions) {
 	}
 	m.opt.KillGrace, m.opt.FailFast, m.opt.SilenceAlert = l.KillGrace, l.FailFast, l.SilenceAlert
 	m.opt.DiskMinBytes, m.opt.Snapshot = l.DiskMinBytes, l.Snapshot
+	m.opt.Strict = l.Strict
 }
 
-// ValidationError 表示请求本身有问题（API 返回 400）。
-type ValidationError struct{ Msg string }
+// strictReadyLocked：没开严格限卡，或者开了且助手可用
+func (m *Manager) strictReadyLocked() bool {
+	return !m.opt.Strict || (m.opt.StrictGate != nil && m.opt.StrictGate.Status().OK)
+}
+
+// ValidationError 表示请求本身有问题（API 返回 400）。Code/Params 供前端本地化，Msg 仍是中文原文。
+type ValidationError struct {
+	Msg    string
+	Code   string
+	Params map[string]any
+}
 
 func (e *ValidationError) Error() string { return e.Msg }
 
-func invalid(format string, a ...any) error { return &ValidationError{Msg: fmt.Sprintf(format, a...)} }
+// invalid 生成带机器码的校验错误；没有插值参数时 params 传 nil。
+func invalid(code string, params map[string]any, format string, a ...any) error {
+	return &ValidationError{Msg: fmt.Sprintf(format, a...), Code: code, Params: params}
+}
 
 func (m *Manager) Wake() {
 	select {
@@ -220,7 +272,7 @@ const maxNameLen = 100
 
 func ValidateMemo(memo string) error {
 	if len([]rune(memo)) > 500 {
-		return invalid("备注最多 500 字")
+		return invalid("job_memo_too_long", map[string]any{"max": 500}, "备注最多 500 字")
 	}
 	return nil
 }
@@ -236,25 +288,25 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	req.Cmd = strings.TrimSpace(req.Cmd)
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Workdir == "" || !strings.HasPrefix(req.Workdir, "/") {
-		return nil, invalid("工作目录必须是服务器上的绝对路径")
+		return nil, invalid("job_workdir_abs", nil, "工作目录必须是服务器上的绝对路径")
 	}
 	if req.CodeFrom != nil {
 		source, err := m.st.GetJob(*req.CodeFrom)
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, invalid("源任务 #%d 不存在", *req.CodeFrom)
+			return nil, invalid("job_code_from_missing", map[string]any{"id": *req.CodeFrom}, "源任务 #%d 不存在", *req.CodeFrom)
 		}
 		if err != nil {
 			return nil, err
 		}
 		if filepath.Clean(req.Workdir) != filepath.Clean(source.Workdir) {
-			return nil, invalid("使用快照重跑时，工作目录必须与源任务一致")
+			return nil, invalid("job_code_from_workdir", nil, "使用快照重跑时，工作目录必须与源任务一致")
 		}
 		req.Workdir = source.Workdir
 	} else if fi, err := os.Stat(req.Workdir); err != nil || !fi.IsDir() {
-		return nil, invalid("工作目录不存在: %s", req.Workdir)
+		return nil, invalid("job_workdir_missing", map[string]any{"path": req.Workdir}, "工作目录不存在: %s", req.Workdir)
 	}
 	if req.Cmd == "" {
-		return nil, invalid("命令不能为空")
+		return nil, invalid("job_cmd_empty", nil, "命令不能为空")
 	}
 	if req.Name == "" {
 		// 先截短目录名再拼时间，目录名很长时也不会超过任务名长度限制
@@ -266,14 +318,14 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 		req.Name = string(base) + suffix
 	}
 	if len([]rune(req.Name)) > maxNameLen {
-		return nil, invalid("任务名太长")
+		return nil, invalid("job_name_too_long", nil, "任务名太长")
 	}
 	for k := range req.Env {
 		if !envKeyRe.MatchString(k) {
-			return nil, invalid("环境变量名不合法: %q", k)
+			return nil, invalid("job_env_name_invalid", map[string]any{"name": k}, "环境变量名不合法: %q", k)
 		}
 		if runner.ReservedEnv(k) {
-			return nil, invalid("环境变量 %s 由 danlu 管理，不能自定义", k)
+			return nil, invalid("job_env_reserved", map[string]any{"name": k}, "环境变量 %s 由 danlu 管理，不能自定义", k)
 		}
 	}
 	pinned := slices.Clone(req.PinnedGPUs)
@@ -283,15 +335,15 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 		req.GPUs = len(pinned)
 	}
 	if req.GPUs < 0 || req.GPUs > 64 {
-		return nil, invalid("GPU 数量不合法")
+		return nil, invalid("job_gpus_invalid", nil, "GPU 数量不合法")
 	}
 	if gpus, _, err := m.gpus.Latest(); err == nil && len(gpus) > 0 {
 		if req.GPUs > len(gpus) {
-			return nil, invalid("需要 %d 张卡，但这台机器只有 %d 张", req.GPUs, len(gpus))
+			return nil, invalid("job_gpus_exceed", map[string]any{"n": req.GPUs, "total": len(gpus)}, "需要 %d 张卡，但这台机器只有 %d 张", req.GPUs, len(gpus))
 		}
 		for _, p := range pinned {
 			if !slices.ContainsFunc(gpus, func(g gpu.GPU) bool { return g.Index == p }) {
-				return nil, invalid("GPU %d 不存在", p)
+				return nil, invalid("gpu_missing", map[string]any{"gpu": p}, "GPU %d 不存在", p)
 			}
 		}
 	}
@@ -311,7 +363,7 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 		Status: store.StatusQueued, RerunOf: req.RerunOf, CodeFrom: req.CodeFrom}
 	if err := m.st.InsertJob(j); err != nil {
 		if errors.Is(err, store.ErrSnapshotUnavailable) {
-			return nil, invalid("源任务 #%d 的代码快照不可用（尚未生成、正在清理或已清理）", *req.CodeFrom)
+			return nil, invalid("job_snapshot_unavailable", map[string]any{"id": *req.CodeFrom}, "源任务 #%d 的代码快照不可用（尚未生成、正在清理或已清理）", *req.CodeFrom)
 		}
 		return nil, err
 	}
@@ -351,7 +403,7 @@ func (m *Manager) Cancel(id int64) (*store.Job, error) {
 		}
 	case j.Status == store.StatusRunning:
 	default:
-		return nil, invalid("任务已经结束")
+		return nil, invalid("job_finished", nil, "任务已经结束")
 	}
 	return j, nil
 }
@@ -360,10 +412,10 @@ func (m *Manager) Cancel(id int64) (*store.Job, error) {
 func (m *Manager) Rename(id int64, name string) (*store.Job, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return nil, invalid("任务名不能为空")
+		return nil, invalid("job_name_empty", nil, "任务名不能为空")
 	}
 	if len([]rune(name)) > maxNameLen {
-		return nil, invalid("任务名太长")
+		return nil, invalid("job_name_too_long", nil, "任务名太长")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -406,6 +458,8 @@ func (m *Manager) Recover() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.applyLiveLocked(live)
+	// 预约在调度前就要读出来；到期判断留给第一轮 step
+	m.loadReservationsLocked()
 	// 上次被杀时已结束的任务也可能还在采集包；没有采集者了，不能永久挡住清理。
 	if jobs, err := m.st.JobsWithPendingRecipe(); err != nil {
 		log.Printf("读取未完成的环境记录失败: %v", err)
@@ -474,10 +528,15 @@ func (m *Manager) step(scanTracker, sched bool) {
 	for _, j := range m.pending {
 		m.save(j)
 	}
+	m.retryReservationsLocked()
 	m.checkRunning(scanTracker)
 	if sched {
-		m.schedule()
-		m.checkAlertsLocked(time.Now())
+		// 收卡和分卡用同一份采样：两次读之间来了新采样，排队任务就可能抢在预约前面拿到刚空出来的卡
+		now := time.Now()
+		gpus, _, gpuErr := m.gpus.Latest()
+		m.reservationsLocked(now, gpus, gpuErr)
+		m.schedule(gpus, gpuErr)
+		m.checkAlertsLocked(now)
 	}
 }
 
@@ -608,7 +667,10 @@ func (m *Manager) finalize(j *store.Job) {
 			exitCode = &code
 		}
 		hostOOM, oomKnown := false, false
-		if current, known := m.ex.OOMKills(); known && j.OOMBase >= 0 {
+		if count, known := m.ex.JobOOMKills(j.ID); known {
+			// 严格任务：自己 cgroup 的计数，只算这个任务
+			hostOOM, oomKnown = count > 0, true
+		} else if current, known := m.ex.OOMKills(); known && j.OOMBase >= 0 {
 			hostOOM, oomKnown = current > j.OOMBase, true
 		}
 		failure := logs.ClassifyFailure(logs.FailureInput{
@@ -619,7 +681,7 @@ func (m *Manager) finalize(j *store.Job) {
 			ExternalSeen: j.ExtSeen,
 			LogTail:      m.logTail(j.ID),
 		})
-		j.FailKind, reason = failure.Kind, failure.Reason
+		j.FailKind, j.FailDetail, reason = failure.Kind, failure.Detail, failure.Reason
 		if offset := logs.TracebackOffset(m.ex.LogPath(j.ID)); offset >= 0 {
 			j.TracebackOffset = &offset
 		}
@@ -655,8 +717,8 @@ func (m *Manager) failQueued(j *store.Job, reason string) {
 	m.transition(j, store.StatusFailed, reason)
 }
 
-// schedule 严格按提交顺序：队首放不下就停，后面的任务不插队。
-func (m *Manager) schedule() {
+// schedule 严格按提交顺序：队首放不下就停，后面的任务不插队。预约已经收下的卡不分配。
+func (m *Manager) schedule(gpus []gpu.GPU, gpuErr error) {
 	if err := m.checkDiskGuardLocked(); err != nil {
 		if m.diskError != err.Error() {
 			log.Printf("磁盘保护暂停启动任务: %v", err)
@@ -678,11 +740,13 @@ func (m *Manager) schedule() {
 	if queue.Paused {
 		return
 	}
+	if !m.strictReadyLocked() {
+		return // 严格限卡开着但助手不可用：所有任务都等着，等待原因和告警见 alerts.go
+	}
 	queued, err := m.jobsByStatus(store.StatusQueued)
 	if err != nil || len(queued) == 0 {
 		return
 	}
-	gpus, _, gpuErr := m.gpus.Latest()
 	running, err := m.jobsByStatus(store.StatusRunning)
 	if err != nil {
 		return
@@ -711,7 +775,11 @@ func (m *Manager) schedule() {
 			}
 		}
 	}
-	gpuKnown := gpuErr == nil && len(gpus) > 0
+	for g := range m.heldCardsLocked() {
+		busy[g] = true
+	}
+	// 读不到预约时不知道哪些卡被占着，需要 GPU 的任务都先等着
+	gpuKnown := gpuErr == nil && len(gpus) > 0 && m.resReady
 	for _, j := range queued {
 		if _, unsaved := m.pending[j.ID]; unsaved {
 			return // 重新排队等事件先落库，再启动下一次准备
@@ -737,7 +805,17 @@ func (m *Manager) schedule() {
 		if !ok {
 			return
 		}
-		if !m.reserve(j, sel, ports) {
+		mode := launchMode{strict: m.opt.Strict}
+		if mode.strict {
+			for _, idx := range sel {
+				for _, g := range gpus {
+					if g.Index == idx {
+						mode.buses = append(mode.buses, g.BusID)
+					}
+				}
+			}
+		}
+		if !m.reserve(j, sel, ports, mode) {
 			return // 写库失败，这一轮停下，下一轮再试
 		}
 		for _, g := range sel {
@@ -783,7 +861,7 @@ func Allocate(all []int, busy map[int]bool, n int, pinned []int) ([]int, bool) {
 
 // reserve 是启动的第一步（锁内）：选好的卡和端口先写进库，任务记为 running、pid 为 0，
 // 再起 goroutine 做后面两步。先落库再启动：写库失败就不启动，同一个任务不会被启动两次。
-func (m *Manager) reserve(j *store.Job, gpus []int, ports map[int]bool) bool {
+func (m *Manager) reserve(j *store.Job, gpus []int, ports map[int]bool, mode launchMode) bool {
 	previous := *j
 	port := freePort(ports)
 	now := time.Now().Unix()
@@ -803,13 +881,13 @@ func (m *Manager) reserve(j *store.Job, gpus []int, ports map[int]bool) bool {
 	ports[port] = true
 	m.starting[j.ID] = &launchState{}
 	m.launches.Add(1)
-	go m.launch(m.ctx, j, m.opt.Snapshot)
+	go m.launch(m.ctx, j, m.opt.Snapshot, mode)
 	return true
 }
 
 // launch 是后两步。准备（锁外）：做快照、加载环境，都有超时，danlu 停止时立即放弃；
 // 启动（锁内）：看一眼这期间有没有被取消、danlu 是不是在停止，都没有才 fork/exec 并落库。
-func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Options) {
+func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Options, mode launchMode) {
 	defer m.launches.Done()
 
 	sctx, cancel := context.WithTimeout(ctx, m.opt.SnapshotTimeout)
@@ -862,15 +940,41 @@ func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Opti
 	if ctx.Err() == nil && envErr == nil {
 		manifestErr = m.writeManifest(ctx, j)
 	}
+	spec := runner.Spec{JobID: j.ID, Name: j.Name, Workdir: workdir, CondaEnv: j.CondaEnv, Cmd: j.Cmd, Env: j.Env,
+		GPUs: j.GPUsAssigned, Port: j.MasterPort, OutputDir: j.OutputDir, Strict: mode.strict, GPUBuses: mode.buses}
+
+	// 严格任务要经 sudo 调 root 助手，几百毫秒，不能放在锁里（锁里只做毫秒级的事）。
+	// 先短暂加锁看一眼有没有被取消，再在锁外启动；启动期间被取消、danlu 开始停止，都在下面拿锁后处理
+	var strictStarted *runner.Started
+	var strictErr error
+	if mode.strict && ctx.Err() == nil && envErr == nil && manifestErr == nil {
+		m.mu.Lock()
+		ls, ok := m.starting[j.ID]
+		cancelled := !ok || ls.cancelled
+		gate := m.opt.StrictGate
+		m.mu.Unlock()
+		if !cancelled {
+			started, err := m.ex.Start(spec, env)
+			strictStarted, strictErr = &started, err
+			var se *strict.Error
+			if errors.As(err, &se) && gate != nil {
+				gate.Fail(err) // 马上标成不可用并复查；在锁外调用，它会叫醒调度器
+			}
+		}
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ls, ok := m.starting[j.ID]
-	if !ok {
+	if !ok && strictStarted == nil {
 		log.Printf("任务 #%d 的启动记录不见了，不再启动", j.ID)
 		return
 	}
 	delete(m.starting, j.ID)
+	if strictStarted != nil {
+		m.finishStrictStartLocked(ctx, j, ls, spec, env, *strictStarted, strictErr, hadSnapshot)
+		return
+	}
 	switch {
 	case ls.cancelled:
 		j.CancelRequested = true
@@ -886,13 +990,16 @@ func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Opti
 		log.Printf("danlu 正在停止，任务 #%d %s 放回队列", j.ID, j.Name)
 		return
 	case envErr != nil:
-		j.FailKind = "start"
+		// fail_detail 存不带前缀的原始错误：前端按当前语言译"启动失败"前缀后附原文；
+		// fail_reason 仍是完整中文原文（旧客户端和操作记录用）
+		j.FailKind, j.FailDetail = "start", envErr.Error()
 		j.Recipe = nil
 		m.transition(j, store.StatusFailed, "启动失败: "+envErr.Error())
 		log.Printf("任务 #%d 启动失败: %v", j.ID, envErr)
 		return
 	case manifestErr != nil:
-		j.FailKind = "start"
+		// 详情带上文件名，译成"启动失败: danlu.json: …"时还看得出是写任务清单出的错
+		j.FailKind, j.FailDetail = "start", "danlu.json: "+manifestErr.Error()
 		j.Recipe = nil
 		m.transition(j, store.StatusFailed, "写入任务清单失败: "+manifestErr.Error())
 		return
@@ -905,11 +1012,10 @@ func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Opti
 		log.Printf("任务 #%d 保存主机 OOM 基线失败，暂不启动: %v", j.ID, err)
 		return
 	}
-	spec := runner.Spec{JobID: j.ID, Name: j.Name, Workdir: workdir,
-		CondaEnv: j.CondaEnv, Cmd: j.Cmd, Env: j.Env, GPUs: j.GPUsAssigned, Port: j.MasterPort, OutputDir: j.OutputDir}
-	pid, startTime, err := m.ex.Start(spec, env)
+	started, err := m.ex.Start(spec, env)
+	pid, startTime := started.PID, started.StartTime
 	if err != nil {
-		j.FailKind = "start"
+		j.FailKind, j.FailDetail = "start", err.Error()
 		j.Recipe = nil
 		m.transition(j, store.StatusFailed, "启动失败: "+err.Error())
 		log.Printf("任务 #%d 启动失败: %v", j.ID, err)
@@ -921,6 +1027,53 @@ func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Opti
 	m.captures.Add(1)
 	go m.captureRecipe(ctx, j.ID, spec, slices.Clone(env))
 	log.Printf("任务 #%d %s 已启动：GPU %v，pid %d，端口 %d", j.ID, j.Name, j.GPUsAssigned, pid, j.MasterPort)
+}
+
+// finishStrictStartLocked 收尾锁外启动的严格任务。ls 可能为 nil（启动记录意外不见了）。
+// 进程已经起来的任务一律记下 pid 和单元：期间被取消就按运行中的任务取消；danlu 正在停止也不放回队列，
+// 下次启动由 Recover 接管。启动失败时：助手不可用（*strict.Error）第一次放回队列、等复查，再失败才判失败；
+// 其他错误直接判失败。绝不退回不隔离运行。
+func (m *Manager) finishStrictStartLocked(ctx context.Context, j *store.Job, ls *launchState, spec runner.Spec, env []string,
+	started runner.Started, startErr error, hadSnapshot bool) {
+	if startErr != nil {
+		var se *strict.Error
+		if errors.As(startErr, &se) && !m.strictRetried[j.ID] {
+			m.strictRetried[j.ID] = true
+			if j.CodeFrom == nil || !hadSnapshot {
+				j.SnapshotOK, j.SnapshotNote, j.GitCommit, j.GitBranch, j.GitDirty = false, "", "", "", false
+			}
+			j.Recipe = nil
+			m.transition(j, store.StatusQueued, "严格限卡启动失败，放回队列: "+startErr.Error())
+			log.Printf("任务 #%d 严格限卡启动失败，放回队列等助手复查: %v", j.ID, startErr)
+			return
+		}
+		delete(m.strictRetried, j.ID)
+		j.FailKind, j.FailDetail = "start", startErr.Error()
+		j.Recipe = nil
+		m.transition(j, store.StatusFailed, "启动失败: "+startErr.Error())
+		log.Printf("任务 #%d 严格限卡启动失败: %v", j.ID, startErr)
+		return
+	}
+	delete(m.strictRetried, j.ID)
+	j.PID, j.PIDStart, j.Unit, j.OOMBase = started.PID, started.StartTime, started.Unit, -1
+	cancelled := ls != nil && ls.cancelled
+	if cancelled {
+		j.CancelRequested = true
+	}
+	m.transition(j, store.StatusRunning, "")
+	switch {
+	case cancelled:
+		m.ex.Terminate(j.ID, j.PID)
+		m.cancelAt[j.ID] = time.Now()
+		log.Printf("任务 #%d %s 在严格启动期间被取消，已发送结束信号", j.ID, j.Name)
+	case ctx.Err() != nil:
+		log.Printf("任务 #%d %s 已在 %s 里启动，danlu 正在停止，下次启动时接管", j.ID, j.Name, started.Unit)
+	}
+	if ctx.Err() == nil {
+		m.captures.Add(1)
+		go m.captureRecipe(ctx, j.ID, spec, slices.Clone(env))
+	}
+	log.Printf("任务 #%d %s 已严格限卡启动：GPU %v，单元 %s，pid %d，端口 %d", j.ID, j.Name, j.GPUsAssigned, started.Unit, j.PID, j.MasterPort)
 }
 
 func (m *Manager) captureRecipe(ctx context.Context, id int64, spec runner.Spec, env []string) {

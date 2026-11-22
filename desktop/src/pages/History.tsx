@@ -1,4 +1,5 @@
-import { type Job, type JobStatus } from '@danlu/core'
+import { apiErrorText, type Job, type JobStatus } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FilterMenu } from '../components/Filters'
 import { JobList } from '../components/JobList'
@@ -48,7 +49,7 @@ function useHistory(names: string[], q: string, status: JobStatus | null) {
             })
             next[n] = { jobs: [...c.jobs, ...r.jobs], done: r.jobs.length < PAGE }
           } catch (e) {
-            next[n] = { ...c, error: e instanceof Error ? e.message : String(e) }
+            next[n] = { ...c, error: apiErrorText(e) }
           }
         }),
       )
@@ -120,33 +121,33 @@ export function History({ view }: { view: FleetView }) {
   return (
     <section className="flex h-full min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-panel">
       <div className="flex shrink-0 items-center gap-1 px-2.5 pt-2.5 pb-1.5">
-        <h1 className="mr-2 pl-1 text-[13px] font-semibold">历史</h1>
+        <h1 className="mr-2 pl-1 text-[13px] font-semibold">{t('history.title')}</h1>
         {view.servers.length > 1 && (
-          <FilterMenu label="服务器" value={server} onChange={setServer} options={view.servers.map((s) => ({ value: s.name, label: s.name }))} />
+          <FilterMenu label={t('overview.filter_server')} value={server} onChange={setServer} options={view.servers.map((s) => ({ value: s.name, label: s.name }))} />
         )}
         <FilterMenu
-          label="状态"
+          label={t('overview.filter_status')}
           value={status}
           onChange={setStatus}
           options={[
-            { value: 'failed' as const, label: '失败' },
-            { value: 'succeeded' as const, label: '成功' },
-            { value: 'cancelled' as const, label: '已取消' },
+            { value: 'failed' as const, label: t('status.failed') },
+            { value: 'succeeded' as const, label: t('status.succeeded') },
+            { value: 'cancelled' as const, label: t('status.cancelled') },
           ]}
         />
-        <span className="ml-auto pr-1 text-[11.5px] text-fg-3">{q ? `名称、命令或目录含"${q}"` : '所有服务器上已结束的任务，按结束时间'}</span>
+        <span className="ml-auto pr-1 text-[11.5px] text-fg-3">{q ? t('history.search_summary', { q }) : t('history.default_summary')}</span>
       </div>
       {h.errors.map(([n, c]) => (
-        <ErrorText key={n} error={`${n}：${c.error}`} className="px-4 pb-1" />
+        <ErrorText key={n} error={`${n}${t('common.colon')}${c.error}`} className="px-4 pb-1" />
       ))}
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">
         {list.length === 0 && !h.loading ? (
-          <Empty title={q ? '没有找到' : '还没有结束的任务'} />
+          <Empty title={q ? t('history.not_found') : t('history.empty')} />
         ) : (
           <JobList jobs={list} selected={selected} cursor={cursor} read={read} onSelect={(f) => openJob(f.server, f.job.id)} />
         )}
         <div ref={sentinel} className="flex h-10 items-center justify-center text-fg-3">
-          {h.loading ? '读取中…' : h.more ? <Button variant="ghost" onClick={h.loadMore}>加载更早的</Button> : list.length > 0 ? '没有更早的了' : null}
+          {h.loading ? t('log.loading') : h.more ? <Button variant="ghost" onClick={h.loadMore}>{t('history.load_more')}</Button> : list.length > 0 ? t('history.no_more') : null}
         </div>
       </div>
     </section>

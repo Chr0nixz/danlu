@@ -1,4 +1,5 @@
-import { API_VERSION } from '@danlu/core'
+import { API_VERSION, apiErrorText } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpCircle, ChevronDown, FileText, Plus, RotateCw, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
@@ -32,13 +33,13 @@ export function Servers({ servers, view, focus }: { servers: ServerView[]; view:
     <div className="h-full min-w-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-[860px] space-y-2.5 px-1 pb-3">
         <div className="flex items-center gap-2 px-1 pt-1">
-          <h1 className="text-[13px] font-semibold">服务器</h1>
-          <span className="text-fg-3">{servers.length} 台</span>
+          <h1 className="text-[13px] font-semibold">{t('servers.title')}</h1>
+          <span className="text-fg-3">{t('servers.count', { n: servers.length })}</span>
           <span className="ml-auto" />
           {!adding && (
             <Button onClick={() => setAdding(true)}>
               <Plus />
-              添加服务器
+              {t('servers.add')}
             </Button>
           )}
         </div>
@@ -68,13 +69,13 @@ function UpgradeSourceLine() {
   return (
     <p className="px-1 text-[11.5px] text-fg-3">
       {q.data.length === 0
-        ? '找不到用来升级的 danlu 程序：先运行 scripts/build.ps1 构建（安装包里会自带）'
-        : q.data.map((s) => `${s.arch}：${s.path}（${shortAgo(s.modified * 1000)}构建）`).join('　')}
+        ? t('servers.binary_missing')
+        : q.data.map((s) => t('servers.binary_info', { arch: s.arch, path: s.path, ago: shortAgo(s.modified * 1000) })).join(t('servers.binary_sep'))}
     </p>
   )
 }
 
-const tlsText = { 'local-ca': '本地 CA，已固定证书', file: '正式证书', off: '未加密，仅限本地测试' }
+const tlsText = () => ({ 'local-ca': t('servers.tls_local_ca'), file: t('servers.tls_file'), off: t('servers.tls_off') })
 
 function ServerCard({
   server: s,
@@ -101,7 +102,7 @@ function ServerCard({
   const action = useMutation({
     mutationFn: ({ a, value }: { a: ServiceAction; value?: string }) => serviceAction(s.name, a, value),
     onSuccess: (r) => setOutput({ title: r.command, text: r.output }),
-    onError: (e) => setOutput({ title: '失败', text: String(e), tone: 'fail' }),
+    onError: (e) => setOutput({ title: t('servers.failed'), text: String(e), tone: 'fail' }),
   })
   const run = (a: ServiceAction, value?: string) => {
     setMore(false)
@@ -118,14 +119,14 @@ function ServerCard({
     },
     onSuccess: (r) => {
       onUpgraded(r)
-      if (r.ok) toast(`${s.name} 已升级到 ${r.to}`)
+      if (r.ok) toast(t('servers.upgraded_toast', { name: s.name, to: r.to }))
       setOutput({
-        title: r.ok ? `已从 ${r.from} 升级到 ${r.to}` : `升级没有通过检查：${r.problem}`,
-        text: r.journal ? `服务日志最后几十行：\n${r.journal}` : '',
+        title: r.ok ? t('servers.upgrade_ok', { from: r.from, to: r.to }) : t('servers.upgrade_problem', { problem: r.problem ?? '' }),
+        text: r.journal ? t('servers.journal', { journal: r.journal }) : '',
         tone: r.ok ? undefined : 'fail',
       })
     },
-    onError: (e) => setOutput({ title: '升级失败', text: String(e), tone: 'fail' }),
+    onError: (e) => setOutput({ title: t('servers.upgrade_failed'), text: String(e), tone: 'fail' }),
   })
 
   const offline = snap ? isOffline(snap) : false
@@ -144,22 +145,22 @@ function ServerCard({
         <span className={cx('size-2 rounded-full', offline ? 'bg-fail' : snap?.online ? 'bg-ok' : 'bg-fg-3')} aria-hidden />
         <h2 className="text-[13px] font-semibold">{s.name}</h2>
         <span className="text-fg-3">
-          {offline ? (snap?.updated_at ? `连不上 · 最后在线 ${shortAgo(snap.updated_at)}` : '连不上') : snap?.online ? '在线' : '连接中…'}
+          {offline ? (snap?.updated_at ? t('servers.offline_last', { ago: shortAgo(snap.updated_at) }) : t('servers.offline')) : snap?.online ? t('servers.online') : t('servers.connecting')}
         </span>
         <span className="ml-auto" />
-        <Button variant="ghost" className="px-1.5 text-fg-3" aria-label={`删除 ${s.name}`} title="删除" onClick={() => setDialog('remove')}>
+        <Button variant="ghost" className="px-1.5 text-fg-3" aria-label={t('servers.remove_aria', { name: s.name })} title={t('common.delete')} onClick={() => setDialog('remove')}>
           <Trash2 />
         </Button>
       </div>
 
       <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1 px-4 pt-2.5">
-        <Meta k="版本">
+        <Meta k={t('servers.meta_version')}>
           <span className="num text-[11.5px]">{me?.version ?? '-'}</span>
           {me && me.api_version !== API_VERSION && (
-            <span className="ml-2 text-warn">接口版本 {me.api_version ?? '旧'}，客户端是 {API_VERSION}，请升级</span>
+            <span className="ml-2 text-warn">{t('servers.api_version_warn', { server: me.api_version ?? t('servers.api_old'), client: API_VERSION })}</span>
           )}
         </Meta>
-        <Meta k="地址">
+        <Meta k={t('servers.meta_address')}>
           <span className="num selectable text-[11.5px]">{s.base_url}</span>
         </Meta>
         <Meta k="SSH">
@@ -168,7 +169,7 @@ function ServerCard({
         <Meta k="HTTPS">
           <span className="inline-flex items-center gap-1.5">
             {s.tls_mode === 'off' ? <ShieldAlert className="size-3.5 text-warn" /> : <ShieldCheck className="size-3.5 text-ok" />}
-            {tlsText[s.tls_mode] ?? s.tls_mode}
+            {tlsText()[s.tls_mode] ?? s.tls_mode}
             {s.ca_fingerprint && (
               <span className="num selectable truncate text-[10.5px] text-fg-3" title={s.ca_fingerprint}>
                 {s.ca_fingerprint.slice(0, 23)}…
@@ -177,38 +178,38 @@ function ServerCard({
           </span>
         </Meta>
         {snap?.error && (
-          <Meta k="错误">
+          <Meta k={t('servers.meta_error')}>
             <span className="selectable text-fail">{snap.error}</span>
           </Meta>
         )}
       </dl>
 
       <div className="flex flex-wrap items-center gap-1.5 px-4 pt-3 pb-3.5">
-        <Button disabled={busy || offline} loading={upgrade.isPending} onClick={() => upgrade.mutate()} title="上传客户端自带的 danlu，替换后重启服务；训练不中断">
+        <Button disabled={busy || offline} loading={upgrade.isPending} onClick={() => upgrade.mutate()} title={t('servers.upgrade_hint')}>
           <ArrowUpCircle />
-          升级
+          {t('servers.upgrade')}
         </Button>
-        <Button disabled={busy} loading={action.isPending && action.variables?.a === 'restart'} onClick={() => run('restart')} title="正在跑的训练不受影响">
+        <Button disabled={busy} loading={action.isPending && action.variables?.a === 'restart'} onClick={() => run('restart')} title={t('servers.restart_hint')}>
           <RotateCw />
-          重启服务
+          {t('servers.restart')}
         </Button>
         <Button disabled={busy} loading={action.isPending && action.variables?.a === 'logs'} onClick={() => run('logs')}>
           <FileText />
-          服务日志
+          {t('servers.logs')}
         </Button>
         <div className="relative">
           <Button variant="ghost" disabled={busy} onClick={() => setMore((m) => !m)} aria-expanded={more}>
-            更多
+            {t('servers.more')}
             <ChevronDown />
           </Button>
           {more && (
             <div className="pop absolute top-full left-0 z-20 mt-1 w-44 rounded-[8px] border border-line-strong bg-panel p-1 shadow-float" onMouseLeave={() => setMore(false)}>
               {(
                 [
-                  ['entrance', '换安全入口'],
-                  ['port', '改端口'],
-                  ['cert', '重新生成证书'],
-                  ['password', '改面板密码'],
+                  ['entrance', t('servers.action_entrance')],
+                  ['port', t('servers.action_port')],
+                  ['cert', t('servers.action_cert')],
+                  ['password', t('servers.action_password')],
                 ] as const
               ).map(([k, label]) => (
                 <button key={k} type="button" onClick={() => (setMore(false), setDialog(k))} className="flex h-7 w-full items-center rounded-[5px] px-2 text-left hover:bg-hover">
@@ -218,14 +219,14 @@ function ServerCard({
             </div>
           )}
         </div>
-        <span className="ml-auto text-[11.5px] text-fg-3">都通过 SSH 执行 danlu 子命令</span>
+        <span className="ml-auto text-[11.5px] text-fg-3">{t('servers.ssh_note')}</span>
       </div>
 
       {(progress.length > 0 || output || action.isPending) && (
         <div className="mx-3 mb-3 overflow-hidden rounded-[8px] bg-term text-[#d6d7dc]">
           <pre className="selectable max-h-72 overflow-auto px-3 py-2 font-mono text-[11.5px] leading-[1.6] whitespace-pre-wrap">
             {upgrade.isPending || progress.length ? progress.join('\n') + (output ? '\n' : '') : ''}
-            {action.isPending && <span className="text-[#8b8e97]">执行中…</span>}
+            {action.isPending && <span className="text-[#8b8e97]">{t('servers.running')}</span>}
             {output && (
               <>
                 <span className={output.tone === 'fail' ? 'text-[#ff7b72]' : 'text-[#7ee787]'}>{output.title.startsWith('danlu') ? `$ ${output.title}` : output.title}</span>
@@ -238,13 +239,13 @@ function ServerCard({
 
       {dialog === 'remove' && <RemoveDialog server={s} onClose={() => setDialog(null)} onRemoved={onRemoved} />}
       {dialog === 'entrance' && (
-        <ConfirmAction title={`换掉 ${s.name} 的安全入口？`} confirm="换新入口" onClose={() => setDialog(null)} onConfirm={() => run('entrance')}>
-          旧的面板地址立即失效，浏览器书签要换成新地址（会显示在下面）。客户端用令牌访问，不受影响。
+        <ConfirmAction title={t('servers.entrance_title', { name: s.name })} confirm={t('servers.entrance_confirm')} onClose={() => setDialog(null)} onConfirm={() => run('entrance')}>
+          {t('servers.entrance_body')}
         </ConfirmAction>
       )}
       {dialog === 'cert' && (
-        <ConfirmAction title={`重新生成 ${s.name} 的证书？`} confirm="重新生成" onClose={() => setDialog(null)} onConfirm={() => run('cert')}>
-          会换一个新的本地 CA。手机和电脑上装过的旧 CA 要删掉重装；客户端会自动通过 SSH 读取新证书。
+        <ConfirmAction title={t('servers.cert_title', { name: s.name })} confirm={t('servers.cert_confirm')} onClose={() => setDialog(null)} onConfirm={() => run('cert')}>
+          {t('servers.cert_body')}
         </ConfirmAction>
       )}
       {dialog === 'port' && <PortDialog server={s} onClose={() => setDialog(null)} onConfirm={(p) => run('port', p)} />}
@@ -269,7 +270,7 @@ function ConfirmAction({ title, confirm, children, onClose, onConfirm }: { title
       onClose={onClose}
       footer={
         <>
-          <Button onClick={closeDialog}>算了</Button>
+          <Button onClick={closeDialog}>{t('servers.never_mind')}</Button>
           <Button
             variant="primary"
             onClick={(e) => {
@@ -292,19 +293,19 @@ function PortDialog({ server, onClose, onConfirm }: { server: ServerView; onClos
   const ok = /^\d+$/.test(port) && +port > 0 && +port < 65536
   return (
     <Dialog
-      title={`改 ${server.name} 的端口`}
+      title={t('servers.port_title', { name: server.name })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={closeDialog}>算了</Button>
+          <Button onClick={closeDialog}>{t('servers.never_mind')}</Button>
           <Button variant="primary" disabled={!ok} onClick={(e) => (onConfirm(port), closeDialog(e))}>
-            改端口并重启
+            {t('servers.port_confirm')}
           </Button>
         </>
       }
     >
-      <p>改完先在防火墙或云安全组里放行新端口，否则客户端和面板都会连不上。客户端会自动更新地址。</p>
-      <input className={cx(inputClass, 'num')} value={port} onChange={(e) => setPort(e.target.value.trim())} placeholder="例如 30001" autoFocus />
+      <p>{t('servers.port_body')}</p>
+      <input className={cx(inputClass, 'num')} value={port} onChange={(e) => setPort(e.target.value.trim())} placeholder={t('servers.port_placeholder')} autoFocus />
     </Dialog>
   )
 }
@@ -315,21 +316,21 @@ function PasswordDialog({ server, onClose, onConfirm }: { server: ServerView; on
   const ok = pw.length >= 8 && pw === again
   return (
     <Dialog
-      title={`改 ${server.name} 的面板密码`}
+      title={t('servers.password_title', { name: server.name })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={closeDialog}>算了</Button>
+          <Button onClick={closeDialog}>{t('servers.never_mind')}</Button>
           <Button variant="primary" disabled={!ok} onClick={(e) => (onConfirm(pw), closeDialog(e))}>
-            改密码
+            {t('servers.password_confirm')}
           </Button>
         </>
       }
     >
-      <p>只影响网页面板的登录，面板上已登录的设备会退出。客户端用令牌，不受影响。密码经 SSH 的标准输入传过去，不出现在命令行里。</p>
-      <input className={inputClass} type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="新密码，至少 8 位" autoComplete="new-password" autoFocus />
-      <input className={inputClass} type="password" value={again} onChange={(e) => setAgain(e.target.value)} placeholder="再输入一次" autoComplete="new-password" />
-      {again && pw !== again && <p className="text-fail">两次输入不一致</p>}
+      <p>{t('servers.password_body')}</p>
+      <input className={inputClass} type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder={t('servers.password_placeholder')} autoComplete="new-password" autoFocus />
+      <input className={inputClass} type="password" value={again} onChange={(e) => setAgain(e.target.value)} placeholder={t('servers.password_again')} autoComplete="new-password" />
+      {again && pw !== again && <p className="text-fail">{t('servers.password_mismatch')}</p>}
     </Dialog>
   )
 }
@@ -347,21 +348,21 @@ function RemoveDialog({ server: s, onClose, onRemoved }: { server: ServerView; o
   })
   return (
     <Dialog
-      title={`删除 ${s.name}？`}
+      title={t('servers.remove_confirm_title', { name: s.name })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={closeDialog}>保留</Button>
+          <Button onClick={closeDialog}>{t('servers.remove_keep')}</Button>
           <Button variant="danger" loading={remove.isPending} onClick={() => remove.mutate()}>
-            删除
+            {t('common.delete')}
           </Button>
         </>
       }
     >
-      <p>只是从客户端里移除，服务器上的 danlu 和任务都不受影响。</p>
+      <p>{t('servers.remove_body')}</p>
       <label className="flex items-center gap-2 text-fg">
         <input type="checkbox" checked={revoke} onChange={(e) => setRevoke(e.target.checked)} />
-        同时通过 SSH 吊销这台电脑的令牌
+        {t('servers.remove_revoke')}
       </label>
       <ErrorText error={remove.error} />
     </Dialog>
@@ -377,11 +378,11 @@ function UpgradeRest({ canary, rest, onDone }: { canary: UpgradeResult & { serve
       for (const s of rest) {
         setLog((l) => [...l, `== ${s.name}`])
         const r = await upgradeServer(s.name, (line) => setLog((l) => [...l, line]))
-        if (!r.ok) throw new Error(`${s.name} 没有通过检查：${r.problem}${r.journal ? `\n${r.journal}` : ''}`)
+        if (!r.ok) throw new Error(t('servers.canary_check_failed', { name: s.name, problem: r.problem ?? '', journal: r.journal ? `\n${r.journal}` : '' }))
       }
     },
     onSuccess: () => {
-      toast(`全部升级到 ${canary.to}`)
+      toast(t('servers.canary_all_toast', { to: canary.to }))
       onDone()
     },
   })
@@ -390,17 +391,17 @@ function UpgradeRest({ canary, rest, onDone }: { canary: UpgradeResult & { serve
       <div className="flex items-center gap-3">
         <ArrowUpCircle className="size-4 text-ok" />
         <p className="flex-1">
-          {canary.server} 已升级到 <span className="num">{canary.to}</span>，新版本在服务、在跑的任务都已接管。还有 {rest.length} 台是旧版本：
-          {rest.map((s) => s.name).join('、')}
+          {t('servers.canary_before', { server: canary.server })}<span className="num">{canary.to}</span>{t('servers.canary_after', { n: rest.length })}
+          {rest.map((s) => s.name).join(t('common.list_sep'))}
         </p>
         <Button variant="primary" loading={go.isPending} onClick={() => go.mutate()}>
-          升级其余 {rest.length} 台
+          {t('servers.canary_rest', { n: rest.length })}
         </Button>
       </div>
       {(log.length > 0 || go.error) && (
         <pre className="selectable mt-2.5 max-h-60 overflow-auto rounded-[8px] bg-term px-3 py-2 font-mono text-[11.5px] leading-[1.6] whitespace-pre-wrap text-[#d6d7dc]">
           {log.join('\n')}
-          {go.error && <span className="text-[#ff7b72]">{`\n${go.error.message}`}</span>}
+          {go.error && <span className="text-[#ff7b72]">{`\n${apiErrorText(go.error)}`}</span>}
         </pre>
       )}
     </div>
@@ -428,10 +429,10 @@ function AddServer({ existing, onDone, canCancel }: { existing: ServerView[]; on
   const unused = (hosts.data ?? []).filter((h) => !existing.some((s) => s.ssh === h))
   return (
     <form onSubmit={submit} className="rounded-[10px] border border-line bg-panel px-4 py-3.5 shadow-panel">
-      <h2 className="text-[13px] font-semibold">添加服务器</h2>
-      <p className="mt-1 text-fg-3">服务器上要已经装好 danlu。客户端用系统的 ssh 登录，读取地址和证书，再领一个设备令牌，不用输入面板密码。</p>
+      <h2 className="text-[13px] font-semibold">{t('servers.add')}</h2>
+      <p className="mt-1 text-fg-3">{t('servers.add_intro')}</p>
       <div className="mt-3 grid grid-cols-[1fr_160px_auto_auto] items-end gap-2">
-        <Field label="SSH 主机" hint="~/.ssh/config 里的主机名，或者 user@host">
+        <Field label={t('servers.ssh_host')} hint={t('servers.ssh_host_hint')}>
           <input className={cx(inputClass, 'num')} list="ssh-hosts" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="gpu1" autoFocus spellCheck={false} />
         </Field>
         <datalist id="ssh-hosts">
@@ -439,15 +440,15 @@ function AddServer({ existing, onDone, canCancel }: { existing: ServerView[]; on
             <option key={h} value={h} />
           ))}
         </datalist>
-        <Field label="名字">
+        <Field label={t('servers.name_label')}>
           <input className={cx(inputClass, 'num')} value={name} onChange={(e) => setName(e.target.value)} placeholder={defaultName(target) || 'gpu1'} spellCheck={false} />
         </Field>
-        {canCancel && <Button onClick={onDone}>算了</Button>}
+        {canCancel && <Button onClick={onDone}>{t('servers.never_mind')}</Button>}
         <Button type="submit" variant="primary" loading={add.isPending} disabled={!target.trim()}>
-          添加
+          {t('servers.add_submit')}
         </Button>
       </div>
-      {add.isPending && <p className="mt-2 text-fg-3">正在通过 SSH 读取信息、领取令牌…</p>}
+      {add.isPending && <p className="mt-2 text-fg-3">{t('servers.add_pending')}</p>}
       <ErrorText error={add.error} className="mt-2" />
     </form>
   )

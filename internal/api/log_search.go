@@ -23,14 +23,14 @@ func (s *Server) jobLogSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	word := strings.TrimSpace(q.Get("q"))
 	if word == "" || utf8.RuneCountInString(word) > 256 || strings.ContainsAny(word, "\r\n") {
-		writeErr(w, 400, "请输入 1–256 个字的单行关键词")
+		writeErrC(w, 400, "log_search_query_invalid", "请输入 1–256 个字的单行关键词", nil)
 		return
 	}
 	limit := 200
 	if q.Has("limit") {
 		n, err := strconv.Atoi(q.Get("limit"))
 		if err != nil || n <= 0 {
-			writeErr(w, 400, "日志搜索条数必须大于 0")
+			writeErrC(w, 400, "log_search_limit_invalid", "日志搜索条数必须大于 0", nil)
 			return
 		}
 		limit = min(limit, n)
@@ -38,7 +38,7 @@ func (s *Server) jobLogSearch(w http.ResponseWriter, r *http.Request) {
 	select {
 	case logSearchSlots <- struct{}{}:
 	default:
-		writeErr(w, http.StatusTooManyRequests, "日志搜索正在进行，请稍后重试")
+		writeErrC(w, http.StatusTooManyRequests, "log_search_busy", "日志搜索正在进行，请稍后重试", nil)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)

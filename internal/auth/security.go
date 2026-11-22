@@ -164,28 +164,28 @@ func (a *Auth) UpdateSecurity(w http.ResponseWriter, r *http.Request, p Security
 	var changes []string
 	if next.Entrance != cur.Entrance {
 		if !config.ValidEntrance(next.Entrance) {
-			return cur, nil, settings.Invalid("安全入口需要 6–64 位小写字母或数字，且不能和面板自己的页面重名")
+			return cur, nil, settings.InvalidC("security_entrance", "安全入口需要 6–64 位小写字母或数字，且不能和面板自己的页面重名", nil)
 		}
 		values[entranceKey] = next.Entrance
 		changes = append(changes, "更换安全入口")
 	}
 	if next.SessionTTL != cur.SessionTTL {
 		if next.SessionTTL < MinSessionTTL || next.SessionTTL > MaxSessionTTL || next.SessionTTL%time.Minute != 0 {
-			return cur, nil, settings.Invalid("登录有效期需要在 10 分钟到 365 天之间，按整分钟计")
+			return cur, nil, settings.InvalidC("security_session_ttl", "登录有效期需要在 10 分钟到 365 天之间，按整分钟计", nil)
 		}
 		values[sessionTTLKey] = strconv.FormatInt(int64(next.SessionTTL/time.Second), 10)
 		changes = append(changes, "登录有效期 "+settings.FormatDuration(cur.SessionTTL)+" → "+settings.FormatDuration(next.SessionTTL))
 	}
 	if next.MaxFailures != cur.MaxFailures {
 		if next.MaxFailures < MinMaxFailures || next.MaxFailures > MaxMaxFailures {
-			return cur, nil, settings.Invalid("失败次数上限需要在 1 到 100 次之间")
+			return cur, nil, settings.InvalidC("security_max_failures", "失败次数上限需要在 1 到 100 次之间", nil)
 		}
 		values[maxFailuresKey] = strconv.Itoa(next.MaxFailures)
 		changes = append(changes, fmt.Sprintf("失败上限 %d → %d 次", cur.MaxFailures, next.MaxFailures))
 	}
 	if next.Lockout != cur.Lockout {
 		if next.Lockout < MinLockout || next.Lockout > MaxLockout || next.Lockout%time.Minute != 0 {
-			return cur, nil, settings.Invalid("锁定时长需要在 1 分钟到 24 小时之间，按整分钟计")
+			return cur, nil, settings.InvalidC("security_lockout", "锁定时长需要在 1 分钟到 24 小时之间，按整分钟计", nil)
 		}
 		values[lockoutKey] = strconv.FormatInt(int64(next.Lockout/time.Second), 10)
 		changes = append(changes, "锁定时长 "+settings.FormatDuration(cur.Lockout)+" → "+settings.FormatDuration(next.Lockout))

@@ -224,3 +224,33 @@ func TestPrefs(t *testing.T) {
 		t.Fatalf("坏值应按默认值: %v", p["warn_cpu_percent"])
 	}
 }
+
+// 校验码与 core 目录 error.range_* / error.pref_invalid_* 键一一对应（docs/I18N.md）：
+// 每个 spec 出 range_<name>（zeroOff 的加 _zero），每个偏好出 pref_invalid_<name>。
+// 加项时两种语言的目录都要加键；这里守住命名约定，目录文案另由前端 typecheck 守键集。
+func TestValidationCodesMatchCatalog(t *testing.T) {
+	for _, s := range specs {
+		err := validate(s, s.max+1)
+		ie, ok := err.(*InputError)
+		if !ok {
+			t.Fatalf("%s: 应返回 InputError，实际 %v", s.name, err)
+		}
+		want := "range_" + s.name
+		if s.zeroOff {
+			want += "_zero"
+		}
+		if ie.Code() != want {
+			t.Errorf("%s: code = %q，应为 %q", s.name, ie.Code(), want)
+		}
+	}
+	for _, p := range prefSpecs {
+		_, err := p.parse(json.RawMessage(`"肯定不合法"`))
+		ie, ok := err.(*InputError)
+		if !ok {
+			t.Fatalf("%s: 应返回 InputError，实际 %v", p.name, err)
+		}
+		if ie.Code() != "pref_invalid_"+p.name {
+			t.Errorf("%s: code = %q", p.name, ie.Code())
+		}
+	}
+}

@@ -1,4 +1,4 @@
-import { jobStatusText, type Job, type JobStatus } from '@danlu/core'
+import { apiErrorText, jobStatusText, type Job, type JobStatus } from '@danlu/core'
 import { Ban, Check, CircleDashed, LoaderCircle, X } from 'lucide-react'
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -148,7 +148,7 @@ export function StatusLabel({ job }: { job: Job }) {
 
 export function ErrorText({ error, className }: { error: unknown; className?: string }) {
   if (!error) return null
-  return <p className={cx('selectable whitespace-pre-line text-fail', className)}>{error instanceof Error ? error.message : String(error)}</p>
+  return <p className={cx('selectable whitespace-pre-line text-fail', className)}>{apiErrorText(error)}</p>
 }
 
 export function Empty({ title, children }: { title: ReactNode; children?: ReactNode }) {

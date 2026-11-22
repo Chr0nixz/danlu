@@ -187,6 +187,17 @@ func TestBuildEnv(t *testing.T) {
 	if !slices.Contains(env, "CUDA_VISIBLE_DEVICES=0,2") {
 		t.Error("用户和系统的 CUDA_VISIBLE_DEVICES 都应被覆盖")
 	}
+	if get("DANLU_GPUS") != "0,2" || get("DANLU_CVD") != "0,2" || get("DANLU_STRICT") != "<unset>" {
+		t.Errorf("普通任务的 DANLU_GPUS/DANLU_CVD 都是物理卡号: %q %q %q", get("DANLU_GPUS"), get("DANLU_CVD"), get("DANLU_STRICT"))
+	}
+
+	// 严格任务只看得到分到的卡，从 0 编号；DANLU_GPUS 仍是物理卡号
+	env = r.BuildEnv(base, Spec{JobID: 12, Name: "x", GPUs: []int{2, 5, 7}, Strict: true})
+	for k, want := range map[string]string{"CUDA_VISIBLE_DEVICES": "0,1,2", "DANLU_CVD": "0,1,2", "DANLU_GPUS": "2,5,7", "DANLU_STRICT": "1"} {
+		if got := get(k); got != want {
+			t.Errorf("严格任务 %s = %q，期望 %q", k, got, want)
+		}
+	}
 }
 
 func TestBuildEnvBashrcPrecedence(t *testing.T) {
@@ -228,13 +239,16 @@ func TestRunScriptRestoresGPUsAfterConda(t *testing.T) {
 	cases := []struct {
 		name, activate string
 		gpus           []int
+		strict         bool
 		want           string
 		restored       bool
 	}{
-		{"改了卡号", `export CUDA_VISIBLE_DEVICES=7`, []int{1, 2}, "cvd=1,2 order=PCI_BUS_ID", true},
-		{"改了编号顺序", `export CUDA_DEVICE_ORDER=FASTEST_FIRST`, []int{3}, "cvd=3 order=PCI_BUS_ID", true},
-		{"去掉了变量", `unset CUDA_VISIBLE_DEVICES`, nil, "cvd= order=PCI_BUS_ID", true},
-		{"没有改动", `true`, []int{0, 4}, "cvd=0,4 order=PCI_BUS_ID", false},
+		{"改了卡号", `export CUDA_VISIBLE_DEVICES=7`, []int{1, 2}, false, "cvd=1,2 order=PCI_BUS_ID", true},
+		{"改了编号顺序", `export CUDA_DEVICE_ORDER=FASTEST_FIRST`, []int{3}, false, "cvd=3 order=PCI_BUS_ID", true},
+		{"去掉了变量", `unset CUDA_VISIBLE_DEVICES`, nil, false, "cvd= order=PCI_BUS_ID", true},
+		{"没有改动", `true`, []int{0, 4}, false, "cvd=0,4 order=PCI_BUS_ID", false},
+		{"严格任务没有改动", `true`, []int{2, 5}, true, "cvd=0,1 order=PCI_BUS_ID", false},
+		{"严格任务改回 0 起的编号", `export CUDA_VISIBLE_DEVICES=2,5`, []int{2, 5}, true, "cvd=0,1 order=PCI_BUS_ID", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -248,7 +262,7 @@ func TestRunScriptRestoresGPUsAfterConda(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := &Runner{RunRoot: filepath.Join(dir, "run"), LogRoot: filepath.Join(dir, "logs"), CondaBase: conda}
-			spec := Spec{JobID: 1, Name: "x", Workdir: dir, CondaEnv: "env", GPUs: c.gpus, Port: 29500,
+			spec := Spec{JobID: 1, Name: "x", Workdir: dir, CondaEnv: "env", GPUs: c.gpus, Port: 29500, Strict: c.strict,
 				Cmd: `echo "cvd=${CUDA_VISIBLE_DEVICES-未设置} order=$CUDA_DEVICE_ORDER"`}
 			run, err := r.prepare(spec)
 			if err != nil {

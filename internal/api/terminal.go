@@ -22,11 +22,11 @@ import (
 
 func (s *Server) terminalManager(w http.ResponseWriter) *terminal.Manager {
 	if !s.Cfg.Terminal.Enabled {
-		writeErr(w, http.StatusNotFound, "接口不存在")
+		writeErrC(w, http.StatusNotFound, "not_found", "接口不存在", nil)
 		return nil
 	}
 	if s.Terminal == nil {
-		writeErr(w, http.StatusServiceUnavailable, "终端服务不可用")
+		writeErrC(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用", nil)
 		return nil
 	}
 	return s.Terminal
@@ -60,7 +60,7 @@ func (s *Server) openTerminal(w http.ResponseWriter, r *http.Request) {
 	if body.JobID != nil {
 		job, err := s.Store.GetJob(*body.JobID)
 		if errors.Is(err, store.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "任务不存在")
+			writeErrC(w, http.StatusNotFound, "job_not_found", "任务不存在", nil)
 			return
 		}
 		if err != nil {
@@ -74,7 +74,7 @@ func (s *Server) openTerminal(w http.ResponseWriter, r *http.Request) {
 			}
 			opt.Workdir = snapshot.RunCodeDir(s.Paths.Run, job.ID)
 			if info, err := os.Stat(opt.Workdir); err != nil || !info.IsDir() {
-				writeErr(w, http.StatusConflict, "这个任务的快照运行目录还不可用")
+				writeErrC(w, http.StatusConflict, "terminal_run_dir_not_ready", "这个任务的快照运行目录还不可用", nil)
 				return
 			}
 		}
@@ -88,15 +88,15 @@ func (s *Server) openTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := m.Open(opt)
 	if errors.Is(err, terminal.ErrLimit) {
-		writeErr(w, http.StatusConflict, err.Error())
+		writeErrE(w, http.StatusConflict, err)
 		return
 	}
 	if errors.Is(err, terminal.ErrUnsupported) {
-		writeErr(w, http.StatusNotImplemented, err.Error())
+		writeErrE(w, http.StatusNotImplemented, err)
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErrE(w, http.StatusBadRequest, err)
 		return
 	}
 	s.Store.Audit(auth.ClientIP(r), "terminal_open", info.Workdir)
@@ -110,7 +110,7 @@ func (s *Server) closeTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	info, ok := m.CloseSession(r.PathValue("id"))
 	if !ok {
-		writeErr(w, http.StatusNotFound, "终端会话不存在")
+		writeErrC(w, http.StatusNotFound, "terminal_not_found", "终端会话不存在", nil)
 		return
 	}
 	s.Store.Audit(auth.ClientIP(r), "terminal_close", info.Workdir)
@@ -140,7 +140,7 @@ func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if !m.Exists(id) {
-		writeErr(w, http.StatusNotFound, terminal.ErrNotFound.Error())
+		writeErrE(w, http.StatusNotFound, terminal.ErrNotFound)
 		return
 	}
 	offset, _ := strconv.ParseUint(r.URL.Query().Get("offset"), 10, 64)

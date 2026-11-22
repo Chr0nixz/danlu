@@ -6,6 +6,7 @@
 
 mod fleet;
 mod http;
+mod messages;
 mod ops;
 mod servers;
 mod ssh;
@@ -23,7 +24,7 @@ pub(crate) fn apply_shortcut(app: &AppHandle, shortcut: &str) -> Result<(), Stri
     let _ = gs.unregister_all();
     if let Err(e) = gs.register(shortcut) {
         let _ = gs.register(old.as_str());
-        return Err(format!("快捷键 {shortcut} 用不了：{e}"));
+        return Err(messages::t("shortcut.failed", &[("shortcut", shortcut), ("e", &e.to_string())]));
     }
     Ok(())
 }
@@ -34,7 +35,7 @@ pub(crate) fn apply_autostart(app: &AppHandle, on: bool) -> Result<(), String> {
         return Ok(());
     }
     let r = if on { al.enable() } else { al.disable() };
-    r.map_err(|e| format!("设置开机自启失败：{e}"))
+    r.map_err(|e| messages::t("autostart.failed", &[("e", &e.to_string())]))
 }
 
 #[tauri::command]
@@ -47,7 +48,7 @@ fn app_version() -> &'static str {
 fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(format!("不打开 {url}"));
+        return Err(messages::t("open_url.denied", &[("url", &url)]));
     }
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
@@ -86,6 +87,7 @@ pub fn run() {
             let data = app.path().app_data_dir()?;
             app.manage(servers::Servers::load(config.join("servers.json"))?);
             app.manage(state::LocalState::load(data.join("state.json")));
+            messages::set_lang(&app.state::<state::LocalState>().resolved_lang());
             app.manage(http::Http::default());
             app.manage(fleet::Fleet::default());
 

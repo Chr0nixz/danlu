@@ -75,6 +75,9 @@ jobs:
       - name: 类型检查（desktop）
         run: pnpm -C desktop typecheck
 
+      - name: i18n 审计（残留用户可见中文）
+        run: node scripts/i18n-audit.mjs
+
       - name: 构建前端和 dist/danlu-linux-amd64
         run: bash scripts/build.sh
 

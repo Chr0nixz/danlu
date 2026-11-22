@@ -1,4 +1,5 @@
 import { duration, jobDuration } from '@danlu/core'
+import { t } from './lib/i18n'
 import { useQuery } from '@tanstack/react-query'
 import { listen } from '@tauri-apps/api/event'
 import { AlertTriangle, Flame, X } from 'lucide-react'
@@ -8,6 +9,7 @@ import { progressOf } from './components/JobList'
 import { cx, Kbd, Progress } from './components/ui'
 import { getPrefs, openMain, type Focus } from './lib/backend'
 import { fleetJobs, isOffline, isUnread, useFleetView, useReadSet } from './lib/fleet'
+import { useLangSync } from './lib/lang'
 import { shortcutLabel } from './lib/platform'
 
 /**
@@ -15,6 +17,7 @@ import { shortcutLabel } from './lib/platform'
  * 从上到下：没看过的失败和异常、各台的空卡、运行中的任务。点任何一项打开主窗口并定位过去。
  */
 export function TrayApp() {
+  useLangSync()
   const view = useFleetView()
   const read = useReadSet(view)
   const prefs = useQuery({ queryKey: ['prefs'], queryFn: getPrefs })
@@ -41,7 +44,7 @@ export function TrayApp() {
         </span>
         <span className="font-semibold">丹炉</span>
         <span className="num ml-auto text-[11.5px] text-fg-3">
-          运行 {running.length} · 排队 {queued}
+          {t('tray.summary', { running: running.length, queued })}
         </span>
       </div>
 
@@ -53,10 +56,10 @@ export function TrayApp() {
                 <X className="size-3.5 shrink-0 text-fail" strokeWidth={2.5} />
                 <span className="num shrink-0 text-[11.5px] text-fg-2">{f.key}</span>
                 <span className="min-w-0 flex-1 truncate">{f.job.name}</span>
-                <span className="num shrink-0 text-[11px] text-fail">{f.job.exit_code !== null ? `exit ${f.job.exit_code}` : '失败'}</span>
+                <span className="num shrink-0 text-[11px] text-fail">{f.job.exit_code !== null ? `exit ${f.job.exit_code}` : t('fail.failed')}</span>
               </button>
             ))}
-            {failures.length > 5 && <p className="px-2 py-1 text-[11.5px] text-fg-3">还有 {failures.length - 5} 个</p>}
+            {failures.length > 5 && <p className="px-2 py-1 text-[11.5px] text-fg-3">{t('tray.more', { n: failures.length - 5 })}</p>}
             {view.alerts.map((a) => (
               <button key={a.key} type="button" onClick={() => go({ kind: 'server', key: a.server })} className="flex min-h-7 w-full items-center gap-2 rounded-[6px] px-2 py-1 text-left hover:bg-fail/[0.08]">
                 <AlertTriangle className={cx('size-3.5 shrink-0', a.kind === 'offline' || a.kind === 'gpu_error' ? 'text-fail' : 'text-warn')} />
@@ -76,19 +79,19 @@ export function TrayApp() {
                 <span className="w-16 shrink-0">
                   <span className="block truncate font-medium">{s.name}</span>
                   <span className={cx('num block text-[11px]', offline ? 'text-fail' : 'text-fg-3')}>
-                    {offline ? (s.updated_at ? shortAgo(s.updated_at) : '连不上') : `空 ${freeCount(s.gpus ?? [])}`}
+                    {offline ? (s.updated_at ? shortAgo(s.updated_at) : t('gpus.offline')) : t('gpus.free_count', { n: freeCount(s.gpus ?? []) })}
                   </span>
                 </span>
                 <MiniCells gpus={s.gpus ?? []} />
               </button>
             )
           })}
-          {view.servers.length === 0 && <p className="px-2 py-4 text-center text-fg-3">还没有添加服务器</p>}
+          {view.servers.length === 0 && <p className="px-2 py-4 text-center text-fg-3">{t('tray.no_servers')}</p>}
         </div>
 
         {running.length > 0 && (
           <div>
-            <div className="px-2 pb-1 text-[11px] text-fg-3">运行中</div>
+            <div className="px-2 pb-1 text-[11px] text-fg-3">{t('status.running')}</div>
             {running.map((f) => {
               const pct = progressOf(f.job)
               const d = jobDuration(f.job)
@@ -109,10 +112,10 @@ export function TrayApp() {
 
       <div className="flex items-center gap-2 border-t border-line px-3 py-2">
         <button type="button" onClick={() => go()} className="h-7 rounded-[6px] bg-primary px-2.5 font-medium text-on-primary hover:opacity-90">
-          打开主窗口
+          {t('tray.open_main')}
         </button>
         <span className="ml-auto flex items-center gap-1.5 text-[11px] text-fg-3">
-          呼出 <Kbd>{shortcutLabel(prefs.data?.shortcut ?? 'Ctrl+Alt+D')}</Kbd>
+          {t('tray.summon')}<Kbd>{shortcutLabel(prefs.data?.shortcut ?? 'Ctrl+Alt+D')}</Kbd>
         </span>
       </div>
     </div>

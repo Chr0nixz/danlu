@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["process", "io-util", "time", "macros", "sy
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 keyring = "4.2"
 sha2 = "0.11"
+sys-locale = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

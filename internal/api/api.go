@@ -34,6 +34,7 @@ import (
 	"danlu/internal/settings"
 	"danlu/internal/snapshot"
 	"danlu/internal/store"
+	"danlu/internal/strict"
 	"danlu/internal/system"
 	"danlu/internal/terminal"
 	"danlu/internal/tlsutil"
@@ -63,6 +64,8 @@ type Server struct {
 	// 单测里可以为 nil，这时设置页不显示这两组
 	Settings *settings.Runtime
 	Pruner   *retention.Pruner
+	// Strict 是严格限卡 root 助手的可用状态，为 nil 时不支持（测试里的 Server）
+	Strict *strict.Monitor
 
 	conda       condaCache
 	comparisons comparisonCache
@@ -80,6 +83,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/queue", s.queue)
 	mux.HandleFunc("POST /api/queue/pause", s.pauseQueue)
 	mux.HandleFunc("POST /api/queue/resume", s.resumeQueue)
+	mux.HandleFunc("GET /api/reservations", s.listReservations)
+	mux.HandleFunc("POST /api/reservations", s.createReservation)
+	mux.HandleFunc("POST /api/reservations/{id}/release", s.changeReservation("reservation_release", func(id int64) (*store.Reservation, error) { return s.Mgr.ReleaseReservation(id) }))
+	mux.HandleFunc("POST /api/reservations/{id}/extend", s.changeReservation("reservation_extend", func(id int64) (*store.Reservation, error) { return s.Mgr.ExtendReservation(id) }))
 	mux.HandleFunc("GET /api/system", s.systemMetrics)
 	mux.HandleFunc("GET /api/resources", s.resources)
 	mux.HandleFunc("GET /api/resources/history", s.resourceHistory)
@@ -117,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/retention", s.updateRuntime(settings.GroupRetention))
 	mux.HandleFunc("POST /api/settings/retention/preview", s.previewRetention)
 	mux.HandleFunc("POST /api/settings/prefs", s.updatePrefs)
+	mux.HandleFunc("POST /api/settings/strict", s.updateStrict)
 	mux.HandleFunc("GET /api/sessions", s.listSessions)
 	mux.HandleFunc("POST /api/sessions/revoke-others", s.revokeOtherSessions)
 	mux.HandleFunc("POST /api/sessions/{id}/revoke", s.revokeSession)
@@ -129,7 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tokens", s.listTokens)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", s.revokeToken)
 
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, 404, "接口不存在") })
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErrC(w, 404, "not_found", "接口不存在", nil) })
 	mux.Handle("/", s.spa())
 	return securityHeaders(s.Auth.Middleware(mux))
 }
@@ -160,7 +168,7 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		writeErr(w, 400, "请求格式错误: "+err.Error())
+		writeErrC(w, 400, "bad_json", "请求格式错误: "+err.Error(), map[string]any{"detail": err.Error()})
 		return false
 	}
 	return true
@@ -169,12 +177,12 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 func (s *Server) jobFromPath(w http.ResponseWriter, r *http.Request) (*store.Job, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeErr(w, 400, "任务 id 无效")
+		writeErrC(w, 400, "job_id_invalid", "任务 id 无效", nil)
 		return nil, false
 	}
 	j, err := s.Store.GetJob(id)
 	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, 404, "任务不存在")
+		writeErrC(w, 404, "job_not_found", "任务不存在", nil)
 		return nil, false
 	}
 	if err != nil {
@@ -227,13 +235,17 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, auth.ErrLocked):
 		mins := int(wait.Minutes()) + 1
-		writeErr(w, 429, fmt.Sprintf("尝试次数过多，请 %d 分钟后再试", mins))
+		writeErrC(w, 429, "login_locked", fmt.Sprintf("尝试次数过多，请 %d 分钟后再试", mins), map[string]any{"minutes": mins})
 	case errors.Is(err, auth.ErrLoginBusy):
-		writeErr(w, 429, err.Error())
+		writeErrE(w, 429, err)
 	case errors.Is(err, auth.ErrBadCredentials):
-		writeErr(w, 401, err.Error())
+		writeErrE(w, 401, err)
 	case errors.Is(err, auth.ErrNeedTOTP), errors.Is(err, auth.ErrBadTOTP):
-		writeJSON(w, 401, map[string]any{"error": err.Error(), "need_totp": true})
+		code := "login_bad_totp"
+		if errors.Is(err, auth.ErrNeedTOTP) {
+			code = "login_need_totp"
+		}
+		writeJSON(w, 401, map[string]any{"error": err.Error(), "need_totp": true, "code": code})
 	case err != nil:
 		writeErr(w, 500, err.Error())
 	default:
@@ -267,6 +279,8 @@ type gpuView struct {
 	gpu.GPU
 	Job      *jobRef    `json:"job"`
 	External []gpu.Proc `json:"external"`
+	// Reservation 是收下这张卡的 GPU 预约；卡上的外部进程仍列在 External 里
+	Reservation *resRef `json:"reservation"`
 }
 
 func (s *Server) gpus(w http.ResponseWriter, r *http.Request) {
@@ -280,9 +294,10 @@ func (s *Server) gpus(w http.ResponseWriter, r *http.Request) {
 			owner[g] = &jobRef{ID: j.ID, Name: j.Name}
 		}
 	}
+	held := s.heldBy()
 	views := make([]gpuView, 0, len(gpus))
 	for _, g := range gpus {
-		v := gpuView{GPU: g, Job: owner[g.Index], External: []gpu.Proc{}}
+		v := gpuView{GPU: g, Job: owner[g.Index], External: []gpu.Proc{}, Reservation: held[g.Index]}
 		if v.Procs == nil {
 			v.Procs = []gpu.Proc{} // procs 约定是数组；nil 会被编码成 null，前端按数组读会崩
 		}
@@ -355,7 +370,7 @@ func (s *Server) resumeQueue(w http.ResponseWriter, r *http.Request) {
 	state, changed, err := s.Mgr.ResumeQueue()
 	if err != nil {
 		if scheduler.IsValidation(err) {
-			writeErr(w, 409, err.Error())
+			writeErrE(w, 409, err)
 			return
 		}
 		writeErr(w, 500, "恢复队列失败: "+err.Error())
@@ -543,7 +558,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		from, fromErr := strconv.ParseInt(q.Get("finished_from_event"), 10, 64)
 		to, toErr := strconv.ParseInt(q.Get("finished_to_event"), 10, 64)
 		if fromErr != nil || toErr != nil || from <= 0 || to < from {
-			writeErr(w, 400, "结束事件范围无效")
+			writeErrC(w, 400, "event_range_invalid", "结束事件范围无效", nil)
 			return
 		}
 		f.FinishedFromEvent, f.FinishedToEvent = from, to
@@ -579,7 +594,7 @@ func (s *Server) tracePath(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, jobtrace.ErrPathRequired) || errors.Is(err, jobtrace.ErrPathTooLong) || errors.Is(err, jobtrace.ErrPathNotAbs) {
 			status = http.StatusBadRequest
 		}
-		writeErr(w, status, err.Error())
+		writeErrE(w, status, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -593,7 +608,7 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.Mgr.Submit(req)
 	if scheduler.IsValidation(err) {
-		writeErr(w, 400, err.Error())
+		writeErrE(w, 400, err)
 		return
 	}
 	if err != nil {
@@ -618,7 +633,7 @@ func (s *Server) jobEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if j.Recipe == nil || len(j.Recipe.EnvHash) != 64 {
-		writeErr(w, 404, "这个任务没有环境包记录")
+		writeErrC(w, 404, "job_env_missing", "这个任务没有环境包记录", nil)
 		return
 	}
 	if _, err := hex.DecodeString(j.Recipe.EnvHash); err != nil {
@@ -627,7 +642,7 @@ func (s *Server) jobEnv(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := os.Open(filepath.Join(s.Paths.Envs, j.Recipe.EnvHash+".txt"))
 	if errors.Is(err, os.ErrNotExist) {
-		writeErr(w, 404, "环境包文件不存在")
+		writeErrC(w, 404, "job_env_file_missing", "环境包文件不存在", nil)
 		return
 	}
 	if err != nil {
@@ -649,7 +664,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.Mgr.Cancel(j.ID)
 	if scheduler.IsValidation(err) {
-		writeErr(w, 400, err.Error())
+		writeErrE(w, 400, err)
 		return
 	}
 	if err != nil {
@@ -673,7 +688,7 @@ func (s *Server) renameJob(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := s.Mgr.Rename(j.ID, body.Name)
 	if scheduler.IsValidation(err) {
-		writeErr(w, 400, err.Error())
+		writeErrE(w, 400, err)
 		return
 	}
 	if err != nil {
@@ -696,11 +711,11 @@ func (s *Server) setJobMemo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Memo == nil {
-		writeErr(w, 400, "请提供备注")
+		writeErrC(w, 400, "memo_required", "请提供备注", nil)
 		return
 	}
 	if err := scheduler.ValidateMemo(*body.Memo); err != nil {
-		writeErr(w, 400, err.Error())
+		writeErrE(w, 400, err)
 		return
 	}
 	updated, err := s.Store.SetMemo(j.ID, *body.Memo)
@@ -724,12 +739,12 @@ func (s *Server) setJobNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.On == nil {
-		writeErr(w, 400, "请提供结束提醒开关")
+		writeErrC(w, 400, "notify_flag_required", "请提供结束提醒开关", nil)
 		return
 	}
 	updated, err := s.Mgr.SetNotifyDone(j.ID, *body.On)
 	if errors.Is(err, scheduler.ErrNotifyFinished) {
-		writeErr(w, http.StatusConflict, err.Error())
+		writeErrE(w, http.StatusConflict, err)
 		return
 	}
 	if err != nil {
@@ -880,7 +895,7 @@ func (s *Server) jobLogDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := os.Open(s.Runner.LogPath(j.ID))
 	if err != nil {
-		writeErr(w, 404, "还没有日志")
+		writeErrC(w, 404, "log_missing", "还没有日志", nil)
 		return
 	}
 	defer f.Close()
@@ -901,11 +916,12 @@ func (s *Server) snapshotMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := snapshot.LoadMeta(s.Paths.Snapshots, j.ID)
 	if err != nil {
-		msg := "这个任务还没有代码快照（任务启动时才生成）"
 		if j.SnapshotNote != "" {
-			msg = j.SnapshotNote
+			// 快照备注是自由文本诊断，不编码
+			writeErr(w, 404, j.SnapshotNote)
+			return
 		}
-		writeErr(w, 404, msg)
+		writeErrC(w, 404, "snapshot_missing", "这个任务还没有代码快照（任务启动时才生成）", nil)
 		return
 	}
 	diff, _ := snapshot.Diff(s.Paths.Snapshots, j.ID)
@@ -922,7 +938,7 @@ func (s *Server) snapshotFile(w http.ResponseWriter, r *http.Request) {
 	}
 	fc, err := snapshot.ReadFile(s.Paths.Snapshots, j.ID, r.URL.Query().Get("path"))
 	if errors.Is(err, os.ErrNotExist) {
-		writeErr(w, 404, "快照里没有这个文件")
+		writeErrC(w, 404, "snapshot_file_missing", "快照里没有这个文件", nil)
 		return
 	}
 	if err != nil {
@@ -958,7 +974,7 @@ func (s *Server) snapshotDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := os.Open(snapshot.ArchivePath(s.Paths.Snapshots, j.ID))
 	if err != nil {
-		writeErr(w, 404, "没有代码快照")
+		writeErrC(w, 404, "snapshot_archive_missing", "没有代码快照", nil)
 		return
 	}
 	defer f.Close()
@@ -982,6 +998,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"terminal_enabled": s.Cfg.Terminal.Enabled,
 		"totp_enabled":     totpEnabled,
 		"security":         s.securityView(s.security()),
+		"strict":           s.strictStatus(),
 	}
 	if s.Cfg.TLS.Mode == config.TLSLocalCA {
 		if fp, err := tlsutil.Fingerprint(tlsutil.FilesIn(s.Paths.TLS).CACert); err == nil {
@@ -1006,7 +1023,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) caCert(w http.ResponseWriter, r *http.Request) {
 	b, err := os.ReadFile(tlsutil.FilesIn(s.Paths.TLS).CACert)
 	if err != nil || s.Cfg.TLS.Mode != config.TLSLocalCA {
-		writeErr(w, 404, "当前没有使用本地 CA")
+		writeErrC(w, 404, "ca_not_local", "当前没有使用本地 CA", nil)
 		return
 	}
 	attachment(w, "danlu-ca.crt", "application/x-x509-ca-cert")
@@ -1034,11 +1051,11 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.Auth.CheckPassword(r.Context(), body.Old) {
-		writeErr(w, 400, "当前密码不正确")
+		writeErrC(w, 400, "password_wrong", "当前密码不正确", nil)
 		return
 	}
 	if len(body.New) < 8 {
-		writeErr(w, 400, "新密码至少 8 位")
+		writeErrC(w, 400, "password_short", "新密码至少 8 位", map[string]any{"min": 8})
 		return
 	}
 	// 只写数据库，不碰 config.toml：配置文件只有命令行会写
@@ -1077,12 +1094,12 @@ func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
 func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeErr(w, 400, "令牌 id 无效")
+		writeErrC(w, 400, "token_id_invalid", "令牌 id 无效", nil)
 		return
 	}
 	name, err := s.Store.RevokeDeviceToken(id)
 	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, 404, "令牌不存在")
+		writeErrC(w, 404, "token_not_found", "令牌不存在", nil)
 		return
 	}
 	if err != nil {

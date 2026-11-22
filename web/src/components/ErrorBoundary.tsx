@@ -1,6 +1,8 @@
+import { apiErrorText } from '@danlu/core'
 import { useQueryClient } from '@tanstack/react-query'
 import { Component, type ErrorInfo, type ReactNode, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router'
+import { t } from '../lib/i18n'
 import { Button, buttonClass, Card, cx, Spinner } from './ui'
 
 /**
@@ -90,26 +92,24 @@ class ErrorBoundary extends Component<Props, { error: unknown; reloading: boolea
 
 function ErrorPanel({ error, full, home }: { error: unknown; full: boolean; home: boolean }) {
   const chunk = isChunkError(error)
-  const message = error instanceof Error ? error.message : String(error)
+  const message = apiErrorText(error)
   const panel = (
     <Card>
       <div role="alert" className="flex flex-col items-center gap-3 px-4 py-8 text-center">
         <div className="space-y-1">
-          <h2 className="text-sm font-semibold text-fg">{chunk ? '页面没能加载' : '这个页面出错了'}</h2>
+          <h2 className="text-sm font-semibold text-fg">{chunk ? t('ui.error_chunk_title') : t('ui.error_title')}</h2>
           <p className="mx-auto max-w-prose text-ui leading-relaxed text-fg-3">
-            {chunk
-              ? '页面文件读取失败：丹炉可能刚升级、服务正在重启，或者网络断了。重新加载会取到最新的页面。'
-              : '有新数据时会自动重试，也可以手动重新加载，任务不受影响。反复出现时，把下面这行报错记下来。'}
+            {chunk ? t('ui.error_chunk_body') : t('ui.error_body')}
           </p>
         </div>
         {!chunk && <p className="max-w-full font-mono text-xs text-fg-2 [overflow-wrap:anywhere]">{message}</p>}
         <div className="flex flex-wrap justify-center gap-2">
           <Button size="sm" variant="primary" onClick={() => location.reload()}>
-            重新加载
+            {t('ui.error_reload')}
           </Button>
           {home && (
             <Link to="/" className={buttonClass('secondary', 'sm')}>
-              回到总览
+              {t('ui.back_home')}
             </Link>
           )}
         </div>

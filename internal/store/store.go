@@ -134,6 +134,26 @@ var migrations = []string{
 	`ALTER TABLE jobs ADD COLUMN memo TEXT NOT NULL DEFAULT '';`,
 	`ALTER TABLE jobs ADD COLUMN profile_json TEXT NOT NULL DEFAULT 'null';`,
 	`ALTER TABLE jobs ADD COLUMN notify_done INTEGER NOT NULL DEFAULT 0;`,
+	// GPU 预约：给丹炉以外的任务占卡。只由调度器写；gpus_held 是已经收下的卡
+	`CREATE TABLE gpu_reservations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		note TEXT NOT NULL DEFAULT '',
+		gpus_req INTEGER NOT NULL,
+		gpus_pinned TEXT NOT NULL DEFAULT '',
+		gpus_held TEXT NOT NULL DEFAULT '',
+		duration INTEGER,
+		status TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		ready_at INTEGER,
+		ends_at INTEGER,
+		ended_at INTEGER,
+		end_reason TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX gpu_reservations_status ON gpu_reservations(status);`,
+	// i18n：失败细分码（host_oom 三态、信号名等），前端和推送据此合成本地化文案；旧记录为空，回退 fail_reason 原文
+	`ALTER TABLE jobs ADD COLUMN fail_detail TEXT NOT NULL DEFAULT '';`,
+	// 严格限卡：任务所在的 systemd 服务名，空串表示普通任务
+	`ALTER TABLE jobs ADD COLUMN unit TEXT NOT NULL DEFAULT '';`,
 }
 
 // keepBackups 是升级前备份最多保留的份数。
@@ -308,48 +328,51 @@ func (s *Store) DeleteSettings(keys ...string) error {
 // ---------- jobs ----------
 
 type Job struct {
-	ID              int64             `json:"id"`
-	Name            string            `json:"name"`
-	Workdir         string            `json:"workdir"`
-	CondaEnv        string            `json:"conda_env"`
-	Cmd             string            `json:"cmd"`
-	Env             map[string]string `json:"env"`
-	InheritBashrc   bool              `json:"inherit_bashrc"`
-	GPUsReq         int               `json:"gpus_req"`
-	GPUsPinned      []int             `json:"gpus_pinned"`
-	GPUsAssigned    []int             `json:"gpus_assigned"`
-	Status          string            `json:"status"`
-	MasterPort      int               `json:"master_port"`
-	PID             int               `json:"pid"`
-	PIDStart        uint64            `json:"-"`
-	BootID          string            `json:"-"` // 占位时的开机标识
-	ExitCode        *int              `json:"exit_code"`
-	FailReason      string            `json:"fail_reason"`
-	FailKind        string            `json:"fail_kind"`
-	Notes           string            `json:"notes"`
-	Memo            string            `json:"memo,omitempty"`
-	NotifyDone      bool              `json:"notify_done"`
-	ExtSeen         bool              `json:"ext_seen"`
-	OOMBase         int64             `json:"-"`
-	TracebackOffset *int64            `json:"-"`
-	Recipe          *Recipe           `json:"recipe,omitempty"`
-	Profile         *ResourceProfile  `json:"profile,omitempty"`
-	OutputDir       string            `json:"output_dir,omitempty"`
-	Starred         bool              `json:"starred"`
-	PrunedAt        *int64            `json:"pruned_at"`
-	Pruning         bool              `json:"-"`
-	CancelRequested bool              `json:"cancel_requested"`
-	TrackerURL      string            `json:"tracker_url"`
-	GitCommit       string            `json:"git_commit"`
-	GitBranch       string            `json:"git_branch"`
-	GitDirty        bool              `json:"git_dirty"`
-	SnapshotOK      bool              `json:"snapshot_ok"`
-	SnapshotNote    string            `json:"snapshot_note"`
-	RerunOf         *int64            `json:"rerun_of"`
-	CodeFrom        *int64            `json:"code_from,omitempty"`
-	CreatedAt       int64             `json:"created_at"`
-	StartedAt       *int64            `json:"started_at"`
-	EndedAt         *int64            `json:"ended_at"`
+	ID            int64             `json:"id"`
+	Name          string            `json:"name"`
+	Workdir       string            `json:"workdir"`
+	CondaEnv      string            `json:"conda_env"`
+	Cmd           string            `json:"cmd"`
+	Env           map[string]string `json:"env"`
+	InheritBashrc bool              `json:"inherit_bashrc"`
+	GPUsReq       int               `json:"gpus_req"`
+	GPUsPinned    []int             `json:"gpus_pinned"`
+	GPUsAssigned  []int             `json:"gpus_assigned"`
+	Status        string            `json:"status"`
+	MasterPort    int               `json:"master_port"`
+	PID           int               `json:"pid"`
+	PIDStart      uint64            `json:"-"`
+	BootID        string            `json:"-"` // 占位时的开机标识
+	ExitCode      *int              `json:"exit_code"`
+	FailReason    string            `json:"fail_reason"`
+	FailKind      string            `json:"fail_kind"`
+	FailDetail    string            `json:"fail_detail,omitempty"`
+	Notes         string            `json:"notes"`
+	Memo          string            `json:"memo,omitempty"`
+	NotifyDone    bool              `json:"notify_done"`
+	ExtSeen       bool              `json:"ext_seen"`
+	OOMBase       int64             `json:"-"`
+	// Unit 是严格限卡任务所在的 systemd 服务名，普通任务为空
+	Unit            string           `json:"unit"`
+	TracebackOffset *int64           `json:"-"`
+	Recipe          *Recipe          `json:"recipe,omitempty"`
+	Profile         *ResourceProfile `json:"profile,omitempty"`
+	OutputDir       string           `json:"output_dir,omitempty"`
+	Starred         bool             `json:"starred"`
+	PrunedAt        *int64           `json:"pruned_at"`
+	Pruning         bool             `json:"-"`
+	CancelRequested bool             `json:"cancel_requested"`
+	TrackerURL      string           `json:"tracker_url"`
+	GitCommit       string           `json:"git_commit"`
+	GitBranch       string           `json:"git_branch"`
+	GitDirty        bool             `json:"git_dirty"`
+	SnapshotOK      bool             `json:"snapshot_ok"`
+	SnapshotNote    string           `json:"snapshot_note"`
+	RerunOf         *int64           `json:"rerun_of"`
+	CodeFrom        *int64           `json:"code_from,omitempty"`
+	CreatedAt       int64            `json:"created_at"`
+	StartedAt       *int64           `json:"started_at"`
+	EndedAt         *int64           `json:"ended_at"`
 }
 
 type Recipe struct {
@@ -380,7 +403,7 @@ func (j *Job) Finished() bool {
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
 	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
-	inherit_bashrc, boot_id, notes, fail_kind, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, memo, profile_json, notify_done`
+	inherit_bashrc, boot_id, notes, fail_kind, fail_detail, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, memo, profile_json, notify_done, unit`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -397,7 +420,7 @@ func scanJob(r scanner) (*Job, error) {
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
 		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
-		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom, &j.Memo, &profileJSON, &j.NotifyDone)
+		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.FailDetail, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom, &j.Memo, &profileJSON, &j.NotifyDone, &j.Unit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -536,12 +559,12 @@ func saveJob(w jobWriter, j *Job) error {
 	}
 	res, err := w.Exec(`UPDATE jobs SET gpus_assigned=?, status=?, master_port=?, pid=?, pid_starttime=?,
 		exit_code=?, fail_reason=?, cancel_requested=?, tracker_url=?, git_commit=?, git_branch=?, git_dirty=?,
-		snapshot_ok=?, snapshot_note=?, started_at=?, ended_at=?, boot_id=?, notes=?, fail_kind=?, ext_seen=?,
-		oom_base=?, traceback_offset=?, recipe_json=?, output_dir=?, profile_json=? WHERE id=?`,
+		snapshot_ok=?, snapshot_note=?, started_at=?, ended_at=?, boot_id=?, notes=?, fail_kind=?, fail_detail=?, ext_seen=?,
+		oom_base=?, traceback_offset=?, recipe_json=?, output_dir=?, profile_json=?, unit=? WHERE id=?`,
 		JoinInts(j.GPUsAssigned), j.Status, j.MasterPort, j.PID, int64(j.PIDStart),
 		exit, j.FailReason, j.CancelRequested, j.TrackerURL, j.GitCommit, j.GitBranch, j.GitDirty,
-		j.SnapshotOK, j.SnapshotNote, j.StartedAt, j.EndedAt, j.BootID, j.Notes, j.FailKind, j.ExtSeen,
-		j.OOMBase, j.TracebackOffset, recipeJSON, j.OutputDir, string(profileJSON), j.ID)
+		j.SnapshotOK, j.SnapshotNote, j.StartedAt, j.EndedAt, j.BootID, j.Notes, j.FailKind, j.FailDetail, j.ExtSeen,
+		j.OOMBase, j.TracebackOffset, recipeJSON, j.OutputDir, string(profileJSON), j.Unit, j.ID)
 	if err != nil {
 		return err
 	}

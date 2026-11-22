@@ -30,14 +30,16 @@ type manifestDocument struct {
 	Environment   map[string]string `json:"environment"`
 	CondaEnv      string            `json:"conda_env,omitempty"`
 	GPUs          []int             `json:"gpus"`
-	Git           manifestGit       `json:"git"`
-	Snapshot      manifestSnapshot  `json:"snapshot"`
-	Recipe        *store.Recipe     `json:"recipe,omitempty"`
-	StartedAt     *int64            `json:"started_at,omitempty"`
-	Status        string            `json:"status"`
-	ExitCode      *int              `json:"exit_code,omitempty"`
-	FailKind      string            `json:"fail_kind,omitempty"`
-	FailReason    string            `json:"fail_reason,omitempty"`
+	// GPUIsolation 是 "strict" 时任务在只放行这些卡的 systemd 服务里运行，程序里的编号从 0 开始
+	GPUIsolation string           `json:"gpu_isolation,omitempty"`
+	Git          manifestGit      `json:"git"`
+	Snapshot     manifestSnapshot `json:"snapshot"`
+	Recipe       *store.Recipe    `json:"recipe,omitempty"`
+	StartedAt    *int64           `json:"started_at,omitempty"`
+	Status       string           `json:"status"`
+	ExitCode     *int             `json:"exit_code,omitempty"`
+	FailKind     string           `json:"fail_kind,omitempty"`
+	FailReason   string           `json:"fail_reason,omitempty"`
 }
 
 type manifestGit struct {
@@ -118,6 +120,7 @@ func ManifestJSON(job *store.Job) ([]byte, error) {
 		Environment:   job.Env,
 		CondaEnv:      job.CondaEnv,
 		GPUs:          job.GPUsAssigned,
+		GPUIsolation:  map[bool]string{true: "strict"}[job.Unit != ""],
 		Git:           manifestGit{Commit: job.GitCommit, Branch: job.GitBranch, Dirty: job.GitDirty},
 		Snapshot:      manifestSnapshot{OK: job.SnapshotOK, Note: job.SnapshotNote},
 		Recipe:        job.Recipe,

@@ -1,5 +1,6 @@
 import { Check, ChevronDown } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { t } from '../lib/i18n'
 import { cx } from './ui'
 
 /** 筛选下拉：[服务器▾] [项目▾] [状态▾]。选了值的按钮带底色 */
@@ -41,7 +42,7 @@ export function FilterMenu<T extends string>({
       </button>
       {open && (
         <div role="listbox" className="pop absolute top-full left-0 z-30 mt-1 min-w-[150px] rounded-[8px] border border-line-strong bg-panel p-1 shadow-float">
-          {[{ value: null as T | null, label: `全部${label}` }, ...options].map((o) => (
+          {[{ value: null as T | null, label: t('filters.all', { label }) }, ...options].map((o) => (
             <button
               key={o.value ?? '*'}
               type="button"

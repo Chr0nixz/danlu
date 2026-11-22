@@ -2,7 +2,8 @@ import { CircleAlert, CircleCheck, CircleDashed, CircleSlash, CircleX, Ellipsis,
 import { useEffect, useId, useRef, useState, type AriaRole, type ButtonHTMLAttributes, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
-import { jobStatusText, statusLabel, type Job, type JobStatus } from '@danlu/core'
+import { apiErrorText, jobStatusText, statusLabel, type Job, type JobStatus } from '@danlu/core'
+import { t } from '../lib/i18n'
 
 export function cx(...c: (string | false | null | undefined)[]) {
   return c.filter(Boolean).join(' ')
@@ -151,7 +152,7 @@ export function StatusIcon({ status, cancelling, decorative, className }: { stat
   const tint = (color: string) => (/(^|\s)text-(fg|ok|fail|warn|run|inv)/.test(className ?? '') ? '' : color)
   const a11y = decorative
     ? { 'aria-hidden': true }
-    : { role: 'img' as AriaRole, 'aria-hidden': false, 'aria-label': status === 'running' && cancelling ? '取消中' : statusLabel[status] }
+    : { role: 'img' as AriaRole, 'aria-hidden': false, 'aria-label': status === 'running' && cancelling ? t('status.cancelling') : statusLabel(status) }
   switch (status) {
     case 'queued':
       return <CircleDashed className={cx(c, tint('text-fg-3'))} {...a11y} />
@@ -197,14 +198,14 @@ export const hitArea = 'relative before:absolute before:-inset-x-2 before:-inset
 /** commit 短哈希；有未提交改动时后面跟一个琥珀色的点。传 to 时是链接，通常指向任务的代码快照 */
 export function Commit({ sha, dirty, to, className }: { sha: string; dirty?: boolean; to?: string; className?: string }) {
   if (!sha) return null
-  const title = dirty ? `${sha}（有未提交的改动）` : sha
+  const title = dirty ? t('ui.commit_dirty', { sha }) : sha
   const body = (
     <>
       {sha.slice(0, 7)}
       {dirty && (
         <>
           <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
-          <span className="sr-only">，有未提交的改动</span>
+          <span className="sr-only">{t('ui.commit_dirty_sr')}</span>
         </>
       )}
     </>
@@ -212,7 +213,7 @@ export function Commit({ sha, dirty, to, className }: { sha: string; dirty?: boo
   const cls = cx('inline-flex items-center gap-1 font-mono text-xs text-fg-2', className)
   // 任务行里它浮在整行链接上面，只有字那么大的话手机上很容易点到整行
   return to ? (
-    <Link to={to} className={cx(cls, hitArea, 'decoration-line-strong hover:text-fg hover:underline')} title={`${title}，查看这次运行的代码`}>
+    <Link to={to} className={cx(cls, hitArea, 'decoration-line-strong hover:text-fg hover:underline')} title={t('ui.commit_view_code', { title })}>
       {body}
     </Link>
   ) : (
@@ -268,7 +269,7 @@ export function Alert({ tone = 'info', role, children, className }: { tone?: key
 /** 操作或加载出错时的提示；role=alert，出现时读屏会立刻读出来。放在日志、代码这类深色终端面板里时传 term */
 export function ErrorBox({ error, className, term = false }: { error: unknown; className?: string; term?: boolean }) {
   if (!error) return null
-  const msg = error instanceof Error ? error.message : String(error)
+  const msg = apiErrorText(error)
   return (
     <Alert tone={term ? 'term' : 'fail'} role="alert" className={className}>
       {msg}
@@ -391,8 +392,8 @@ export function Announcer() {
   const [text, setText] = useState('')
   useEffect(() => {
     let timer = 0
-    announceTo = (t) => {
-      setText((prev) => (prev ? `${prev}；${t}` : t))
+    announceTo = (msg) => {
+      setText((prev) => (prev ? `${prev}${t('ui.announce_separator')}${msg}` : msg))
       window.clearTimeout(timer)
       timer = window.setTimeout(() => setText(''), 5000)
     }

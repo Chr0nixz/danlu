@@ -14,6 +14,9 @@
         if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t
         var f = Number(localStorage.getItem('danlu.log.fontSize'))
         if ([11, 12, 13, 14, 15, 16, 12.5].indexOf(f) >= 0) document.documentElement.style.setProperty('--log-font-size', f + 'px')
+        var l = localStorage.getItem('danlu-lang')
+        if (l !== 'zh-CN' && l !== 'en') l = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh-CN' : 'en'
+        document.documentElement.lang = l
       } catch (e) {}
     </script>
   </head>

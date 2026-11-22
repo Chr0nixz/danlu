@@ -12,4 +12,12 @@ type AlertData struct {
 	Since          int64  `json:"since,omitempty"`
 	Util           *int   `json:"util,omitempty"`
 	DState         *int   `json:"d_state,omitempty"`
+	// stray：任务的进程跑到了没分给它的卡上（GPUs），Assigned 是分给它的卡，Reserved 是其中被预约收下的卡。
+	// CUDAVisible 是某个计算进程启动时的选卡变量（和分配的不一致时才记，空串表示没设）；Graphics 表示全是图形进程
+	Assigned    []int   `json:"assigned,omitempty"`
+	Reserved    []int   `json:"reserved,omitempty"`
+	CUDAVisible *string `json:"cuda_visible,omitempty"`
+	Graphics    bool    `json:"graphics,omitempty"`
+	// strict_unavailable：严格限卡开着但 root 助手不可用，Reason 是 strict 包的原因代码
+	Reason string `json:"reason,omitempty"`
 }

@@ -68,9 +68,19 @@ pub struct Servers {
 impl Servers {
     pub fn load(path: PathBuf) -> Result<Self, String> {
         let list = match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{} 格式错误：{e}", path.display()))?,
+            Ok(text) => serde_json::from_str(&text).map_err(|e| {
+                crate::messages::t(
+                    "servers.file_format",
+                    &[("path", &path.display().to_string()), ("e", &e.to_string())],
+                )
+            })?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-            Err(e) => return Err(format!("读取 {} 失败：{e}", path.display())),
+            Err(e) => {
+                return Err(crate::messages::t(
+                    "servers.file_read",
+                    &[("path", &path.display().to_string()), ("e", &e.to_string())],
+                ))
+            }
         };
         Ok(Servers { path, list: Mutex::new(list) })
     }
@@ -100,13 +110,14 @@ impl Servers {
 }
 
 fn keyring_entry(name: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, name).map_err(|e| format!("打开系统凭据库失败：{e}"))
+    keyring::Entry::new(KEYRING_SERVICE, name)
+        .map_err(|e| crate::messages::t("servers.keyring_open", &[("e", &e.to_string())]))
 }
 
 pub fn load_token(name: &str) -> Result<String, String> {
     keyring_entry(name)?
         .get_password()
-        .map_err(|e| format!("系统凭据库里没有 {name} 的令牌（{e}），请删除这台服务器后重新添加"))
+        .map_err(|e| crate::messages::t("servers.keyring_missing", &[("name", name), ("e", &e.to_string())]))
 }
 
 /// 服务器名会出现在任务编号和凭据库里，只允许简单字符
@@ -117,7 +128,7 @@ fn check_name(name: &str) -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err("名字只能用字母、数字和 - _ .，最长 32 个字符".into())
+        Err(crate::messages::t("servers.name_invalid", &[]))
     }
 }
 
@@ -148,26 +159,29 @@ fn check_info(info: &Info) -> Result<(), String> {
     match info.tls_mode.as_str() {
         "local-ca" => http::check_fingerprint(&info.ca_pem, &info.ca_fingerprint)?,
         "file" | "off" => {}
-        m => return Err(format!("不认识的 HTTPS 模式 {m}")),
+        m => return Err(crate::messages::t("servers.tls_mode_unknown", &[("m", m)])),
     }
     let want_scheme = if info.tls_mode == "off" { "http://" } else { "https://" };
     if !info.base_url.starts_with(want_scheme) {
-        return Err(format!("服务器给出的地址 {} 和 HTTPS 模式 {} 对不上", info.base_url, info.tls_mode));
+        return Err(crate::messages::t(
+            "servers.address_mismatch",
+            &[("url", &info.base_url), ("mode", &info.tls_mode)],
+        ));
     }
     Ok(())
 }
 
 async fn read_info(target: &str) -> Result<Info, String> {
     let out = ssh::run_danlu(target, "info --json").await?;
-    let info: Info = serde_json::from_str(&out)
-        .map_err(|_| format!("{target} 上的 danlu 版本太旧，不支持 info --json，请先升级"))?;
+    let info: Info =
+        serde_json::from_str(&out).map_err(|_| crate::messages::t("servers.too_old", &[("target", target)]))?;
     check_info(&info)?;
     Ok(info)
 }
 
 /// 改端口、重新生成证书之后，重新读取地址和 CA
 pub async fn refresh_info(servers: &Servers, name: &str) -> Result<(), String> {
-    let s = servers.get(name).ok_or_else(|| format!("没有 {name} 这台服务器"))?;
+    let s = servers.get(name).ok_or_else(|| crate::messages::t("http.no_server", &[("name", name)]))?;
     let info = read_info(&s.ssh).await?;
     servers.update(|list| {
         if let Some(x) = list.iter_mut().find(|x| x.name == name) {
@@ -199,13 +213,14 @@ pub async fn add_server(
     ssh::check_target(&target)?;
     check_name(&name)?;
     if servers.get(&name).is_some() {
-        return Err(format!("已经有一台叫 {name} 的服务器了"));
+        return Err(crate::messages::t("servers.duplicate", &[("name", &name)]));
     }
 
     let info = read_info(&target).await?;
 
     let out = ssh::run_danlu(&target, &format!("token create --name {} --json", ssh::quote(&device_name()))).await?;
-    let created: CreatedToken = serde_json::from_str(&out).map_err(|e| format!("解析 token create 的输出失败：{e}"))?;
+    let created: CreatedToken =
+        serde_json::from_str(&out).map_err(|e| crate::messages::t("servers.token_parse", &[("e", &e.to_string())]))?;
     let server = Server {
         name: name.clone(),
         ssh: target.clone(),
@@ -220,12 +235,14 @@ pub async fn add_server(
     // 先用令牌连一次再保存。SSH 通了但 HTTPS 不通，多半是端口没放行，或者公网 IP 配错了
     if let Err(e) = http::probe(&server, &created.token).await {
         let _ = ssh::run_danlu(&target, &format!("token revoke {}", created.id)).await;
-        return Err(format!(
-            "SSH 正常，但连不上 {}：{e}。请检查防火墙或云安全组是否放行了这个端口，以及服务是否在运行（systemctl --user status danlu）",
-            server.base_url
+        return Err(crate::messages::t(
+            "servers.ssh_ok_http_fail",
+            &[("url", &server.base_url), ("e", &e.to_string())],
         ));
     }
-    keyring_entry(&name)?.set_password(&created.token).map_err(|e| format!("令牌存入系统凭据库失败：{e}"))?;
+    keyring_entry(&name)?
+        .set_password(&created.token)
+        .map_err(|e| crate::messages::t("servers.keyring_save", &[("e", &e.to_string())]))?;
     let view = ServerView::from(&server);
     servers.update(|list| list.push(server))?;
     fleet.poke();
@@ -242,12 +259,14 @@ pub async fn remove_server(
     name: String,
     revoke: bool,
 ) -> Result<Option<String>, String> {
-    let server = servers.get(&name).ok_or_else(|| format!("没有 {name} 这台服务器"))?;
+    let server = servers.get(&name).ok_or_else(|| crate::messages::t("http.no_server", &[("name", &name)]))?;
     let mut warning = None;
     if revoke {
         if let Err(e) = ssh::run_danlu(&server.ssh, &format!("token revoke {}", server.token_id)).await {
-            warning =
-                Some(format!("服务器上的令牌没有吊销成功：{e}。可以以后在面板「设置」页手动吊销 #{}", server.token_id));
+            warning = Some(crate::messages::t(
+                "servers.revoke_failed",
+                &[("e", &e.to_string()), ("id", &server.token_id.to_string())],
+            ));
         }
     }
     servers.update(|list| list.retain(|s| s.name != name))?;

@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { Brand } from '../components/Layout'
 import { Button, Card, ErrorBox, Field, Input } from '../components/ui'
 import { api } from '../lib/api'
+import { t } from '../lib/i18n'
 import { ApiError } from '@danlu/core'
 
 export function Login() {
@@ -26,9 +27,9 @@ export function Login() {
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     const next: typeof errs = {}
-    if (!username.trim()) next.username = '请填写用户名'
-    if (!password) next.password = '请填写密码'
-    if (needTotp && !/^\d{6}$/.test(code)) next.code = '请输入手机验证器 App 里的 6 位数字'
+    if (!username.trim()) next.username = t('login.username_required')
+    if (!password) next.password = t('login.password_required')
+    if (needTotp && !/^\d{6}$/.test(code)) next.code = t('login.totp_invalid')
     setErrs(next)
     const first = (['username', 'password', 'code'] as const).find((k) => next[k])
     if (first) {
@@ -57,20 +58,20 @@ export function Login() {
         <div className="mb-6 flex flex-col items-center gap-3 text-center">
           <Brand className="size-10 rounded-lg [&_svg]:size-5" />
           <div>
-            <h1 className="text-lg font-semibold">登录丹炉</h1>
-            <p className="mt-0.5 text-ui text-fg-3">GPU 训练任务管理</p>
+            <h1 className="text-lg font-semibold">{t('login.title')}</h1>
+            <p className="mt-0.5 text-ui text-fg-3">{t('login.subtitle')}</p>
           </div>
         </div>
         <Card className="p-5">
           <form onSubmit={submit} noValidate className="space-y-4">
-            <Field label="用户名" error={errs.username} errorId={`${ids.username}-err`}>
+            <Field label={t('login.username')} error={errs.username} errorId={`${ids.username}-err`}>
               <Input {...field('username')} value={username} onChange={(e) => (setUsername(e.target.value), clear('username'))} autoComplete="username" autoCapitalize="off" />
             </Field>
-            <Field label="密码" error={errs.password} errorId={`${ids.password}-err`}>
+            <Field label={t('login.password')} error={errs.password} errorId={`${ids.password}-err`}>
               <Input {...field('password')} type="password" value={password} onChange={(e) => (setPassword(e.target.value), clear('password'))} autoComplete="current-password" autoFocus />
             </Field>
             {needTotp && (
-              <Field label="两步验证码" error={errs.code} errorId={`${ids.code}-err`}>
+              <Field label={t('login.totp')} error={errs.code} errorId={`${ids.code}-err`}>
                 <Input
                   {...field('code')}
                   value={code}
@@ -84,11 +85,11 @@ export function Login() {
             )}
             <ErrorBox error={error} />
             <Button type="submit" variant="primary" className="w-full" loading={loading}>
-              登录
+              {t('login.submit')}
             </Button>
           </form>
         </Card>
-        <p className="mt-4 text-center text-xs text-fg-3">建议把带安全入口的完整地址存成书签</p>
+        <p className="mt-4 text-center text-xs text-fg-3">{t('login.bookmark_hint')}</p>
       </div>
     </div>
   )

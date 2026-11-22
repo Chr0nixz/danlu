@@ -4,6 +4,7 @@ import { useId, useState, type FormEvent } from 'react'
 import { fmtTime, type DeviceToken, type LoginSession, type SecurityPatch, type SecuritySettings, type Settings } from '@danlu/core'
 import { announce, Button, Dialog, ErrorBox, Field, FieldError, FormRow, Input, Select, Skeleton } from '../../components/ui'
 import { api } from '../../lib/api'
+import { t } from '../../lib/i18n'
 import { KV, Rows, SaveFooter, Section } from './shared'
 import { useServerForm, type FormErrors } from './useServerForm'
 
@@ -15,9 +16,9 @@ export function Security({ st }: { st: Settings }) {
         <SecuritySection security={st.security} totpEnabled={!!st.totp_enabled} />
       ) : (
         // 旧版服务器没有安全设置，两步验证状态仍显示在这里
-        <Section title="两步验证">
+        <Section title={t('settings.security.totp')}>
           <dl className="-my-2">
-            <KV k="两步验证" v={<TotpStatus enabled={!!st.totp_enabled} />} />
+            <KV k={t('settings.security.totp')} v={<TotpStatus enabled={!!st.totp_enabled} />} />
           </dl>
         </Section>
       )}
@@ -26,7 +27,7 @@ export function Security({ st }: { st: Settings }) {
       <TokensSection />
       <Button className="w-full sm:w-auto" loading={logout.isPending} onClick={() => logout.mutate()}>
         <LogOut />
-        退出登录
+        {t('settings.security.logout')}
       </Button>
     </>
   )
@@ -35,11 +36,11 @@ export function Security({ st }: { st: Settings }) {
 function TotpStatus({ enabled }: { enabled: boolean }) {
   return (
     <>
-      {enabled ? '已开启' : '未开启'}
+      {enabled ? t('settings.on') : t('settings.off')}
       <span className="text-fg-3">
-        {' · 在服务器上运行 '}
+        {t('settings.security.totp_run')}
         <code className="font-mono text-[12.5px]">{enabled ? 'danlu totp disable' : 'danlu totp enable'}</code>
-        {enabled ? ' 关闭' : ' 开启'}
+        {enabled ? t('settings.security.totp_disable_word') : t('settings.security.totp_enable_word')}
       </span>
     </>
   )
@@ -64,11 +65,22 @@ function randomEntrance() {
 }
 
 type TtlUnit = 'm' | 'h' | 'd'
-const ttlUnits: { value: TtlUnit; label: string; seconds: number }[] = [
-  { value: 'm', label: '分钟', seconds: 60 },
-  { value: 'h', label: '小时', seconds: 3600 },
-  { value: 'd', label: '天', seconds: 86400 },
+const ttlUnits: { value: TtlUnit; seconds: number }[] = [
+  { value: 'm', seconds: 60 },
+  { value: 'h', seconds: 3600 },
+  { value: 'd', seconds: 86400 },
 ]
+/** 单位词按当前语言取值，不在模块级常量里冻结 */
+function ttlUnitLabel(u: TtlUnit): string {
+  switch (u) {
+    case 'm':
+      return t('settings.unit_m')
+    case 'h':
+      return t('settings.unit_h')
+    case 'd':
+      return t('settings.unit_d')
+  }
+}
 const unitSeconds = (u: TtlUnit) => ttlUnits.find((x) => x.value === u)!.seconds
 
 /** 表单里都是输入框里的原样文字；有没有改动按文字比，免得服务器上不是整分钟的旧值被悄悄改掉 */
@@ -95,15 +107,15 @@ function validateSecurity(f: SecurityForm, changed: Record<keyof SecurityForm, b
   const found: FormErrors<SecurityForm> = {}
   // 只查改过的项：config.toml 里超出面板范围的旧值照样生效，不拦着改别的项
   if (changed.entrance) {
-    if (!/^[a-z0-9]{6,64}$/.test(f.entrance)) found.entrance = '需要 6–64 位小写字母或数字'
-    else if (reservedEntrances.includes(f.entrance)) found.entrance = '不能和面板页面重名'
+    if (!/^[a-z0-9]{6,64}$/.test(f.entrance)) found.entrance = t('settings.security.err_entrance')
+    else if (reservedEntrances.includes(f.entrance)) found.entrance = t('settings.security.err_entrance_reserved')
   }
   if (changed.ttl) {
     const sec = Number(f.ttl.amount) * unitSeconds(f.ttl.unit)
-    if (!isInt(f.ttl.amount) || sec < 600 || sec > 365 * 86400) found.ttl = '需要在 10 分钟到 365 天之间'
+    if (!isInt(f.ttl.amount) || sec < 600 || sec > 365 * 86400) found.ttl = t('settings.security.err_ttl')
   }
-  if (changed.maxFailures && (!isInt(f.maxFailures) || Number(f.maxFailures) < 1 || Number(f.maxFailures) > 100)) found.maxFailures = '失败次数需要是 1 到 100 之间的整数'
-  if (changed.lockout && (!isInt(f.lockout) || Number(f.lockout) < 1 || Number(f.lockout) > 1440)) found.lockout = '锁定时长需要是 1 到 1440 分钟（24 小时）之间的整数'
+  if (changed.maxFailures && (!isInt(f.maxFailures) || Number(f.maxFailures) < 1 || Number(f.maxFailures) > 100)) found.maxFailures = t('settings.security.err_max_failures')
+  if (changed.lockout && (!isInt(f.lockout) || Number(f.lockout) < 1 || Number(f.lockout) > 1440)) found.lockout = t('settings.security.err_lockout')
   return found
 }
 
@@ -123,7 +135,7 @@ function SecuritySection({ security, totpEnabled }: { security: SecuritySettings
     fromResult: (r) => formFrom(r.security),
     onSaved: () => {
       setConfirming(false)
-      announce('安全设置已保存')
+      announce(t('settings.section_saved', { title: t('settings.security.title') }))
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['settings'] })
@@ -144,9 +156,9 @@ function SecuritySection({ security, totpEnabled }: { security: SecuritySettings
 
   return (
     <form onSubmit={submit} noValidate>
-      <Section title="安全设置" desc="保存后立即生效，不用重启服务。" footer={<SaveFooter saved={f.saved} dirty={f.dirty} pending={m.isPending && !confirming} />}>
+      <Section title={t('settings.security.title')} desc={t('settings.security.desc')} footer={<SaveFooter saved={f.saved} dirty={f.dirty} pending={m.isPending && !confirming} />}>
         <Rows>
-          <FormRow label="安全入口" htmlFor={f.id('entrance')} hint="不经过入口地址，所有页面都返回 404。更换后旧地址立即失效。">
+          <FormRow label={t('settings.security.entrance')} htmlFor={f.id('entrance')} hint={t('settings.security.entrance_hint')}>
             <div className="flex gap-2">
               <Input
                 {...f.field('entrance', true)}
@@ -161,23 +173,23 @@ function SecuritySection({ security, totpEnabled }: { security: SecuritySettings
               />
               <Button onClick={() => f.edit('entrance', randomEntrance())}>
                 <Dices />
-                随机生成
+                {t('settings.security.random')}
               </Button>
             </div>
             <p className="mt-1.5 break-all text-xs leading-relaxed text-fg-3">
-              {changed.entrance ? '新地址 ' : '完整地址 '}
+              {changed.entrance ? t('settings.security.new_url') : t('settings.security.full_url')}
               <span className="font-mono text-fg-2">{newURL}</span>
             </p>
             <FieldError id={f.errId('entrance')}>{errors.entrance}</FieldError>
           </FormRow>
 
-          <FormRow label="登录有效期" hint="登录和入口 cookie 的有效期，10 分钟到 365 天。缩短后，已有的登录也按新时长到期。" describedBy={f.describe('ttl')}>
+          <FormRow label={t('settings.security.ttl')} hint={t('settings.security.ttl_hint')} describedBy={f.describe('ttl')}>
             <div className="flex items-center gap-2">
-              <Input {...f.field('ttl')} aria-label="时长" className="w-24!" inputMode="numeric" value={form.ttl.amount} onChange={(e) => f.edit('ttl', { ...form.ttl, amount: e.target.value.trim() })} />
-              <Select aria-label="时长单位" className="w-24!" value={form.ttl.unit} onChange={(e) => f.edit('ttl', { ...form.ttl, unit: e.target.value as TtlUnit })}>
+              <Input {...f.field('ttl')} aria-label={t('settings.security.ttl_amount_aria')} className="w-24!" inputMode="numeric" value={form.ttl.amount} onChange={(e) => f.edit('ttl', { ...form.ttl, amount: e.target.value.trim() })} />
+              <Select aria-label={t('settings.security.ttl_unit_aria')} className="w-24!" value={form.ttl.unit} onChange={(e) => f.edit('ttl', { ...form.ttl, unit: e.target.value as TtlUnit })}>
                 {ttlUnits.map((u) => (
                   <option key={u.value} value={u.value}>
-                    {u.label}
+                    {ttlUnitLabel(u.value)}
                   </option>
                 ))}
               </Select>
@@ -186,28 +198,28 @@ function SecuritySection({ security, totpEnabled }: { security: SecuritySettings
           </FormRow>
 
           <FormRow
-            label="登录失败锁定"
-            hint="同一 IP 连续输错密码或验证码达到次数后锁定，锁定期间密码对了也不能登录。"
+            label={t('settings.security.lockout')}
+            hint={t('settings.security.lockout_hint')}
             describedBy={[errors.maxFailures && f.errId('maxFailures'), errors.lockout && f.errId('lockout')].filter(Boolean).join(' ') || undefined}
           >
             {/* 窄屏放不下一行时，在"次，"后面折行，不把"分钟"单独甩到下一行 */}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-ui text-fg-2">
               <span className="flex items-center gap-2">
-                连续输错
-                <Input {...f.field('maxFailures')} aria-label="失败次数上限" className="w-20!" inputMode="numeric" value={form.maxFailures} onChange={(e) => f.edit('maxFailures', e.target.value.trim())} />
-                次，
+                {t('settings.security.lockout_prefix')}
+                <Input {...f.field('maxFailures')} aria-label={t('settings.security.max_failures_aria')} className="w-20!" inputMode="numeric" value={form.maxFailures} onChange={(e) => f.edit('maxFailures', e.target.value.trim())} />
+                {t('settings.security.lockout_times')}
               </span>
               <span className="flex items-center gap-2">
-                锁定
-                <Input {...f.field('lockout')} aria-label="锁定分钟数" className="w-20!" inputMode="numeric" value={form.lockout} onChange={(e) => f.edit('lockout', e.target.value.trim())} />
-                分钟
+                {t('settings.security.lockout_lock')}
+                <Input {...f.field('lockout')} aria-label={t('settings.security.lockout_minutes_aria')} className="w-20!" inputMode="numeric" value={form.lockout} onChange={(e) => f.edit('lockout', e.target.value.trim())} />
+                {t('settings.unit_m')}
               </span>
             </div>
             <FieldError id={f.errId('maxFailures')}>{errors.maxFailures}</FieldError>
             <FieldError id={f.errId('lockout')}>{errors.lockout}</FieldError>
           </FormRow>
 
-          <FormRow label="两步验证" hint="登录时除了密码，还要输入验证器 App 里的 6 位验证码。">
+          <FormRow label={t('settings.security.totp')} hint={t('settings.security.totp_hint')}>
             <p className="text-ui leading-relaxed text-fg">
               <TotpStatus enabled={totpEnabled} />
             </p>
@@ -223,18 +235,18 @@ function SecuritySection({ security, totpEnabled }: { security: SecuritySettings
 
       {confirming && (
         <Dialog
-          title="更换安全入口？"
+          title={t('settings.security.change_title')}
           onClose={() => setConfirming(false)}
           footer={
             <>
-              <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>暂不更换</Button>
+              <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>{t('settings.security.change_cancel')}</Button>
               <Button variant="primary" loading={m.isPending} onClick={() => m.mutate()}>
-                更换并保存
+                {t('settings.security.change_confirm')}
               </Button>
             </>
           }
         >
-          <p>旧地址立即失效。这个浏览器会自动换上新入口；其他打开过面板的设备，以及手机推送里的链接，要先用新地址打开一次。已登录的会话不受影响。</p>
+          <p>{t('settings.security.change_body')}</p>
           <p className="break-all rounded-md border border-line bg-subtle px-3 py-2 font-mono text-xs text-fg">{newURL}</p>
           <ErrorBox error={m.error} />
         </Dialog>
@@ -266,11 +278,11 @@ function PasswordSection() {
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const found: typeof errs = {}
-    if (!old) found.old = '请填写当前密码'
-    if (!next) found.next = '请填写新密码'
-    else if (Array.from(next).length < 8) found.next = '新密码至少 8 位'
-    if (!again) found.again = '请再输入一次新密码'
-    else if (next && next !== again) found.again = '两次输入的新密码不一致'
+    if (!old) found.old = t('settings.security.err_old_required')
+    if (!next) found.next = t('settings.security.err_new_required')
+    else if (Array.from(next).length < 8) found.next = t('settings.security.err_new_short')
+    if (!again) found.again = t('settings.security.err_again_required')
+    else if (next && next !== again) found.again = t('settings.security.err_mismatch')
     setErrs(found)
     const first = (['old', 'next', 'again'] as const).find((k) => found[k])
     if (first) {
@@ -282,30 +294,30 @@ function PasswordSection() {
   return (
     <form onSubmit={submit} noValidate>
       <Section
-        title="修改密码"
-        desc="至少 8 位。修改后，其他设备上的登录会失效。"
+        title={t('settings.security.password')}
+        desc={t('settings.security.password_desc')}
         footer={
           <>
             {m.isSuccess && (
               <span className="flex items-center gap-1.5 text-ui text-ok">
                 <ShieldCheck className="size-4" />
-                密码已修改
+                {t('settings.security.password_saved')}
               </span>
             )}
             <Button type="submit" size="sm" variant="primary" className="ml-auto" loading={m.isPending}>
-              保存
+              {t('common.save')}
             </Button>
           </>
         }
       >
         <div className="grid gap-3 sm:grid-cols-3">
-          <Field label="当前密码" error={errs.old} errorId={`${ids.old}-err`}>
+          <Field label={t('settings.security.password_old')} error={errs.old} errorId={`${ids.old}-err`}>
             <Input {...field('old')} type="password" value={old} onChange={(e) => (setOld(e.target.value), clear('old'))} autoComplete="current-password" />
           </Field>
-          <Field label="新密码" error={errs.next} errorId={`${ids.next}-err`}>
+          <Field label={t('settings.security.password_new')} error={errs.next} errorId={`${ids.next}-err`}>
             <Input {...field('next')} type="password" value={next} onChange={(e) => (setNext(e.target.value), clear('next'))} autoComplete="new-password" />
           </Field>
-          <Field label="再输入一次" error={errs.again} errorId={`${ids.again}-err`}>
+          <Field label={t('settings.security.password_again')} error={errs.again} errorId={`${ids.again}-err`}>
             <Input {...field('again')} type="password" value={again} onChange={(e) => (setAgain(e.target.value), clear('again'))} autoComplete="new-password" />
           </Field>
         </div>
@@ -319,7 +331,7 @@ function PasswordSection() {
 
 /** 从 User-Agent 认出浏览器和系统，认不出时照实说 */
 function deviceName(ua: string) {
-  if (!ua) return '未知设备'
+  if (!ua) return t('settings.security.unknown_device')
   const browser = /Edg(A|iOS)?\//.test(ua)
     ? 'Edge'
     : /OPR\//.test(ua)
@@ -330,7 +342,7 @@ function deviceName(ua: string) {
           ? 'Chrome'
           : /Safari\//.test(ua)
             ? 'Safari'
-            : ua.split(/[\s/]/)[0] || '浏览器'
+            : ua.split(/[\s/]/)[0] || t('settings.security.browser_fallback')
   // iPhone 和 iPad 的 UA 里也有 "Mac OS X"，安卓的 UA 里也有 "Linux"，先判断它们
   const os = /Android/.test(ua)
     ? 'Android'
@@ -358,21 +370,21 @@ function SessionsSection() {
     qc.invalidateQueries({ queryKey: ['sessions'] })
     qc.invalidateQueries({ queryKey: ['audit'] })
   }
-  const revoke = useMutation({ mutationFn: (id: string) => api.revokeSession(id), onSuccess: () => announce('已注销这个会话'), onSettled: refresh })
-  const others = useMutation({ mutationFn: api.revokeOtherSessions, onSuccess: (r) => announce(`已注销 ${r.revoked} 个会话`), onSettled: refresh })
+  const revoke = useMutation({ mutationFn: (id: string) => api.revokeSession(id), onSuccess: () => announce(t('settings.security.session_revoked')), onSettled: refresh })
+  const others = useMutation({ mutationFn: api.revokeOtherSessions, onSuccess: (r) => announce(t('settings.security.sessions_revoked', { n: r.revoked })), onSettled: refresh })
   const list: LoginSession[] = q.data?.sessions ?? []
   const otherCount = list.filter((s) => !s.current).length
   const error = revoke.error || others.error
   return (
     <Section
-      title="登录会话"
-      desc="用密码登录、还没到期的浏览器。注销后那台设备需要重新登录；桌面客户端用设备令牌连接，不在这里。"
+      title={t('settings.security.sessions')}
+      desc={t('settings.security.sessions_desc')}
       footer={
         otherCount > 1 ? (
           <>
-            <span className="min-w-0 flex-1 text-ui text-fg-2">另有 {otherCount} 个设备登录着</span>
+            <span className="min-w-0 flex-1 text-ui text-fg-2">{t('settings.security.other_devices', { n: otherCount })}</span>
             <Button size="sm" variant="danger" loading={others.isPending} onClick={() => others.mutate()}>
-              注销其他设备
+              {t('settings.security.revoke_others')}
             </Button>
           </>
         ) : undefined
@@ -383,7 +395,7 @@ function SessionsSection() {
       ) : q.error ? (
         <ErrorBox error={q.error} />
       ) : list.length === 0 ? (
-        <p className="text-ui text-fg-3">没有用密码登录的浏览器。</p>
+        <p className="text-ui text-fg-3">{t('settings.security.sessions_empty')}</p>
       ) : (
         <Rows>
           {list.map((s) => (
@@ -393,15 +405,16 @@ function SessionsSection() {
                   <span className="truncate font-medium" title={s.user_agent || undefined}>
                     {deviceName(s.user_agent)}
                   </span>
-                  {s.current && <span className="shrink-0 rounded border border-line-strong px-1.5 text-xs leading-[18px] text-fg-2">当前设备</span>}
+                  {s.current && <span className="shrink-0 rounded border border-line-strong px-1.5 text-xs leading-[18px] text-fg-2">{t('settings.security.current_device')}</span>}
                 </div>
                 <div className="truncate text-xs text-fg-3">
-                  <span className="font-mono">{s.ip || '未知 IP'}</span> · 登录于 {fmtTime(s.created_at).slice(5, 16)} · {fmtTime(s.expires_at).slice(5, 16)} 到期
+                  <span className="font-mono">{s.ip || t('settings.security.unknown_ip')}</span>
+                  {t('settings.security.session_times', { created: fmtTime(s.created_at).slice(5, 16), expires: fmtTime(s.expires_at).slice(5, 16) })}
                 </div>
               </div>
               {!s.current && (
                 <Button size="sm" variant="danger" loading={revoke.isPending && revoke.variables === s.id} onClick={() => revoke.mutate(s.id)}>
-                  注销
+                  {t('settings.security.revoke')}
                 </Button>
               )}
             </div>
@@ -425,10 +438,10 @@ function TokensSection() {
   const [revoking, setRevoking] = useState<DeviceToken | null>(null)
   return (
     <Section
-      title="设备令牌"
+      title={t('settings.security.tokens')}
       desc={
         <>
-          桌面客户端用令牌连接，不需要密码，长期有效。令牌在服务器上用 <code className="font-mono text-[12px]">danlu token create</code> 创建，客户端添加服务器时会自动完成。吊销后立即失效。
+          {t('settings.security.tokens_desc_1')}<code className="font-mono text-[12px]">danlu token create</code>{t('settings.security.tokens_desc_2')}
         </>
       }
     >
@@ -437,26 +450,26 @@ function TokensSection() {
       ) : q.error ? (
         <ErrorBox error={q.error} />
       ) : q.data!.tokens.length === 0 ? (
-        <p className="text-ui text-fg-3">还没有设备连接过。</p>
+        <p className="text-ui text-fg-3">{t('settings.security.tokens_empty')}</p>
       ) : (
         <Rows>
-          {q.data!.tokens.map((t) => (
-            <div key={t.id} className="flex items-center gap-3 px-4 py-2.5 text-ui sm:px-5">
+          {q.data!.tokens.map((tok) => (
+            <div key={tok.id} className="flex items-center gap-3 px-4 py-2.5 text-ui sm:px-5">
               <div className="min-w-0 flex-1">
-                <div className="truncate font-medium">{t.name}</div>
+                <div className="truncate font-medium">{tok.name}</div>
                 <div className="truncate text-xs text-fg-3">
-                  创建于 {fmtTime(t.created_at).slice(0, 16)} ·{' '}
-                  {t.last_used_at ? (
+                  {t('settings.security.token_created', { time: fmtTime(tok.created_at).slice(0, 16) })}{' '}
+                  {tok.last_used_at ? (
                     <>
-                      最后使用 {fmtTime(t.last_used_at).slice(5, 16)} <span className="font-mono">{t.last_ip}</span>
+                      {t('settings.security.token_last_used', { time: fmtTime(tok.last_used_at).slice(5, 16) })} <span className="font-mono">{tok.last_ip}</span>
                     </>
                   ) : (
-                    '从未使用'
+                    t('settings.security.token_never_used')
                   )}
                 </div>
               </div>
-              <Button size="sm" variant="danger" onClick={() => setRevoking(t)}>
-                吊销
+              <Button size="sm" variant="danger" onClick={() => setRevoking(tok)}>
+                {t('settings.security.token_revoke')}
               </Button>
             </div>
           ))}
@@ -467,10 +480,10 @@ function TokensSection() {
   )
 }
 
-function RevokeDialog({ token: t, onClose }: { token: DeviceToken; onClose: () => void }) {
+function RevokeDialog({ token: tok, onClose }: { token: DeviceToken; onClose: () => void }) {
   const qc = useQueryClient()
   const revoke = useMutation({
-    mutationFn: () => api.revokeToken(t.id),
+    mutationFn: () => api.revokeToken(tok.id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tokens'] })
       qc.invalidateQueries({ queryKey: ['audit'] })
@@ -479,18 +492,18 @@ function RevokeDialog({ token: t, onClose }: { token: DeviceToken; onClose: () =
   })
   return (
     <Dialog
-      title={`吊销「${t.name}」的令牌？`}
+      title={t('settings.security.revoke_title', { name: tok.name })}
       onClose={onClose}
       footer={
         <>
-          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>保留</Button>
+          <Button onClick={(e) => e.currentTarget.closest('dialog')?.close()}>{t('settings.security.revoke_keep')}</Button>
           <Button variant="danger" loading={revoke.isPending} onClick={() => revoke.mutate()}>
-            吊销
+            {t('settings.security.token_revoke')}
           </Button>
         </>
       }
     >
-      <p>这台设备上的客户端会立即断开。要重新连接，在客户端里重新添加这台服务器。</p>
+      <p>{t('settings.security.revoke_body')}</p>
       <ErrorBox error={revoke.error} />
     </Dialog>
   )

@@ -6,11 +6,13 @@ import (
 	"log"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"danlu/internal/gpu"
 	"danlu/internal/store"
+	"danlu/internal/strict"
 )
 
 // WaitReasons 不取调度锁：面板每次读任务都会调用，不能等调度器收尾。返回的 map 只读。
@@ -73,6 +75,18 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 	if m.opt.SilenceAlert > 0 {
 		m.silentAlerts(now, running, gpus, gpuErr == nil && !gpuAt.IsZero(), desired)
 	}
+	// 越界告警在任务运行期间只发一次：评估阶段的渲染进程时有时无，清掉再出现会反复推送。
+	// GPU 数据不可信时也照留，任务结束才清
+	runningIDs := make(map[int64]bool, len(running))
+	for _, j := range running {
+		runningIDs[j.ID] = true
+	}
+	for key, previous := range m.alerts {
+		if previous.Kind == store.EventAlertRaised && strings.HasPrefix(key, "stray:") && previous.JobID != nil && runningIDs[*previous.JobID] {
+			e := previous
+			desired[key] = &e
+		}
+	}
 	if gpuErr != nil {
 		if m.gpuErrorSince.IsZero() {
 			m.gpuErrorSince = now
@@ -132,6 +146,13 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 				raise(fmt.Sprintf("external:%d:job%d", id, other), &id, *a)
 			}
 		}
+		held := m.heldCardsLocked()
+		for _, j := range running {
+			if a := strayAlert(j, gpus, held); a != nil && desired[fmt.Sprintf("stray:%d", j.ID)] == nil {
+				id := j.ID
+				raise(fmt.Sprintf("stray:%d", id), &id, *a)
+			}
+		}
 	}
 	if m.opt.Disks != nil {
 		disks, diskAt, diskErr := m.opt.Disks.Latest()
@@ -163,9 +184,13 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 			reason = "等待磁盘余量确认"
 		case (head.GPUsReq > 0 || len(head.GPUsPinned) > 0) && (gpuErr != nil || len(gpus) == 0):
 			reason = "GPU 数据不可用"
+		case !m.strictReadyLocked():
+			reason = "严格限卡不可用：" + strictReasonText(m.opt.StrictGate)
+		case (head.GPUsReq > 0 || len(head.GPUsPinned) > 0) && !m.resReady:
+			reason = "等待读取 GPU 预约"
 		default:
 			var blocked, unknownBlock bool
-			reason, blocked, unknownBlock = allocationWait(gpus, running, head)
+			reason, blocked, unknownBlock = allocationWait(gpus, running, m.heldCardsLocked(), head)
 			if blocked {
 				id := head.ID
 				kind := "blocked"
@@ -176,6 +201,12 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 			}
 		}
 		waitReasons[head.ID] = reason
+	}
+	// 严格限卡开着、助手查过且不可用：告警一次（启动后还没查完的"正在检查"不算）。助手恢复后自动清除
+	if m.opt.Strict && m.opt.StrictGate != nil {
+		if st := m.opt.StrictGate.Status(); !st.OK && st.CheckedAt > 0 && st.Reason != strict.ReasonChecking {
+			raise("strict_unavailable", nil, store.AlertData{Type: "strict_unavailable", Reason: st.Reason})
+		}
 	}
 	// 未能读到队列状态时不能判断队首是否已经解除阻塞。
 	if queueErr != nil {
@@ -212,7 +243,79 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 	return nil
 }
 
-func allocationWait(gpus []gpu.GPU, running []*store.Job, head *store.Job) (string, bool, bool) {
+// allocationWait 写队首的等待原因。held 是预约收下的卡：和任务分到的卡一样算自有占用，
+// 卡上的进程多半是用户自己的任务，不写成阻塞原因，也不触发"队首等待外部进程"。
+// strictReasonText 是等待原因里的说明，写明怎么修
+func strictReasonText(gate StrictGate) string {
+	if gate == nil {
+		return "这个 danlu 没有配置严格限卡"
+	}
+	st := gate.Status()
+	switch st.Reason {
+	case strict.ReasonChecking:
+		return "正在检查 root 助手"
+	case strict.ReasonNotInstalled:
+		return "没有安装 root 助手，在服务器上运行 sudo danlu strict install"
+	case strict.ReasonNoSudo:
+		return "sudo 没有放行 root 助手，在服务器上重新运行 sudo danlu strict install"
+	case strict.ReasonProtocol:
+		return "root 助手和 danlu 版本不一致，在服务器上重新运行 sudo danlu strict install"
+	case strict.ReasonUnsupported:
+		return "只支持 Linux"
+	}
+	detail := []rune(st.Detail)
+	if len(detail) > 120 {
+		detail = append(detail[:120], '…')
+	}
+	return "root 助手出错：" + string(detail)
+}
+
+// strayAlert 汇总任务跑到没分给它的卡上的进程，没有时返回 nil。
+// 丹炉只能用 CUDA_VISIBLE_DEVICES 告诉任务用哪些卡，拦不住程序自己选卡：
+// 启动器或脚本改写了这个变量（deepspeed --num_gpus、accelerate 的 gpu_ids、export），
+// 或者是 EGL/OpenGL 渲染（不看这个变量）。告警里带上能分清这两种情况的事实。
+func strayAlert(j *store.Job, gpus []gpu.GPU, held map[int]int64) *store.AlertData {
+	want := make([]string, len(j.GPUsAssigned))
+	for i, g := range j.GPUsAssigned {
+		want[i] = strconv.Itoa(g)
+	}
+	assigned := strings.Join(want, ",")
+	var a *store.AlertData
+	for _, g := range gpus {
+		if slices.Contains(j.GPUsAssigned, g.Index) {
+			continue
+		}
+		for _, p := range g.Procs {
+			if p.JobID != j.ID {
+				continue
+			}
+			if a == nil {
+				a = &store.AlertData{Type: "stray", PID: p.PID, Assigned: slices.Clone(j.GPUsAssigned), Graphics: true}
+			}
+			a.PID = min(a.PID, p.PID)
+			a.GPUs = append(a.GPUs, g.Index)
+			if _, ok := held[g.Index]; ok {
+				a.Reserved = append(a.Reserved, g.Index)
+			}
+			if !p.Graphics {
+				a.Graphics = false
+				if a.CUDAVisible == nil && p.CUDAVisible != nil && *p.CUDAVisible != assigned {
+					v := *p.CUDAVisible
+					a.CUDAVisible = &v
+				}
+			}
+		}
+	}
+	if a != nil {
+		slices.Sort(a.GPUs)
+		slices.Sort(a.Reserved)
+		a.GPUs = slices.Compact(a.GPUs)
+		a.Reserved = slices.Compact(a.Reserved)
+	}
+	return a
+}
+
+func allocationWait(gpus []gpu.GPU, running []*store.Job, held map[int]int64, head *store.Job) (string, bool, bool) {
 	all := []int{}
 	owned := map[int]bool{}
 	assigned := map[int64][]int{}
@@ -222,11 +325,20 @@ func allocationWait(gpus []gpu.GPU, running []*store.Job, head *store.Job) (stri
 			owned[index] = true
 		}
 	}
+	for index := range held {
+		owned[index] = true
+	}
 	busy := maps.Clone(owned)
 	var blocker string
 	unknownBlock := false
 	for _, g := range gpus {
 		all = append(all, g.Index)
+		if id, ok := held[g.Index]; ok {
+			if blocker == "" && (len(head.GPUsPinned) == 0 || slices.Contains(head.GPUsPinned, g.Index)) {
+				blocker = fmt.Sprintf("GPU %d 已被预约 #%d 占用", g.Index, id)
+			}
+			continue
+		}
 		if g.UnknownMemMB > 0 {
 			busy[g.Index] = true
 			if blocker == "" && (len(head.GPUsPinned) == 0 || slices.Contains(head.GPUsPinned, g.Index)) {

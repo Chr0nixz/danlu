@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"danlu/internal/config"
+	"danlu/internal/logs"
 	"danlu/internal/store"
 )
 
@@ -71,6 +72,8 @@ type Service struct {
 	testMu    sync.Mutex
 	window    time.Duration
 	interval  time.Duration
+	// Lang 返回推送语言（ui.notify_lang 偏好），发送时合成文案用；nil 按中文。
+	Lang func() string
 }
 
 func New(st StateStore, cfg config.Notify, hostname, baseURL string) *Service {
@@ -284,7 +287,7 @@ func (s *Service) Test(ctx context.Context) error {
 		return ErrBusy
 	}
 	defer s.testMu.Unlock()
-	err := s.publisher.Send(ctx, Message{Title: s.hostname + " · 测试推送", Body: "丹炉手机推送已连通。", Click: s.baseURL + "/", Priority: 3})
+	err := s.publisher.Send(ctx, Message{Title: s.hostname + " · " + s.msg("title.test", nil), Body: s.msg("test.body", nil), Click: s.baseURL + "/", Priority: 3})
 	if err != nil {
 		log.Printf("测试推送发送失败: %v", err)
 	}
@@ -310,9 +313,9 @@ func (s *Service) consume(next *state, e store.Event, fastFailure *completion) {
 		if json.Unmarshal(e.Data, &data) != nil || (data.Kind != "disk" && data.Kind != "fail_fast") {
 			return
 		}
-		message.Title, message.Priority = s.hostname+" · 队列暂停", 4
+		message.Title, message.Priority = s.hostname+" · "+s.msg("title.paused", nil), 4
 		if data.Kind == "disk" {
-			message.Body = "数据分区空间不足，已暂停启动新任务。"
+			message.Body = s.msg("pause.disk", nil)
 		} else if e.JobID == nil {
 			return
 		} else {
@@ -321,9 +324,9 @@ func (s *Service) consume(next *state, e store.Event, fastFailure *completion) {
 				fastFailure = next.takeFailure(*e.JobID)
 			}
 			if fastFailure != nil {
-				message.Body = fmt.Sprintf("%s。任务启动后很快失败，已暂停启动后续任务，请检查后继续队列。", fastFailure.line())
+				message.Body = s.msg("pause.fail_fast", map[string]any{"item": s.line(*fastFailure)})
 			} else {
-				message.Body = fmt.Sprintf("任务 #%d 快速失败，已暂停启动后续任务，请检查后继续队列。", *e.JobID)
+				message.Body = s.msg("pause.fail_fast_plain", map[string]any{"id": *e.JobID})
 			}
 		}
 	case store.EventAlertRaised, store.EventAlertCleared:
@@ -335,47 +338,109 @@ func (s *Service) consume(next *state, e store.Event, fastFailure *completion) {
 			if data.Type != "gpu_error" {
 				return
 			}
-			message.Title, message.Body = s.hostname+" · GPU 已恢复", "nvidia-smi 已恢复，GPU 数据可以正常读取。"
+			message.Title, message.Body = s.hostname+" · "+s.msg("title.gpu_recovered", nil), s.msg("gpu.recovered", nil)
 		} else {
 			switch data.Type {
 			case "gpu_error":
-				message.Title, message.Body = s.hostname+" · GPU 数据不可用", "nvidia-smi 已连续出错超过 60 秒，请检查 GPU 或驱动。"
+				message.Title, message.Body = s.hostname+" · "+s.msg("title.gpu_error", nil), s.msg("gpu.error", nil)
 			case "disk_low":
-				message.Title = s.hostname + " · 磁盘余量不足"
-				message.Body = fmt.Sprintf("监测到的%s分区仅剩 %.1f GiB 可用空间。", map[bool]string{true: "数据", false: "磁盘"}[data.DataDisk], float64(data.AvailableBytes)/(1<<30))
+				message.Title = s.hostname + " · " + s.msg("title.disk_low", nil)
+				key := "disk.low_disk"
+				if data.DataDisk {
+					key = "disk.low_data"
+				}
+				message.Body = s.msg(key, map[string]any{"free": fmt.Sprintf("%.1f", float64(data.AvailableBytes)/(1<<30))})
 			case "external":
 				if e.JobID == nil {
 					return
 				}
-				message.Title, message.Body = s.hostname+" · 训练 GPU 被外部占用", fmt.Sprintf("任务 #%d 使用的 GPU %v 出现外部进程 PID %d。", *e.JobID, data.GPUs, data.PID)
+				message.Title, message.Body = s.hostname+" · "+s.msg("title.external", nil), s.msg("external.body", map[string]any{"id": *e.JobID, "gpus": fmt.Sprint(data.GPUs), "pid": data.PID})
 				if data.OtherJob > 0 {
-					message.Title = s.hostname + " · 训练 GPU 上有别的任务的进程"
-					message.Body = fmt.Sprintf("任务 #%d 使用的 GPU %v 上出现了任务 #%d 的进程，那个任务跑到了没分给它的卡上。", *e.JobID, data.GPUs, data.OtherJob)
+					message.Title = s.hostname + " · " + s.msg("title.external_job", nil)
+					message.Body = s.msg("external.job_body", map[string]any{"id": *e.JobID, "gpus": fmt.Sprint(data.GPUs), "other": data.OtherJob})
 				}
+			case "stray":
+				if e.JobID == nil || len(data.GPUs) == 0 {
+					return
+				}
+				message.Title = s.hostname + " · " + s.msg("title.stray", nil)
+				params := map[string]any{"id": *e.JobID, "gpus": joinCards(data.GPUs), "assigned": joinCards(data.Assigned)}
+				if len(data.Assigned) > 0 {
+					message.Body = s.msg("stray.body", params)
+				} else {
+					message.Body = s.msg("stray.body_none", params)
+				}
+				if len(data.Reserved) > 0 {
+					message.Body = s.concatSentences(message.Body, s.msg("stray.reserved", map[string]any{"reserved": joinCards(data.Reserved)}))
+				}
+				switch {
+				case data.CUDAVisible != nil && *data.CUDAVisible == "":
+					message.Body = s.concatSentences(message.Body, s.msg("stray.cvd_unset", nil))
+				case data.CUDAVisible != nil:
+					message.Body = s.concatSentences(message.Body, s.msg("stray.cvd", map[string]any{"cvd": oneLine(*data.CUDAVisible, 100)}))
+				case data.Graphics:
+					message.Body = s.concatSentences(message.Body, s.msg("stray.graphics", nil))
+				}
+			case "strict_unavailable":
+				message.Title, message.Priority = s.hostname+" · "+s.msg("title.strict_unavailable", nil), 4
+				fix := "strict.fix_other"
+				switch data.Reason {
+				case "not_installed", "no_sudo", "protocol":
+					fix = "strict.fix_" + data.Reason
+				}
+				message.Body = s.concatSentences(s.msg("strict.body", nil), s.msg(fix, nil))
 			case "blocked", "blocked_unknown":
 				if e.JobID == nil {
 					return
 				}
 				if data.Type == "blocked_unknown" {
-					message.Title, message.Body = s.hostname+" · 队首等待未知显存", fmt.Sprintf("任务 #%d 正在等待进程列表无法解释的 GPU 显存释放。", *e.JobID)
+					message.Title, message.Body = s.hostname+" · "+s.msg("title.blocked_unknown", nil), s.msg("blocked.unknown_body", map[string]any{"id": *e.JobID})
 				} else {
-					message.Title, message.Body = s.hostname+" · 队首等待外部进程", fmt.Sprintf("任务 #%d 正在等待外部进程释放 GPU。", *e.JobID)
+					message.Title, message.Body = s.hostname+" · "+s.msg("title.blocked", nil), s.msg("blocked.body", map[string]any{"id": *e.JobID})
 				}
 			case "silent":
 				if e.JobID == nil || data.Since <= 0 {
 					return
 				}
-				message.Title = s.hostname + " · 任务无新输出"
-				message.Body = fmt.Sprintf("#%d %s 已 %s没有新输出。", *e.JobID, oneLine(data.Name, 200), humanDuration(e.TS-data.Since))
+				message.Title = s.hostname + " · " + s.msg("title.silent", nil)
+				message.Body = s.msg("silent.body", map[string]any{"id": *e.JobID, "name": oneLine(data.Name, 200), "duration": s.humanDuration(e.TS - data.Since)})
 				if data.Util != nil {
-					message.Body += fmt.Sprintf("GPU 平均利用率 %d%%。", *data.Util)
+					message.Body = s.concatSentences(message.Body, s.msg("silent.util", map[string]any{"util": *data.Util}))
 				}
 				if data.DState != nil && *data.DState > 0 {
-					message.Body += fmt.Sprintf("有 %d 个进程处于 D 状态，可能在等待存储。", *data.DState)
+					message.Body = s.concatSentences(message.Body, s.msg("silent.dstate", map[string]any{"n": *data.DState}))
 				}
 			default:
 				return
 			}
+		}
+	case store.EventReservationReady, store.EventReservationExpiring:
+		var data store.ReservationEventData
+		if json.Unmarshal(e.Data, &data) != nil || data.ID <= 0 {
+			return
+		}
+		params := map[string]any{"id": data.ID, "gpus": joinCards(data.GPUs)}
+		// 有备注用 *_note 那句：两种写法的空格规则不同（中文"#3 已就绪"与"（备注）已就绪"）
+		suffix := ""
+		if note := oneLine(data.Note, 200); note != "" {
+			params["note"], suffix = note, "_note"
+		}
+		if e.Kind == store.EventReservationReady {
+			message.Title = s.hostname + " · " + s.msg("title.reservation_ready", nil)
+			message.Body = s.msg("reservation.ready"+suffix, params)
+			if data.Duration != nil {
+				message.Body = s.concatSentences(message.Body, s.msg("reservation.ready_auto", map[string]any{"duration": s.roughDuration(*data.Duration)}))
+			} else {
+				message.Body = s.concatSentences(message.Body, s.msg("reservation.ready_manual", nil))
+			}
+		} else {
+			// 延长了、或者推送积压到已经过了到期时间，这条提醒就不发了
+			if data.EndsAt == nil || time.Now().Unix() >= *data.EndsAt {
+				return
+			}
+			message.Title = s.hostname + " · " + s.msg("title.reservation_expiring", nil)
+			params["duration"] = s.roughDuration(*data.EndsAt - e.TS)
+			message.Body = s.msg("reservation.expiring"+suffix, params)
 		}
 	default:
 		return
@@ -383,26 +448,59 @@ func (s *Service) consume(next *state, e store.Event, fastFailure *completion) {
 	next.Outbox = append(next.Outbox, message)
 }
 
-func failureReason(kind string, exit *int) string {
-	if reason := map[string]string{"cuda_oom": "CUDA 显存不足", "host_oom": "主机内存不足", "nccl": "NCCL 通信超时或出错",
-		"exception": "Python 异常", "reboot": "服务器重启，任务中断", "killed": "进程被外部终止", "start": "任务启动失败", "signal": "进程被信号终止"}[kind]; reason != "" {
-		return reason
+func joinCards(cards []int) string {
+	parts := make([]string, len(cards))
+	for i, c := range cards {
+		parts[i] = strconv.Itoa(c)
 	}
-	if exit != nil {
-		return fmt.Sprintf("退出码 %d", *exit)
-	}
-	return "任务异常结束"
+	return strings.Join(parts, ", ")
 }
 
-func humanDuration(seconds int64) string {
+// roughDuration 写成"3 小时""90 分钟"这样的整数，推送里不需要精确到秒
+func (s *Service) roughDuration(seconds int64) string {
+	seconds = max(0, seconds)
+	switch {
+	case seconds >= 3600 && seconds%3600 == 0:
+		return s.msg("rough.h", map[string]any{"n": seconds / 3600})
+	case seconds >= 60:
+		return s.msg("rough.m", map[string]any{"n": (seconds + 30) / 60})
+	default:
+		return s.msg("rough.s", map[string]any{"n": seconds})
+	}
+}
+
+// failureReason 按失败类别合成当前语言的原因文字；不转发日志里的私有路径等原文。
+// detail 是 host_oom 三态等细分码；旧事件没有细分码时按中文原文推断。
+func (s *Service) failureReason(kind, detail string, exit *int) string {
+	if kind == "host_oom" {
+		switch detail {
+		case logs.DetailOOMWorker:
+			return s.msg("fail.host_oom_worker", nil)
+		case logs.DetailOOMGuess137:
+			return s.msg("fail.host_oom_guess", nil)
+		default:
+			return s.msg("fail.host_oom", nil)
+		}
+	}
+	if key := map[string]string{"cuda_oom": "fail.cuda_oom", "nccl": "fail.nccl", "exception": "fail.exception",
+		"reboot": "fail.reboot", "killed": "fail.killed", "start": "fail.start", "signal": "fail.signal"}[kind]; key != "" {
+		return s.msg(key, nil)
+	}
+	if exit != nil {
+		return s.msg("fail.exit", map[string]any{"code": *exit})
+	}
+	return s.msg("fail.unknown", nil)
+}
+
+func (s *Service) humanDuration(seconds int64) string {
 	seconds = max(0, seconds)
 	switch {
 	case seconds >= 3600:
-		return fmt.Sprintf("%d 小时 %d 分钟", seconds/3600, seconds%3600/60)
+		return s.msg("duration.hm", map[string]any{"h": seconds / 3600, "m": seconds % 3600 / 60})
 	case seconds >= 60:
-		return fmt.Sprintf("%d 分钟", seconds/60)
+		return s.msg("duration.m", map[string]any{"n": seconds / 60})
 	default:
-		return fmt.Sprintf("%d 秒", seconds)
+		return s.msg("duration.s", map[string]any{"n": seconds})
 	}
 }
 

@@ -32,6 +32,8 @@ pub struct Anchor {
     point: Mutex<Option<(f64, f64)>>,
     /// 浮窗因为失去焦点收起的时刻。点托盘图标时浮窗先失焦收起，紧接着收到点击，不能又弹出来
     blurred: Mutex<Option<Instant>>,
+    /// 最近的托盘状态：切换语言重建菜单时按它恢复 tooltip
+    state: Mutex<Option<TrayState>>,
 }
 
 fn icon(state: TrayState) -> Image<'static> {
@@ -45,17 +47,10 @@ fn icon(state: TrayState) -> Image<'static> {
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     app.manage(Anchor::default());
-    let menu = Menu::with_items(
-        app,
-        &[
-            &MenuItem::with_id(app, "open", "打开主窗口", true, None::<&str>)?,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "quit", "退出丹炉", true, None::<&str>)?,
-        ],
-    )?;
+    let menu = build_menu(app)?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(TrayState::Idle))
-        .tooltip("丹炉")
+        .tooltip(crate::messages::t("tray.idle", &[]))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id().as_ref() {
@@ -105,15 +100,44 @@ fn rect_center(r: &Rect) -> (f64, f64) {
     (p.x + s.width / 2.0, p.y + s.height / 2.0)
 }
 
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(app, "open", crate::messages::t("tray.open", &[]), true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "quit", crate::messages::t("tray.quit", &[]), true, None::<&str>)?,
+        ],
+    )
+}
+
+fn tooltip(state: TrayState) -> String {
+    crate::messages::t(
+        match state {
+            TrayState::Idle => "tray.idle",
+            TrayState::Running => "tray.running",
+            TrayState::Alert => "tray.alert",
+        },
+        &[],
+    )
+}
+
 pub fn set_state(app: &AppHandle, state: TrayState) {
+    *app.state::<Anchor>().state.lock().unwrap() = Some(state);
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_icon(Some(icon(state)));
-        let tip = match state {
-            TrayState::Idle => "丹炉",
-            TrayState::Running => "丹炉 · 有任务在跑",
-            TrayState::Alert => "丹炉 · 有没看过的失败或异常",
-        };
-        let _ = tray.set_tooltip(Some(tip));
+        let _ = tray.set_tooltip(Some(tooltip(state)));
+    }
+}
+
+/// 切换语言后重建托盘菜单和 tooltip（菜单项文字在创建时固定，必须重建）
+pub fn refresh_language(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Ok(menu) = build_menu(app) {
+            let _ = tray.set_menu(Some(menu));
+        }
+        let state = app.state::<Anchor>().state.lock().unwrap().unwrap_or(TrayState::Idle);
+        let _ = tray.set_tooltip(Some(tooltip(state)));
     }
 }
 

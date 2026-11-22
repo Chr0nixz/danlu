@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 )
 
 func (m *Manager) diskAvailableLocked() (uint64, error) {
@@ -53,7 +54,11 @@ func (m *Manager) canResumeDiskLocked(current QueueState) error {
 		minBytes *= 2
 	}
 	if available < minBytes {
-		return invalid("数据目录所在分区剩余 %.1f GiB，达到 %.1f GiB 后才能继续", float64(available)/(1<<30), float64(minBytes)/(1<<30))
+		// params 里的 GiB 先四舍五入到一位小数：前端直接插值，不带一长串小数尾巴；中文原文仍按 %.1f 输出
+		return invalid("queue_disk_low", map[string]any{
+			"available": math.Round(float64(available)/(1<<30)*10) / 10,
+			"min":       math.Round(float64(minBytes)/(1<<30)*10) / 10,
+		}, "数据目录所在分区剩余 %.1f GiB，达到 %.1f GiB 后才能继续", float64(available)/(1<<30), float64(minBytes)/(1<<30))
 	}
 	return nil
 }
@@ -82,7 +87,8 @@ func (m *Manager) checkDiskGuardLocked() error {
 	}
 	if available < m.opt.DiskMinBytes && !current.Paused {
 		reason := fmt.Sprintf("数据目录所在分区仅剩 %.1f GiB（暂停线 %.1f GiB）", float64(available)/(1<<30), float64(m.opt.DiskMinBytes)/(1<<30))
-		_, _, err = m.pauseQueueLocked("disk", reason, nil)
+		avail, minLine := math.Round(float64(available)/(1<<30)*10)/10, math.Round(float64(m.opt.DiskMinBytes)/(1<<30)*10)/10
+		_, _, err = m.pauseQueueLocked("disk", reason, nil, &[2]float64{avail, minLine})
 	} else if current.Paused && current.Kind == "disk" && available >= m.opt.DiskMinBytes*2 {
 		_, _, err = m.resumeQueueLocked(current)
 	}

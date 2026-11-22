@@ -1,6 +1,8 @@
 import { type LogSearchResult } from '@danlu/core'
+import { t } from '../lib/i18n'
 import { Button, Dialog, ErrorBox, Input } from './ui'
 
+// 快捷词是日志里的程序输出关键词，不是界面文案，不翻译
 const shortcuts = ['error', 'warning', 'nan', 'Traceback', 'val']
 
 export function LogSearchDialog({ keyword, onChange, term, result, loading, error, onSearch, onJump, onClose }: {
@@ -17,15 +19,15 @@ export function LogSearchDialog({ keyword, onChange, term, result, loading, erro
   const valid = keyword.trim() !== '' && Array.from(keyword.trim()).length <= 256
   const pattern = term ? new RegExp(`(${term.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&')})`, 'giu') : null
   return (
-    <Dialog title="搜索日志" onClose={onClose} wide className="max-sm:h-[50dvh] max-sm:open:flex max-sm:flex-col"
-      footer={<Button size="sm" onClick={onClose}>关闭</Button>}>
+    <Dialog title={t('job.log_search')} onClose={onClose} wide className="max-sm:h-[50dvh] max-sm:open:flex max-sm:flex-col"
+      footer={<Button size="sm" onClick={onClose}>{t('common.close')}</Button>}>
       <form className="mt-2 flex gap-2" onSubmit={(e) => { e.preventDefault(); if (valid && !loading) onSearch(keyword.trim()) }}>
         {/* 不用浏览器自带的蓝色清除图标 */}
-        <Input type="search" className="min-w-0 flex-1 max-sm:text-base [&::-webkit-search-cancel-button]:appearance-none" aria-label="日志关键词" autoFocus
-          placeholder="输入关键词" value={keyword} onChange={(e) => onChange(e.target.value)} />
-        <Button type="submit" variant="primary" disabled={!valid} loading={loading}>搜索</Button>
+        <Input type="search" className="min-w-0 flex-1 max-sm:text-base [&::-webkit-search-cancel-button]:appearance-none" aria-label={t('job.log_search_keyword_aria')} autoFocus
+          placeholder={t('job.log_search_placeholder')} value={keyword} onChange={(e) => onChange(e.target.value)} />
+        <Button type="submit" variant="primary" disabled={!valid} loading={loading}>{t('job.search')}</Button>
       </form>
-      <div className="flex flex-wrap gap-1.5" aria-label="快捷关键词">
+      <div className="flex flex-wrap gap-1.5" aria-label={t('job.log_search_shortcuts')}>
         {shortcuts.map((word) => (
           // 半屏面板里高度紧，快捷词在手机上是 36px，和最近用过的工作目录小标签一样
           <Button size="sm" key={word} className="max-sm:h-9!" disabled={loading} onClick={() => { onChange(word); onSearch(word) }}>{word}</Button>
@@ -35,10 +37,10 @@ export function LogSearchDialog({ keyword, onChange, term, result, loading, erro
       {result && (
         <>
           <div className="text-xs text-fg-3" role="status">
-            {result.matches.length ? `${result.matches.length} 条匹配` : '未找到匹配行'}
+            {result.matches.length ? t('job.log_search_matches', { n: result.matches.length }) : t('job.log_search_no_matches')}
             {result.truncated && (result.size > 0
-              ? ` · 已扫描前 ${Math.floor(100 * result.scanned / result.size)}%`
-              : ' · 扫描超时')}
+              ? t('job.log_search_scanned', { pct: Math.floor(100 * result.scanned / result.size) })
+              : t('job.log_search_timeout'))}
           </div>
           {result.matches.length > 0 && (
             <ul className="max-h-[min(38dvh,24rem)] divide-y divide-line overflow-y-auto rounded-md border border-line max-sm:max-h-[19dvh]">

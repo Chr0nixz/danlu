@@ -48,13 +48,13 @@ func (s *Server) compareJobs(w http.ResponseWriter, r *http.Request) {
 	aID, aErr := strconv.ParseInt(q.Get("a"), 10, 64)
 	bID, bErr := strconv.ParseInt(q.Get("b"), 10, 64)
 	if aErr != nil || bErr != nil || aID <= 0 || bID <= 0 || aID == bID {
-		writeErr(w, http.StatusBadRequest, "请选择两个不同的任务")
+		writeErrC(w, http.StatusBadRequest, "compare_same_job", "请选择两个不同的任务", nil)
 		return
 	}
 	get := func(id int64) (*store.Job, bool) {
 		j, err := s.Store.GetJob(id)
 		if errors.Is(err, store.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, fmt.Sprintf("任务 #%d 不存在", id))
+			writeErrC(w, http.StatusNotFound, "compare_job_not_found", fmt.Sprintf("任务 #%d 不存在", id), map[string]any{"id": id})
 		} else if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 		}

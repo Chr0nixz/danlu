@@ -9,8 +9,10 @@ import { TitleBar } from './components/TitleBar'
 import { cx, Empty, ErrorText } from './components/ui'
 import { type Focus } from './lib/backend'
 import { fleetJobs, useFleetView, useServers } from './lib/fleet'
+import { t } from './lib/i18n'
 import { modKey, typingIn } from './lib/platform'
 import { draftFrom, WorkspaceCtx, type Draft, type Pane, type Workspace } from './lib/workspace'
+import { useLangSync } from './lib/lang'
 import { History } from './pages/History'
 import { Overview } from './pages/Overview'
 import { Servers } from './pages/Servers'
@@ -20,6 +22,7 @@ type Page = 'overview' | 'history' | 'servers' | 'settings'
 
 /** 主窗口：自绘标题栏，左侧窄导航栏，中间是页面，总览和历史页的右侧分栏放任务详情或提交表单 */
 export function App() {
+  useLangSync()
   const servers = useServers()
   const view = useFleetView()
   const qc = useQueryClient()
@@ -88,7 +91,7 @@ export function App() {
   if (servers.isLoading) content = null
   else if (servers.error)
     content = (
-      <Empty title="读取服务器列表失败">
+      <Empty title={t('app.load_servers_failed')}>
         <ErrorText error={servers.error} />
       </Empty>
     )
@@ -103,18 +106,18 @@ export function App() {
       <div className="flex h-full flex-col">
         <TitleBar search={search} onSearch={setSearch} inputRef={searchRef} />
         <div className="flex min-h-0 flex-1 gap-2 px-2 pb-2">
-          <nav className="flex w-10 shrink-0 flex-col items-center gap-1 pt-0.5" aria-label="导航">
-            <NavButton label="总览" active={page === 'overview'} onClick={() => setPage('overview')}>
+          <nav className="flex w-10 shrink-0 flex-col items-center gap-1 pt-0.5" aria-label={t('app.nav')}>
+            <NavButton label={t('app.nav_overview')} active={page === 'overview'} onClick={() => setPage('overview')}>
               <LayoutDashboard />
             </NavButton>
-            <NavButton label="历史" active={page === 'history'} onClick={() => setPage('history')}>
+            <NavButton label={t('app.nav_history')} active={page === 'history'} onClick={() => setPage('history')}>
               <HistoryIcon />
             </NavButton>
-            <NavButton label="服务器" active={page === 'servers'} onClick={() => setPage('servers')}>
+            <NavButton label={t('app.nav_servers')} active={page === 'servers'} onClick={() => setPage('servers')}>
               <Server />
             </NavButton>
             <span className="flex-1" />
-            <NavButton label="设置" active={page === 'settings'} onClick={() => setPage('settings')}>
+            <NavButton label={t('app.nav_settings')} active={page === 'settings'} onClick={() => setPage('settings')}>
               <SettingsIcon />
             </NavButton>
           </nav>

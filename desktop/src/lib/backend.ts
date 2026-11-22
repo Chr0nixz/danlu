@@ -2,6 +2,7 @@
 
 import { ApiError, createApi, type Api, type GPU, type Job, type Me, type Transport } from '@danlu/core'
 import { Channel, invoke } from '@tauri-apps/api/core'
+import { t } from './i18n'
 
 export interface ServerView {
   name: string
@@ -48,6 +49,8 @@ export interface Prefs {
   notify: boolean
   shortcut: string
   autostart: boolean
+  /** 'auto' | 'zh-CN' | 'en'；Rust 通知和界面共用 */
+  lang: string
 }
 
 export interface Focus {
@@ -148,7 +151,7 @@ export function apiFor(server: string): Api {
   let a = apis.get(server)
   if (!a) {
     a = createApi(transportFor(server), {
-      emptyNotFound: `${server} 不认这台电脑的令牌了（可能已被吊销），请在「服务器」页删除后重新添加`,
+      emptyNotFound: () => t('error.token_revoked', { server }),
     })
     apis.set(server, a)
   }
