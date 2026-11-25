@@ -20,7 +20,7 @@ Direction:
 - **S4 状态（2026-11-03）**：路径反查、任务对比和用快照代码重跑已实现。快照重跑保留原项目路径用于记录，实际在 `run/<id>/code/` 执行。源快照在子任务取得自己的硬链接前受清理保护。真实训练项目随使用补验。
 - **严格限卡（2026-11-22）**：理想线 F4 的 5.4 已在 main 上实现（迁移 18，不进 `release/0.2`）：可选的 cgroup 设备控制，root 助手 + sudoers，任务作为 systemd 临时服务运行。hsy 上探测通过（CUDA/NVML/EGL 只看到放行的卡、从 0 编号）；Go 单测、三端类型检查通过，e2e 新增一节（CI 免密 sudo）。同日在 hsy 上用测试实例做了真机验收（CHECKLIST G2/G3）：写死 `CUDA_VISIBLE_DEVICES=0,1,2,3` 也只落在分到的卡上，取消、kill -9 后重启接管、关开关都正常；预约配合、LIBERO 渲染和卸载还没在真机上做。
 - **命令行提交（2026-11-24）**：理想线 F4 的 5.1 已在 main 上实现（迁移 19，不进 `release/0.2`）：经数据目录里的 unix socket 提供 `submit/jobs/show/tail/wait/cancel/rerun/gpus/api`，面向脚本和 AI 编程助手（`--json`、固定退出码、`--key` 提交幂等）。Go 单测（含进程内对真 `/api` 的命令行测试）、Linux vet、三端类型检查通过；e2e 新增一节和 `SO_PEERCRED`、socket 文件的 Linux 单测待 Linux/CI，真机随使用补验。
-- **修改排队任务与暂缓（2026-11-25）**：理想线 F2 的 3.1、3.2 已在分支上实现（迁移 20，不进 `release/0.2`）：原地修改、批量取消/替换/暂缓/恢复/置顶（整批全成或全不成）、置顶上移下移移到末尾、暂缓；命令行 `hold/release/move`。Go 单测（含 FEATURES 列出的 manager_test 验收）、Linux vet、三端类型检查、i18n 审计、桌面 clippy 通过；e2e 新增一节待 Linux/CI，面板目视和真机随使用补验。
+- **修改排队任务与暂缓（2026-11-25）**：理想线 F2 的 3.1、3.2 已在 main 上实现（迁移 20，不进 `release/0.2`）：原地修改、批量取消/替换/暂缓/恢复/置顶（整批全成或全不成）、置顶上移下移移到末尾、暂缓；命令行 `hold/release/move`。Go 单测（含 FEATURES 列出的 manager_test 验收）、Linux vet、三端类型检查、i18n 审计、桌面 clippy 通过；e2e 新增一节待 Linux/CI，面板目视和真机随使用补验。
 - **GPU 预约（2026-11-21）**：理想线 F4 的 5.2 已在 main 上实现（迁移 16，不进 `release/0.2`）：预约先于排队任务收卡，定时释放、延长、推送。Go 单测、三端类型检查和桌面 clippy 通过，面板在 macOS 假 GPU 下目视过；e2e 新增一节待 Linux/CI，真机随使用补验。
 
 Other docs:
