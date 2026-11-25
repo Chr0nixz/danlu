@@ -56,3 +56,17 @@ func ownerOfUID(uid string) string {
 	uidMu.Unlock()
 	return name
 }
+
+// OwnerUID 返回进程的属主 uid；exists 为 false 表示进程已经不在了。
+func OwnerUID(pid int) (uid int, exists bool) {
+	fi, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+	if err != nil {
+		// 别的错误（权限、EMFILE）不能当成进程已经不在：按属主不明处理
+		return -1, !os.IsNotExist(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return -1, true
+	}
+	return int(st.Uid), true
+}

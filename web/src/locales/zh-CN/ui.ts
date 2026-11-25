@@ -28,4 +28,6 @@ export const ui = {
   'ui.copy_denied': '浏览器拒绝了复制',
   'ui.copy_failed_sr': '复制失败，{why}',
   'ui.copy_failed_title': '复制失败：{why}，请手动选中',
+  // 后台刷新失败、页面保留上一份数据
+  'ui.refresh_failed': '数据更新失败：{error}。显示的是上一次拿到的数据。',
 } satisfies Catalog

@@ -3,7 +3,8 @@
 // 改设备规则要 root，所以拆成两半：
 //
 //   - 助手（helper_linux.go）：root 拥有的 danlu 副本 HelperPath，只能经 sudoers 以 start、check 两个子命令调用。
-//     它只会"收紧"：进程永远以调用者身份、在调用者的 user-<uid>.slice 里、照抄调用者自己进程的资源限制运行，
+//     它只会"收紧"：进程永远以调用者身份（组由 systemd 按用户库取）、在调用者的 user-<uid>.slice 里、
+//     照抄调用者自己进程（必须是助手的祖先）的资源限制运行，
 //     调用者能选的只有放行哪些卡（只会减少设备权限）和执行什么（本来就能以自己的身份执行）。
 //   - 客户端（client_linux.go、monitor.go）：danlu 以普通用户身份用 sudo -n 调助手，缓存可用状态。
 //
@@ -28,9 +29,12 @@ const (
 	HelperName = "danlu-gpu-helper"
 	HelperPath = "/usr/local/libexec/" + HelperName
 	// Protocol 是 danlu 和助手之间的约定。助手是 root 拥有的副本，danlu 自己升级换不掉它，
-	// 所以约定要小而稳；变了就让用户重新运行 sudo danlu strict install
-	Protocol   = 1
+	// 所以约定要小而稳；变了就让用户重新运行 sudo danlu strict install。
+	// 2：不再照抄 danlu_pid 的组；danlu_pid 必须是助手的祖先，读不到它的资源限制就拒绝（11-23 审阅 P1-1）
+	Protocol   = 2
 	maxRequest = 1 << 20
+	// minSystemd 是严格单元要的最低 systemd 版本：OOMPolicy= 从 243 开始才有
+	minSystemd = 243
 )
 
 // StartRequest 是 danlu 交给助手的启动请求（stdin 上的 JSON）。
@@ -41,7 +45,7 @@ type StartRequest struct {
 	Exec     string   `json:"exec"`      // danlu 程序，服务里以用户身份执行 job-exec
 	Log      string   `json:"log"`       // 任务日志，job-exec 以追加方式打开
 	EnvFile  string   `json:"env_file"`  // NUL 分隔的完整环境
-	DanluPID int      `json:"danlu_pid"` // 照抄它的资源限制和组
+	DanluPID int      `json:"danlu_pid"` // 照抄它的资源限制；必须是助手的祖先（调用 sudo 的 danlu）
 	GPUs     []string `json:"gpus"`      // 放行的卡，PCI 总线号
 }
 
@@ -143,6 +147,10 @@ var (
 // DevicePlan 生成 DeviceAllow 列表：除 GPU 以外的设备驱动全部放行（设备限制只用来隔离 GPU，不顺带做沙箱），
 // GPU 只放行驱动公共节点和分到的卡的 /dev/nvidiaN、/dev/dri 节点。
 // 要排除的主设备号从 /dev/nvidia[0-9]* 和 /dev/dri/* 节点上取，不按驱动名字猜。
+//
+// 主机上根本没有 NVIDIA 驱动（没有 /proc/driver/nvidia）时，不用卡的任务照样能跑：没有要藏的卡，
+// 放行清单按单元启动那一刻的 /proc/devices 解析，之后才加载的驱动的主设备号不在里面，仍然被拦。
+// 驱动在、却找不到 /dev/nvidiaN 节点时拿不到要排除的主设备号，一律报错。
 func DevicePlan(h Host, buses []string) ([]string, error) {
 	excluded := map[uint32]bool{}
 	nodes, _ := os.ReadDir(h.Dev)
@@ -162,7 +170,9 @@ func DevicePlan(h Host, buses []string) ([]string, error) {
 		}
 	}
 	if len(excluded) == 0 {
-		return nil, errors.New("找不到 /dev/nvidiaN 设备节点")
+		if _, err := os.Stat(filepath.Join(h.Proc, "driver", "nvidia")); len(buses) > 0 || !errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("找不到 /dev/nvidiaN 设备节点")
+		}
 	}
 
 	var out []string
@@ -171,17 +181,20 @@ func DevicePlan(h Host, buses []string) ([]string, error) {
 			out = append(out, "/dev/"+name+" rw")
 		}
 	}
-	gpus, err := os.ReadDir(filepath.Join(h.Proc, "driver", "nvidia", "gpus"))
-	if err != nil {
-		return nil, fmt.Errorf("读不到 NVIDIA 驱动的卡列表: %w", err)
+	var gpus []os.DirEntry
+	if len(buses) > 0 {
+		var err error
+		if gpus, err = os.ReadDir(filepath.Join(h.Proc, "driver", "nvidia", "gpus")); err != nil {
+			return nil, fmt.Errorf("读不到 NVIDIA 驱动的卡列表: %w", err)
+		}
 	}
 	drm, _ := os.ReadDir(filepath.Join(h.Sys, "class", "drm"))
 	for _, bus := range buses {
 		minor := ""
 		for _, e := range gpus {
 			if k, ok := BusKey(e.Name()); ok && k == bus {
-				minor, err = deviceMinor(filepath.Join(h.Proc, "driver", "nvidia", "gpus", e.Name(), "information"))
-				if err != nil {
+				var err error
+				if minor, err = deviceMinor(filepath.Join(h.Proc, "driver", "nvidia", "gpus", e.Name(), "information")); err != nil {
 					return nil, err
 				}
 				break
@@ -325,10 +338,12 @@ func limitValue(v string) string {
 	return v
 }
 
-// Creds 是进程的实际 uid、gid 和附加组，从 /proc/<pid>/status 读。
+// Creds 是进程的实际 uid、gid、附加组和父进程，从 /proc/<pid>/status 读。
+// 助手只用 UID 核对身份、用 PPID 走祖先链；组不照抄，由 systemd 按 User= 从用户库取。
 type Creds struct {
 	UID, GID int
 	Groups   []int
+	PPID     int
 }
 
 func ParseStatus(text string) (Creds, error) {
@@ -354,6 +369,15 @@ func ParseStatus(text string) (Creds, error) {
 			} else {
 				c.GID, haveGID = n, true
 			}
+		case "PPid":
+			if len(f) == 0 {
+				continue
+			}
+			n, err := strconv.Atoi(f[0])
+			if err != nil {
+				return c, errors.New("进程状态里的 PPid 无效")
+			}
+			c.PPID = n
 		case "Groups":
 			for _, s := range f {
 				n, err := strconv.Atoi(s)
@@ -370,10 +394,35 @@ func ParseStatus(text string) (Creds, error) {
 	return c, nil
 }
 
+// IsAncestor 判断 pid 是不是 self 的祖先（父进程、祖父进程……），最多往上找 maxAncestors 层。
+// status 读 /proc/<pid>/status 的内容。助手用它确认 danlu_pid 就是经 sudo 调它的那个 danlu，
+// 而不是同一 uid 下别的进程（比如没开 userns-remap、以 gid 0 运行的容器进程）。
+// 调用方要在读完那个进程的信息之后再查：那时它还是祖先，说明期间没退出，pid 也就没被复用。
+func IsAncestor(self, pid int, status func(pid int) (string, error)) bool {
+	cur := self
+	for range maxAncestors {
+		text, err := status(cur)
+		if err != nil {
+			return false
+		}
+		c, err := ParseStatus(text)
+		if err != nil || c.PPID <= 1 {
+			return false
+		}
+		if c.PPID == pid {
+			return true
+		}
+		cur = c.PPID
+	}
+	return false
+}
+
+const maxAncestors = 16
+
 // Unit 是助手交给 systemd-run 的单元。
 type Unit struct {
 	Name    string
-	Creds   Creds
+	UID     int
 	Devices []string
 	Limits  []string
 	JobID   int64
@@ -389,20 +438,14 @@ func (u Unit) Args() []string {
 		"--quiet", "--no-ask-password", "--collect",
 		"--unit=" + u.Name,
 		"--description=" + fmt.Sprintf("danlu 任务 #%d（严格限卡）", u.JobID),
-		"--uid=" + strconv.Itoa(u.Creds.UID),
-		"--gid=" + strconv.Itoa(u.Creds.GID),
-		"--slice=user-" + strconv.Itoa(u.Creds.UID) + ".slice",
+		// 只给 uid：不带 Group=、SupplementaryGroups= 时，systemd 按用户库取主组和附加组（initgroups），
+		// 调用者影响不了
+		"--uid=" + strconv.Itoa(u.UID),
+		"--slice=user-" + strconv.Itoa(u.UID) + ".slice",
 		"--property=Type=exec",
 		"--property=KillMode=process",
 		"--property=OOMPolicy=continue",
 		"--property=DevicePolicy=closed",
-	}
-	if len(u.Creds.Groups) > 0 {
-		groups := make([]string, len(u.Creds.Groups))
-		for i, g := range u.Creds.Groups {
-			groups[i] = strconv.Itoa(g)
-		}
-		args = append(args, "--property=SupplementaryGroups="+strings.Join(groups, " "))
 	}
 	for _, d := range u.Devices {
 		args = append(args, "--property=DeviceAllow="+d)

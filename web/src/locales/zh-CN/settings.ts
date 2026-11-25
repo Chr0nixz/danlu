@@ -113,6 +113,8 @@ export const settings = {
   'settings.doctor.service_load': 'systemd 服务加载',
   'settings.doctor.linger': 'linger',
   'settings.doctor.time_sync': '系统时间同步',
+  'settings.doctor.cli_socket': '命令行入口',
+  'settings.doctor.platform': 'systemd 与系统服务',
 
   // 面板偏好：外观（语言行的五个键在下方保留）
   'settings.prefs.appearance': '外观',

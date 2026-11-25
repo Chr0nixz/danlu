@@ -120,6 +120,14 @@ function Note({ children }: { children: ReactNode }) {
 
 function Comparison({ data }: { data: JobComparison }) {
   const { a, b, code } = data
+  const gitRows: ValueChange[] = [
+    { name: 'Commit', a: a.git_commit || t('compare.no_record'), b: b.git_commit || t('compare.no_record') },
+    { name: t('compare.branch'), a: a.git_branch || t('compare.no_record'), b: b.git_branch || t('compare.no_record') },
+    { name: t('compare.dirty'), a: dirty(a), b: dirty(b) },
+  ]
+  // 代码的差异数把 commit、分支、未提交改动也算进去：commit 不同却写"0 项差异"，正好在证明"跑的是哪版代码"的地方自相矛盾。
+  // 文件读不出来时不给数字，免得只数了 git 信息看起来像全部
+  const codeDiffs = code.files ? code.files.length + gitRows.filter((r) => r.a !== r.b).length : undefined
   return (
     <>
       <Card className="grid divide-y divide-line sm:grid-cols-2 sm:divide-x sm:divide-y-0">
@@ -132,12 +140,8 @@ function Comparison({ data }: { data: JobComparison }) {
       <Section title={t('job.row_env')} count={data.env.length}>
         <ValueRows rows={data.env} a={a.id} b={b.id} />
       </Section>
-      <Section title={t('job.meta_code_short')} count={code.files?.length}>
-        <PairTable a={a.id} b={b.id} rows={[
-          { name: 'Commit', a: a.git_commit || t('compare.no_record'), b: b.git_commit || t('compare.no_record') },
-          { name: t('compare.branch'), a: a.git_branch || t('compare.no_record'), b: b.git_branch || t('compare.no_record') },
-          { name: t('compare.dirty'), a: dirty(a), b: dirty(b) },
-        ]} />
+      <Section title={t('job.meta_code_short')} count={codeDiffs}>
+        <PairTable a={a.id} b={b.id} rows={gitRows} />
         {code.error ? <Note>{code.error}</Note> : (
           <>
             {code.partial && <Note>{t('compare.partial_note')}</Note>}

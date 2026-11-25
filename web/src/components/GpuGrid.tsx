@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import { Lock } from 'lucide-react'
 import { Link } from 'react-router'
-import { apiErrorText, getLocale, mb, type GPU, type GPUReservationRef, type Proc } from '@danlu/core'
+import { apiErrorText, getLocale, mb, useNow, type GPU, type GPUReservationRef, type Proc } from '@danlu/core'
 import { t } from '../lib/i18n'
 import { api } from '../lib/api'
-import { Alert, Card, cx, ErrorBox, Meter, Skeleton, StatusIcon } from './ui'
+import { Alert, Card, cx, ErrorBox, GpuChips, Meter, Skeleton, StatusIcon } from './ui'
 
 export function useGpus() {
   return useQuery({ queryKey: ['gpus'], queryFn: api.gpus, refetchInterval: 3000 })
@@ -37,7 +37,9 @@ export function ReservationLine({ r, className }: { r: GPUReservationRef; classN
 
 /** 占着别人卡的进程叫什么：别的任务跑过来的进程写任务号，其余是外部进程 */
 export const strayLabel = (p: Proc) =>
-  p.job_id ? t(p.graphics ? 'gpus.proc_job_graphics' : 'gpus.proc_job', { id: p.job_id }) : t(p.graphics ? 'gpus.proc_external_graphics' : 'gpus.proc_external')
+  p.job_id ? t(p.graphics ? 'gpus.proc_job_graphics' : 'gpus.proc_job', { id: p.job_id })
+    : p.owner_unknown ? t('gpus.proc_owner_unknown')
+      : t(p.graphics ? 'gpus.proc_external_graphics' : 'gpus.proc_external')
 
 type Stray = { key: string; job: number; user: string; procs: Proc[]; mem: number }
 
@@ -77,14 +79,21 @@ export function strayTitle(s: Stray) {
 export const shortName = (name: string) => name.replace(/^NVIDIA\s+/, '').replace(/^GeForce\s+/, '')
 
 const gb = (used: number, total: number) => `${(used / 1024).toFixed(1)} / ${Math.round(total / 1024)} GB`
+// 手机一行里放不下空格和单位前的空格
+const gbShort = (used: number, total: number) => `${(used / 1024).toFixed(1)}/${Math.round(total / 1024)}GB`
 
-function errorDuration(since: number) {
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - since))
+function errorDuration(elapsed: number) {
+  const seconds = Math.max(0, Math.floor(elapsed))
   if (seconds < 60) return t('gpus.error_duration_s', { n: seconds })
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return t('gpus.error_duration_m', { n: minutes })
   const hours = Math.floor(minutes / 60)
   return t('gpus.error_duration_hm', { h: hours, m: minutes % 60 })
+}
+
+/** 采样出错了多久，每秒走一格 */
+function ErrorSince({ since }: { since: number }) {
+  return <span className="ml-1">{t('gpus.error_since', { duration: errorDuration(useNow() - since) })}</span>
 }
 
 type State = 'job' | 'reserved' | 'external' | 'unknown' | 'idle'
@@ -99,7 +108,7 @@ export function GpuGrid() {
     return (
       <div className="grid gap-2 sm:grid-cols-2 sm:gap-3 lg:grid-cols-4">
         {Array.from({ length: 4 }, (_, i) => (
-          <Skeleton key={i} className="h-14 rounded-lg sm:h-[124px]" />
+          <Skeleton key={i} className="h-10 rounded-lg sm:h-[124px]" />
         ))}
       </div>
     )
@@ -115,12 +124,12 @@ export function GpuGrid() {
       {data?.error && (
         <Alert tone="warn">
           {t('gpus.sample_failed', { error: data.error })}
-          {data.error_since && <span className="ml-1">{t('gpus.error_since', { duration: errorDuration(data.error_since) })}</span>}
+          {data.error_since && <ErrorSince since={data.error_since} />}
         </Alert>
       )}
       {gpus.length === 0 && !data?.error && <Alert>{t('gpus.none_detected')}</Alert>}
 
-      {/* 手机：每张卡一行 */}
+      {/* 手机：每张卡一行（卡号、利用率、占卡者、显存），四张卡不把任务列表挤出首屏 */}
       <Card className="divide-y divide-line overflow-hidden sm:hidden">
         {gpus.map((g) => (
           <GpuRow key={g.index} g={g} showModel={mixed} procsKnown={!data?.error} />
@@ -138,7 +147,9 @@ export function GpuGrid() {
 }
 
 // procsKnown：这一轮查到了卡上的进程。查不到时不能说任务没在用这张卡
-function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
+// compact：手机上的一行，"卡上暂无该任务的进程"缩成任务名后面的短标记，不另起一行
+function Occupant({ g, procsKnown, compact = false }: { g: GPU; procsKnown: boolean; compact?: boolean }) {
+  const noProcs = !!g.job && procsKnown && !g.procs.some((p) => p.job_id === g.job!.id)
   return (
     <div className="min-w-0 space-y-0.5 text-ui">
       {g.job && (
@@ -147,9 +158,14 @@ function Occupant({ g, procsKnown }: { g: GPU; procsKnown: boolean }) {
           <StatusIcon status="running" className="size-3.5" />
           <span className="shrink-0 text-fg-3">#{g.job.id}</span>
           <span className="truncate font-medium">{g.job.name}</span>
+          {compact && noProcs && (
+            <span className="shrink-0 text-xs font-normal text-fg-3" title={t('gpus.no_procs_title')}>
+              · {t('gpus.no_procs_short')}
+            </span>
+          )}
         </Link>
       )}
-      {g.job && procsKnown && !g.procs.some((p) => p.job_id === g.job!.id) && (
+      {!compact && noProcs && (
         <div className="text-xs text-fg-3" title={t('gpus.no_procs_title')}>
           {t('gpus.no_procs')}
         </div>
@@ -239,25 +255,33 @@ function GpuPanel({ g, showModel, procsKnown }: { g: GPU; showModel: boolean; pr
   )
 }
 
+/**
+ * 手机上每张卡一行：卡号方块（和任务行里的卡号同一个样子）、利用率细条和数、占卡者、显存。
+ * 占卡者放中间吃掉剩余宽度，任务名先截断；卡上不止一个占卡者时这一张卡才变高。混装时型号另起一行
+ */
 function GpuRow({ g, showModel, procsKnown }: { g: GPU; showModel: boolean; procsKnown: boolean }) {
   const s = stateOf(g)
   return (
     <div className="px-3 py-2.5">
-      <div className="flex items-center gap-3 text-ui">
-        <span className="w-12 shrink-0 font-semibold">GPU {g.index}</span>
-        <div className="flex w-[4.5rem] shrink-0 items-center gap-1.5">
-          <div className="flex-1">
-            <Meter value={g.util} className={barColor[s]} />
-          </div>
+      <div className="flex items-center gap-2 text-ui">
+        <span className="shrink-0">
+          <span className="sr-only">GPU </span>
+          <GpuChips ids={[g.index]} />
+        </span>
+        <span className="w-9 shrink-0">
+          <Meter value={g.util} className={barColor[s]} />
+        </span>
+        <span className="w-8 shrink-0 text-right font-medium">{g.util}%</span>
+        <div className="min-w-0 flex-1 pl-1">
+          <Occupant g={g} procsKnown={procsKnown} compact />
         </div>
-        <span className="w-9 shrink-0 text-right font-medium">{g.util}%</span>
-        <span className="min-w-0 flex-1 truncate text-right text-xs text-fg-2">{gb(g.mem_used_mb, g.mem_total_mb)}</span>
-        <span className="w-9 shrink-0 text-right text-xs text-fg-3">{g.temp_c}°</span>
+        {/* 温度不放进这一行：390px 宽时它会把占卡的任务名挤到只剩一两个字；温度在电脑面板和资源页 */}
+        <span className="shrink-0 text-right text-xs text-fg-2">
+          <span className="sr-only">{t('gpus.mem')} </span>
+          {gbShort(g.mem_used_mb, g.mem_total_mb)}
+        </span>
       </div>
-      <div className={cx('mt-1 flex items-center gap-2 pl-[3.75rem]')}>
-        <Occupant g={g} procsKnown={procsKnown} />
-        {showModel && <span className="ml-auto shrink-0 truncate text-xs text-fg-3">{shortName(g.name)}</span>}
-      </div>
+      {showModel && <div className="mt-1 truncate pl-[26px] text-xs text-fg-3">{shortName(g.name)}</div>}
     </div>
   )
 }

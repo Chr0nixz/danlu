@@ -10,6 +10,8 @@
 //
 // 桌面客户端不用 cookie，而是带 "Authorization: Bearer <设备令牌>"：令牌有效就跳过
 // gate 和会话检查；令牌无效则和没过入口一样返回空 404，服务照样认不出来。
+//
+// 本机命令行走数据目录里的 unix socket，对端 uid 与 danlu 相同就跳过 gate 和会话（见 local.go）。
 package auth
 
 import (
@@ -35,10 +37,16 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const (
-	gateCookie    = "danlu_gate"
-	sessionCookie = "danlu_session"
-)
+// cookieNames 由 secret.key 推出 gate 和会话 cookie 的名字。cookie 不分端口：名字固定的话，
+// 同一台机器上的正式实例和测试实例在同一个浏览器里会互相覆盖，只能轮流用。每个数据目录的 secret 不同，
+// 名字也就不同；名字里也不带产品名，不留指纹。换了名字（升级到这一版、init --force 换了 secret）
+// 浏览器要重新走一次入口、重新登录。
+func cookieNames(secret []byte) (gate, session string) {
+	m := hmac.New(sha256.New, secret)
+	m.Write([]byte("cookie-names"))
+	sum := hex.EncodeToString(m.Sum(nil))[:12]
+	return "g" + sum, "s" + sum
+}
 
 var (
 	ErrBadCredentials = errors.New("用户名或密码错误")
@@ -67,6 +75,8 @@ type Auth struct {
 	opt   Options
 	store *store.Store
 
+	gateCookie, sessionCookie string // 见 cookieNames
+
 	secMu sync.Mutex
 	sec   Security  // 当前生效的安全设置
 	secAt time.Time // sec 上次从库里读出的时刻
@@ -89,6 +99,7 @@ type ipLock struct {
 func New(st *store.Store, opt Options) *Auth {
 	a := &Auth{opt: opt, store: st, used: map[int64]time.Time{}, logins: map[string]*ipLock{},
 		throttle: newLoginThrottle(), bcrypt: make(chan struct{}, bcryptSlots)}
+	a.gateCookie, a.sessionCookie = cookieNames(opt.Secret)
 	a.sec = a.defaults()
 	return a
 }
@@ -196,8 +207,11 @@ func DisableTOTP(st *store.Store) error {
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok, device := bearerToken(r)
+		local := Local(r)
 		sec := a.Security()
 		switch {
+		case local:
+			// 本机 socket 上同一个用户的命令行：不看入口、令牌和会话（见 local.go）
 		case device:
 			if !a.deviceValid(tok, ClientIP(r)) {
 				w.WriteHeader(http.StatusNotFound)
@@ -218,7 +232,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"需要 application/json"}`, http.StatusUnsupportedMediaType)
 				return
 			}
-			if !device && r.URL.Path != "/api/login" && !a.SessionValid(r) {
+			if !local && !device && r.URL.Path != "/api/login" && !a.SessionValid(r) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte(`{"error":"未登录或登录已过期"}`))
@@ -242,7 +256,7 @@ func (a *Auth) setGate(w http.ResponseWriter, sec Security) {
 	ttl := sec.SessionTTL
 	exp := strconv.FormatInt(time.Now().Add(ttl).Unix(), 10)
 	http.SetCookie(w, &http.Cookie{
-		Name: gateCookie, Value: exp + "." + a.gateSig(sec.Entrance, exp), Path: "/",
+		Name: a.gateCookie, Value: exp + "." + a.gateSig(sec.Entrance, exp), Path: "/",
 		MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: a.opt.Secure,
 		// Lax：从书签或外部链接打开入口地址时也要能带上
 		SameSite: http.SameSiteLaxMode,
@@ -250,7 +264,7 @@ func (a *Auth) setGate(w http.ResponseWriter, sec Security) {
 }
 
 func (a *Auth) gateValid(r *http.Request, entrance string) bool {
-	c, err := r.Cookie(gateCookie)
+	c, err := r.Cookie(a.gateCookie)
 	if err != nil {
 		return false
 	}
@@ -270,7 +284,7 @@ func hashToken(tok string) string {
 }
 
 func (a *Auth) SessionValid(r *http.Request) bool {
-	c, err := r.Cookie(sessionCookie)
+	c, err := r.Cookie(a.sessionCookie)
 	return err == nil && c.Value != "" && a.store.SessionValid(hashToken(c.Value))
 }
 
@@ -281,6 +295,9 @@ func (a *Auth) SessionValid(r *http.Request) bool {
 // 这里只复查会话，不复查 gate：gate 是挡扫描器的门，握手时已经过了；凭证是会话。
 // 否则在面板上换入口时，自己这个浏览器开着的终端和日志流也会被断开。要踢掉别的设备，注销它的会话。
 func (a *Auth) Authorized(r *http.Request) bool {
+	if Local(r) {
+		return true // 对端 uid 在连接期间不会变，也没有会话可以注销
+	}
 	if tok, device := bearerToken(r); device {
 		return a.deviceValid(tok, ClientIP(r))
 	}
@@ -330,7 +347,7 @@ func (a *Auth) deviceValid(tok, ip string) bool {
 
 // CurrentSessionHash 用于"改密码后注销其他会话"。
 func (a *Auth) CurrentSessionHash(r *http.Request) string {
-	if c, err := r.Cookie(sessionCookie); err == nil {
+	if c, err := r.Cookie(a.sessionCookie); err == nil {
 		return hashToken(c.Value)
 	}
 	return ""
@@ -390,7 +407,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request, user, pass, code st
 		return 0, err
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: tok, Path: "/",
+		Name: a.sessionCookie, Value: tok, Path: "/",
 		MaxAge: int(sec.SessionTTL.Seconds()), HttpOnly: true, Secure: a.opt.Secure,
 		SameSite: http.SameSiteStrictMode,
 	})
@@ -419,15 +436,18 @@ func (a *Auth) loginFailure(ip, user string, sec Security, detail string, cause 
 }
 
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
+	if c, err := r.Cookie(a.sessionCookie); err == nil {
 		_ = a.store.DeleteSession(hashToken(c.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
+	http.SetCookie(w, &http.Cookie{Name: a.sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: a.opt.Secure, SameSite: http.SameSiteStrictMode})
 }
 
 // ClientIP 直接取 TCP 对端地址。danlu 不放在反向代理后面，所以不信任 X-Forwarded-For。
 func ClientIP(r *http.Request) string {
+	if _, ok := LocalPeer(r); ok {
+		return "cli" // 本机命令行，与 danlu token create 等命令的操作记录记法一致
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

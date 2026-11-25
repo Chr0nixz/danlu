@@ -96,6 +96,10 @@ func TestExternalProcessMergedAndBlockingReason(t *testing.T) {
 	if reason := h.m.WaitReasons()[next]; !strings.Contains(reason, "PID 1234") || !strings.Contains(reason, "指定 GPU") {
 		t.Fatalf("等待原因不明确: %q", reason)
 	}
+	// 面板拿到的是机器码：按指定卡等待，挡路的是外部进程
+	if w := h.m.Waits()[next]; w.Kind != WaitPinned || len(w.Pinned) != 1 || w.Pinned[0] != 0 || w.Blocker == nil || w.Blocker.Kind != BlockExternal || w.Blocker.PID != 1234 || w.Blocker.GPU != 0 {
+		t.Fatalf("结构化等待原因不对: %+v %+v", w, w.Blocker)
+	}
 	count := len(alertEvents(t, h.st.Store))
 	h.m = h.manager()
 	h.tick()
@@ -125,6 +129,13 @@ func TestUnknownMemoryBlockingReasonAndAlert(t *testing.T) {
 	if reason := h.m.WaitReasons()[id]; !strings.Contains(reason, "未知显存占用") {
 		t.Fatalf("队列等待原因应说明未知显存占用: %q", reason)
 	}
+	if w := h.m.Waits()[id]; w.Kind != WaitGPUs || w.Need != 1 || w.Free != 0 || w.Blocker == nil || w.Blocker.Kind != BlockUnknownMem || w.Blocker.MemMB != 2048 {
+		t.Fatalf("结构化等待原因不对: %+v %+v", w, w.Blocker)
+	}
+	if len(alertEvents(t, h.st.Store)) != 0 {
+		t.Fatal("只有一份采样挡着时不应告警")
+	}
+	h.tick() // 下一份采样还挡着
 	var found bool
 	for _, event := range alertEvents(t, h.st.Store) {
 		if event.Kind != store.EventAlertRaised || event.Key != fmt.Sprintf("blocked:%d", id) {
@@ -138,6 +149,53 @@ func TestUnknownMemoryBlockingReasonAndAlert(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("未知显存阻塞应记录告警事件")
+	}
+}
+
+// 任务刚结束时，旧采样里还留着它的进程：队首被挡一份采样就过去了，不该推送"队首被阻塞"
+func TestBlockedAlertNeedsTwoSamples(t *testing.T) {
+	h := newHarness(t, 1)
+	head := h.add(1)
+	h.gpus.set(func(f *fakeGPUs) { f.gpus[0].Procs = []gpu.Proc{{PID: 4321, JobID: 99}} }) // 已经结束的任务 #99 的进程
+	h.tick()
+	if w := h.m.Waits()[head]; w.Blocker == nil || w.Blocker.Kind != BlockJobProc {
+		t.Fatalf("等待原因照样说明挡路的进程: %+v", w)
+	}
+	h.gpus.set(func(f *fakeGPUs) { f.gpus[0].Procs = nil })
+	h.tick()
+	h.expect(head, store.StatusRunning)
+	if events := alertEvents(t, h.st.Store); len(events) != 0 {
+		t.Fatalf("只挡了一份采样不应告警: %+v", events)
+	}
+}
+
+// 认不出归属的进程（同一用户、正在退出或是僵尸）：卡不分配，但不算外部进程，不告警、不记 ext_seen
+func TestOwnerUnknownProcessIsNotExternal(t *testing.T) {
+	h := newHarness(t, 2)
+	running := h.add(1)
+	h.tick()
+	h.expect(running, store.StatusRunning)
+	card := h.job(running).GPUsAssigned[0]
+	other := 1 - card
+	h.gpus.set(func(f *fakeGPUs) {
+		f.gpus[card].Procs = []gpu.Proc{{PID: 1001, JobID: running}, {PID: 1002, OwnerUnknown: true}}
+		f.gpus[other].Procs = []gpu.Proc{{PID: 2002, OwnerUnknown: true}}
+	})
+	head := h.add(1)
+	for range 3 {
+		h.tick()
+	}
+	h.expect(head, store.StatusQueued)
+	if w := h.m.Waits()[head]; w.Blocker == nil || w.Blocker.Kind != BlockOwnerUnknown || w.Blocker.PID != 2002 {
+		t.Fatalf("等待原因应说明归属不明的进程: %+v", w)
+	}
+	if events := alertEvents(t, h.st.Store); len(events) != 0 {
+		t.Fatalf("归属不明的进程不应告警: %+v", events)
+	}
+	h.ex.finish(running, 1)
+	h.tick()
+	if j := h.job(running); j.ExtSeen {
+		t.Fatalf("归属不明的进程不应记成运行期间出现过外部进程: %+v", j)
 	}
 }
 
@@ -165,13 +223,14 @@ func TestDiskAlertsPreserveUnknownSamplesAndRestore(t *testing.T) {
 		t.Fatal("重启后未采样不能宣布恢复")
 	}
 	d.at = time.Now()
-	d.disks[0].Error = "暂时不可用"
+	// 查询出错的条目没有 ID，只有上次的分区 ID（和真实采样的形状一致）
+	d.disks[0] = system.Disk{Path: "/data", Data: true, Error: "暂时不可用", LastID: "1"}
 	d.disks[1].Warn = false
 	updateAlerts(t, h.m, time.Now())
 	if events := alertEvents(t, h.st.Store); len(events) != 3 || events[2].Key != "disk_low:10" {
 		t.Fatalf("分区 ID 前缀相同不应相互影响: %+v", events)
 	}
-	d.disks[0].Error, d.disks[0].Warn = "", false
+	d.disks[0] = system.Disk{ID: "1", Path: "/data", Data: true, AvailableBytes: 100 << 30}
 	updateAlerts(t, h.m, time.Now())
 	if len(alertEvents(t, h.st.Store)) != 4 {
 		t.Fatal("恢复后应清除磁盘告警")

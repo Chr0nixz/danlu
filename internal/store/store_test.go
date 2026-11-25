@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,6 +115,26 @@ func TestEndedCursor(t *testing.T) {
 	}
 	if got := ids(JobFilter{Before: 200}); !slices.Equal(got, []int64{1}) {
 		t.Fatalf("Before=200 = %v，应为 [1]", got)
+	}
+}
+
+// 排队任务多于一页时，按 id 从旧到新取到的是队首那一页
+func TestListJobsAscending(t *testing.T) {
+	s := openTest(t)
+	for range 5 {
+		if err := s.InsertJob(&Job{Name: "j", Workdir: "/w", Cmd: "x", Status: StatusQueued}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, total, err := s.ListJobs(JobFilter{Statuses: []string{StatusQueued}, Ascending: true, Limit: 2})
+	if err != nil || total != 5 {
+		t.Fatalf("total=%d err=%v", total, err)
+	}
+	if len(list) != 2 || list[0].ID != 1 || list[1].ID != 2 {
+		t.Fatalf("应取队首的 #1 #2: %+v", list)
+	}
+	if list, _, _ := s.ListJobs(JobFilter{Statuses: []string{StatusQueued}, Limit: 2}); list[0].ID != 5 {
+		t.Fatalf("默认仍是从新到旧: %+v", list)
 	}
 }
 
@@ -242,6 +263,52 @@ func TestBackupBeforeUpgrade(t *testing.T) {
 	}
 }
 
+// 迁移持续失败时（systemd 每 3 秒重启一次）：库停在原来的版本，不留中间版本；库没变过就不重复备份，
+// 唯一能给旧程序用的备份不会被轮换掉。旧程序又写过库之后，再升级时重新备份
+func TestFailingMigrationKeepsBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+	full := slices.Clone(migrations)
+	base := len(full) - 2
+	withMigrations(t, full[:base])
+	s := openAt(t, path)
+	s.Close()
+
+	backups := func() []string {
+		t.Helper()
+		b, _ := filepath.Glob(filepath.Join(dir, "backup", "*.db"))
+		return b
+	}
+	migrations = append(slices.Clone(full), "CREATE TABLE half (a); CREATE TABLE jobs (b);")
+	for range keepBackups + 2 {
+		if _, err := Open(path); err == nil {
+			t.Fatal("迁移失败时 Open 应该返回错误")
+		}
+	}
+	if b := backups(); len(b) != 1 || !strings.HasSuffix(b[0], fmt.Sprintf("-v%d.db", base)) {
+		t.Fatalf("库没变过时应只备份一次，而且是原来的版本: %v", b)
+	}
+	migrations = full[:base]
+	s = openAt(t, path)
+	if v := userVersion(t, s); v != base {
+		t.Fatalf("迁移失败后 user_version = %d，应该还是 %d（不能停在中间版本）", v, base)
+	}
+	// 旧程序接着用、写了库：下次升级前要重新备份
+	time.Sleep(10 * time.Millisecond)
+	if _, err := s.db.Exec("INSERT INTO jobs(id,name,workdir,cmd,status,created_at) VALUES (1,'new','/w','x','queued',0)"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	migrations = full
+	s = openAt(t, path)
+	if v := userVersion(t, s); v != len(full) {
+		t.Fatalf("升级后 user_version = %d", v)
+	}
+	if b := backups(); len(b) != 2 {
+		t.Fatalf("库变过之后应该重新备份: %v", b)
+	}
+}
+
 func TestRepeatedBackupSameVersion(t *testing.T) {
 	s := openTest(t)
 	dir := t.TempDir()
@@ -289,5 +356,93 @@ func TestBootIDRoundTrip(t *testing.T) {
 	s.SaveJob(j)
 	if got, _ := s.GetJob(j.ID); got.BootID != "boot-1" {
 		t.Fatalf("BootID = %q", got.BootID)
+	}
+}
+
+// 命令行用的 OpenCurrent 从不迁移：旧库原样留着、不备份，由调用方决定能不能迁移
+func TestOpenCurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+	var old *OutdatedError
+	if _, err := OpenCurrent(path); !errors.As(err, &old) || old.Have != 0 || old.Want != len(migrations) {
+		t.Fatalf("还没建表的库也要先迁移: %v", err)
+	}
+
+	full := migrations
+	withMigrations(t, full[:len(full)-1])
+	openAt(t, path).Close()
+	migrations = full
+	if _, err := OpenCurrent(path); !errors.As(err, &old) || old.Have != len(full)-1 || !strings.Contains(err.Error(), "旧版本") {
+		t.Fatalf("库比程序旧时应返回 OutdatedError: %v", err)
+	}
+	s := openAt(t, filepath.Join(dir, "t.db"))
+	if v := userVersion(t, s); v != len(full) {
+		t.Fatalf("Open 照常迁移: %d", v)
+	}
+	s.Close()
+	if backups, _ := filepath.Glob(filepath.Join(dir, "backup", "*.db")); len(backups) != 1 {
+		t.Fatalf("只有 Open 迁移时备份一次: %v", backups)
+	}
+
+	s, err := OpenCurrent(path)
+	if err != nil {
+		t.Fatalf("当前版本的库直接打开: %v", err)
+	}
+	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", len(full)+1)); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if _, err := OpenCurrent(path); err == nil || errors.As(err, &old) || !strings.Contains(err.Error(), "新版本") {
+		t.Fatalf("库比程序新时拒绝打开: %v", err)
+	}
+}
+
+func TestReruns(t *testing.T) {
+	s := openTest(t)
+	parent := &Job{Name: "p", Workdir: "/w", Cmd: "x", Status: StatusFailed}
+	if err := s.InsertJob(parent); err != nil {
+		t.Fatal(err)
+	}
+	var kids []int64
+	for range 3 {
+		k := &Job{Name: "k", Workdir: "/w", Cmd: "x", Status: StatusQueued, RerunOf: &parent.ID}
+		if err := s.InsertJob(k); err != nil {
+			t.Fatal(err)
+		}
+		kids = append(kids, k.ID)
+	}
+	got, err := s.Reruns(parent.ID, 2)
+	if err != nil || len(got) != 2 || got[0].ID != kids[0] || got[1].ID != kids[1] || got[0].Status != StatusQueued {
+		t.Fatalf("重跑列表不对: %+v %v", got, err)
+	}
+	if got, err := s.Reruns(kids[0], 5); err != nil || len(got) != 0 {
+		t.Fatalf("没有重跑时应为空: %+v %v", got, err)
+	}
+}
+
+// 提交幂等键：读写往返；同一个 key 只能插一次；不带 key 的任务互不影响
+func TestSubmitKeyUnique(t *testing.T) {
+	s := openTest(t)
+	a := &Job{Name: "a", Workdir: "/w", Cmd: "x", Status: StatusQueued, SubmitKey: "k-1"}
+	if err := s.InsertJob(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertJob(&Job{Name: "b", Workdir: "/w", Cmd: "x", Status: StatusQueued, SubmitKey: "k-1"}); !errors.Is(err, ErrSubmitKeyExists) {
+		t.Fatalf("重复的 key 应返回 ErrSubmitKeyExists，得到 %v", err)
+	}
+	for range 2 {
+		if err := s.InsertJob(&Job{Name: "c", Workdir: "/w", Cmd: "x", Status: StatusQueued}); err != nil {
+			t.Fatalf("不带 key 的任务不受唯一索引限制: %v", err)
+		}
+	}
+	got, err := s.JobBySubmitKey("k-1")
+	if err != nil || got.ID != a.ID || got.SubmitKey != "k-1" {
+		t.Fatalf("按 key 查到 %+v %v", got, err)
+	}
+	if j, err := s.GetJob(a.ID + 1); err != nil || j.SubmitKey != "" {
+		t.Fatalf("不带 key 的任务 SubmitKey 应为空: %+v %v", j, err)
+	}
+	if _, err := s.JobBySubmitKey("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("没有的 key 应返回 ErrNotFound，得到 %v", err)
 	}
 }

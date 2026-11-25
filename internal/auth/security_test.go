@@ -160,7 +160,7 @@ func TestShortenSessionTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookie && c.MaxAge != 1800 {
+		if c.Name == a.sessionCookie && c.MaxAge != 1800 {
 			t.Fatalf("新登录的 cookie 应按 30 分钟，实际 %d 秒", c.MaxAge)
 		}
 	}

@@ -1,6 +1,7 @@
 package strict
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,7 +45,7 @@ func TestValidate(t *testing.T) {
 		t.Fatal(r.RunDir())
 	}
 	for name, mutate := range map[string]func(*StartRequest){
-		"协议":     func(r *StartRequest) { r.V = 2 },
+		"协议":     func(r *StartRequest) { r.V = Protocol - 1 },
 		"编号":     func(r *StartRequest) { r.JobID = 0 },
 		"相对路径":   func(r *StartRequest) { r.Exec = "bin/danlu" },
 		"不规整路径":  func(r *StartRequest) { r.RunRoot = "/home/u/../root/run" },
@@ -191,8 +192,8 @@ Max realtime timeout      unlimited            unlimited            us
 }
 
 func TestParseStatus(t *testing.T) {
-	c, err := ParseStatus("Name:\tdanlu\nUid:\t1001\t1001\t1001\t1001\nGid:\t1002\t1002\t1002\t1002\nGroups:\t27 44 1002 \n")
-	if err != nil || c.UID != 1001 || c.GID != 1002 || !slices.Equal(c.Groups, []int{27, 44, 1002}) {
+	c, err := ParseStatus("Name:\tdanlu\nPPid:\t812\nUid:\t1001\t1001\t1001\t1001\nGid:\t1002\t1002\t1002\t1002\nGroups:\t27 44 1002 \n")
+	if err != nil || c.UID != 1001 || c.GID != 1002 || c.PPID != 812 || !slices.Equal(c.Groups, []int{27, 44, 1002}) {
 		t.Fatalf("%+v %v", c, err)
 	}
 	if _, err := ParseStatus("Name:\tx\n"); err == nil {
@@ -205,14 +206,20 @@ func TestUnitArgs(t *testing.T) {
 	if err := r.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	u := Unit{Name: "danlu-job-1001-abcd-82-1.service", Creds: Creds{UID: 1001, GID: 1002, Groups: []int{44, 1002}},
+	u := Unit{Name: "danlu-job-1001-abcd-82-1.service", UID: 1001,
 		Devices: []string{"/dev/nvidia3 rw", "char-pts rwm"}, Limits: []string{"LimitNOFILE=1024:524288"}, JobID: 82, Exec: ExecLine(r)}
 	args := u.Args()
-	for _, want := range []string{"--uid=1001", "--gid=1002", "--slice=user-1001.slice", "--property=DevicePolicy=closed",
-		"--property=SupplementaryGroups=44 1002", "--property=DeviceAllow=/dev/nvidia3 rw", "--property=LimitNOFILE=1024:524288",
+	for _, want := range []string{"--uid=1001", "--slice=user-1001.slice", "--property=DevicePolicy=closed",
+		"--property=DeviceAllow=/dev/nvidia3 rw", "--property=LimitNOFILE=1024:524288",
 		"--property=OOMPolicy=continue", "--property=KillMode=process"} {
 		if !slices.Contains(args, want) {
 			t.Errorf("缺少参数 %q", want)
+		}
+	}
+	// 组由 systemd 按用户库取，调用者给不了
+	for _, a := range args {
+		if strings.HasPrefix(a, "--gid") || strings.Contains(a, "Group") {
+			t.Errorf("不应带组参数: %q", a)
 		}
 	}
 	sep := slices.Index(args, "--")
@@ -220,5 +227,64 @@ func TestUnitArgs(t *testing.T) {
 		"--dir", "/home/u/.danlu/run/82", "--", "/bin/bash", "/home/u/.danlu/run/82/run.sh"}
 	if sep < 0 || !slices.Equal(args[sep+1:], wantExec) {
 		t.Fatalf("ExecStart 不对: %q", args[sep+1:])
+	}
+}
+
+// danlu_pid 必须是助手的祖先：同一 uid 下的别的进程（比如以 gid 0 运行的容器进程）不行
+func TestIsAncestor(t *testing.T) {
+	// 1 ← 700(systemd --user) ← 800(danlu) ← 900(sudo) ← 950(助手)；600 是同一 uid 的容器进程
+	parent := map[int]int{950: 900, 900: 800, 800: 700, 700: 1, 600: 1}
+	status := func(pid int) (string, error) {
+		pp, ok := parent[pid]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return fmt.Sprintf("Name:\tx\nPPid:\t%d\nUid:\t1001\t1001\t1001\t1001\nGid:\t1001\t1001\t1001\t1001\n", pp), nil
+	}
+	for pid, want := range map[int]bool{900: true, 800: true, 700: true, 600: false, 950: false, 1: false, 4242: false} {
+		if got := IsAncestor(950, pid, status); got != want {
+			t.Errorf("IsAncestor(950, %d) = %v，期望 %v", pid, got, want)
+		}
+	}
+	// 祖先链读不下去（进程已经退出）时不认
+	delete(parent, 900)
+	if IsAncestor(950, 800, status) {
+		t.Error("祖先链断了还认")
+	}
+	// 成环的假数据不会死循环
+	loop := map[int]int{10: 11, 11: 10}
+	if IsAncestor(10, 99, func(pid int) (string, error) {
+		return fmt.Sprintf("PPid:\t%d\nUid:\t1\t1\t1\t1\nGid:\t1\t1\t1\t1\n", loop[pid]), nil
+	}) {
+		t.Error("成环时不该认")
+	}
+}
+
+// GitHub runner 这类没有 NVIDIA 驱动的机器：不用卡的严格任务照样能跑，要卡就报错。
+// 驱动在、但 /dev/nvidiaN 还没建出来时拿不到要排除的主设备号，不用卡也报错（否则会放行整个 nvidia 主设备号）
+func TestDevicePlanWithoutNVIDIA(t *testing.T) {
+	root := t.TempDir()
+	h := Host{Proc: filepath.Join(root, "proc"), Sys: filepath.Join(root, "sys"), Dev: filepath.Join(root, "dev"),
+		Major: func(string) (uint32, bool) { return 0, false }}
+	for _, dir := range []string{h.Proc, h.Sys, h.Dev} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(h.Proc, "devices"), []byte("Character devices:\n  1 mem\n136 pts\n\nBlock devices:\n  8 sd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DevicePlan(h, nil)
+	if want := []string{"char-mem rwm", "char-pts rwm", "block-sd rwm"}; err != nil || !slices.Equal(got, want) {
+		t.Fatalf("没有 NVIDIA 驱动时不用卡的任务应放行普通设备: %q %v", got, err)
+	}
+	if _, err := DevicePlan(h, []string{"0000:08:00.0"}); err == nil {
+		t.Fatal("没有 NVIDIA 驱动时要卡应报错")
+	}
+	if err := os.MkdirAll(filepath.Join(h.Proc, "driver", "nvidia", "gpus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DevicePlan(h, nil); err == nil {
+		t.Fatal("驱动在但没有 /dev/nvidiaN 时不用卡也应报错")
 	}
 }

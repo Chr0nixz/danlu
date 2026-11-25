@@ -1,12 +1,15 @@
 package notify
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"danlu/internal/settings"
 	"danlu/internal/store"
 )
 
@@ -37,6 +40,31 @@ func TestMessageCatalogParity(t *testing.T) {
 		if strings.Join(zs, ",") != strings.Join(es, ",") {
 			t.Errorf("键 %s 占位符不一致: zh %v en %v", k, zs, es)
 		}
+	}
+}
+
+// 面板上选 English 存进库的是 JSON（"en" 带引号）；serve 和 notify test 按 settings.NotifyLang 接线，
+// 从 UpdatePrefs 一路到推送正文都得是英文
+func TestNotifyLangPrefReachesPushes(t *testing.T) {
+	st, s, r := fixture(t)
+	s.Lang = func() string { return settings.NotifyLang(st) }
+	if s.lang() != "zh-CN" {
+		t.Fatalf("默认推送语言应为中文: %s", s.lang())
+	}
+	if _, _, err := settings.UpdatePrefs(st, map[string]json.RawMessage{"notify_lang": json.RawMessage(`"en"`)}); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := st.GetSetting("ui.notify_lang"); raw != `"en"` {
+		t.Fatalf("偏好按 JSON 存库，期望带引号的 \"en\"，得到 %q", raw)
+	}
+	if s.lang() != "en" {
+		t.Fatalf("面板选 English 后推送语言仍是 %s", s.lang())
+	}
+	if err := s.Test(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.requests) != 1 || !strings.HasSuffix(r.requests[0].title, "Test push") || r.requests[0].body != "Danlu phone push is connected." {
+		t.Fatalf("测试推送应为英文: %+v", r.requests)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net"
 	"os"
@@ -64,19 +65,21 @@ func Generate(dir string, ips []net.IP) error {
 	}
 	now := time.Now()
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial(),
-		Subject:               pkix.Name{CommonName: "Danlu Local CA (" + ips[0].String() + ")", Organization: []string{"Danlu"}},
+		SerialNumber: serial(),
+		// 名字里不写产品名：服务器证书链里带着 CA，握手就能看到，写了等于告诉扫描器这是丹炉。
+		// 设备的证书列表里按 IP 认得出来
+		Subject:               pkix.Name{CommonName: "Local CA (" + ips[0].String() + ")"},
 		NotBefore:             now.Add(-time.Hour),
 		NotAfter:              now.AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		MaxPathLenZero:        true,
-		// 域名、邮箱、URI 只允许一个永远不存在的 .invalid 域，等于全部禁止
+		// 域名、邮箱、URI 只允许永远不存在的 .invalid 域，等于全部禁止
 		PermittedDNSDomainsCritical: true,
-		PermittedDNSDomains:         []string{"danlu.invalid"},
-		PermittedEmailAddresses:     []string{"danlu.invalid"},
-		PermittedURIDomains:         []string{"danlu.invalid"},
+		PermittedDNSDomains:         []string{"invalid"},
+		PermittedEmailAddresses:     []string{"invalid"},
+		PermittedURIDomains:         []string{"invalid"},
 		PermittedIPRanges:           ranges,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
@@ -93,9 +96,15 @@ func Generate(dir string, ips []net.IP) error {
 }
 
 // EnsureServer 在服务器证书缺失、快过期或 IP 不匹配时，用现有 CA 重新签发。
+//
+// 只有 ca.crt 和 ca.key 都确实不存在（还没生成过）时才新建 CA。换 CA 会让所有装过它的设备不再信任这台服务器，
+// 所以其余情况一律不自作主张：stat 出错（网络存储偶尔返回 EIO）、私钥被管理员挪去离线保存，
+// 服务器证书还新鲜就照常用；要续签时报错，提示放回私钥或执行 danlu cert --regen。
 func EnsureServer(dir string, ips []net.IP) error {
 	f := FilesIn(dir)
-	if _, err := os.Stat(f.CAKey); err != nil {
+	_, crtErr := os.Stat(f.CACert)
+	_, keyErr := os.Stat(f.CAKey)
+	if errors.Is(crtErr, fs.ErrNotExist) && errors.Is(keyErr, fs.ErrNotExist) {
 		return Generate(dir, ips)
 	}
 	if cert, err := loadCert(f.Cert); err == nil {
@@ -104,9 +113,13 @@ func EnsureServer(dir string, ips []net.IP) error {
 			return nil
 		}
 	}
+	if keyErr != nil {
+		return fmt.Errorf("服务器证书要重新签发，但读不到本地 CA 私钥（%w）。私钥挪走了就放回 %s；"+
+			"确实丢了就执行 danlu cert --regen 重新生成，并在各设备上重新安装 CA", keyErr, f.CAKey)
+	}
 	ca, err := loadCert(f.CACert)
 	if err != nil {
-		return err
+		return fmt.Errorf("服务器证书要重新签发，但读不到本地 CA 证书（%w）。确实丢了就执行 danlu cert --regen 重新生成，并在各设备上重新安装 CA", err)
 	}
 	for _, ip := range ips {
 		if !caPermits(ca, ip) {
@@ -139,7 +152,7 @@ func issueServerFor(f Files, ips []net.IP, validity time.Duration) error {
 		SerialNumber: serial(),
 		// CN 不能写成 IP：OpenSSL 会把像主机名的 CN 当作域名，拿去和 CA 的域名限制比对，导致校验失败。
 		// 浏览器只看 SAN 里的 IP。
-		Subject:     pkix.Name{CommonName: "Danlu Server"},
+		Subject:     pkix.Name{CommonName: "Local Server"},
 		NotBefore:   now.Add(-time.Hour),
 		NotAfter:    now.Add(validity),
 		KeyUsage:    x509.KeyUsageDigitalSignature,

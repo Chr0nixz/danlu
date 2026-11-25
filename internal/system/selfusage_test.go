@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func writeSized(t *testing.T, path string, size int) {
@@ -196,5 +198,55 @@ func TestSelfMonitorKeepsLastGoodOnError(t *testing.T) {
 	u2, _, _ := mon.Latest()
 	if u2.Parts[0].Bytes == 0 {
 		t.Fatal("Latest 应返回副本")
+	}
+}
+
+// 超时以后才做完的统计留给下一次：一次统计比超时还长时，数据照样能出来，不会每轮从头扫、每轮超时
+func TestSelfScanKeepsLateResult(t *testing.T) {
+	release := make(chan struct{})
+	calls := 0
+	scan := boundSelfScan(func(context.Context, string, string, func() (DBStats, error)) (SelfUsage, error) {
+		calls++
+		<-release
+		return SelfUsage{TotalBytes: 42}, nil
+	}, 50*time.Millisecond)
+	if _, err := scan(context.Background(), "", "", nil); err == nil {
+		t.Fatal("超时应报错")
+	}
+	if _, err := scan(context.Background(), "", "", nil); err == nil || !strings.Contains(err.Error(), "仍未返回") {
+		t.Fatalf("上一次还没回来时不应再起一次: %v", err)
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		u, err := scan(context.Background(), "", "", nil)
+		if err == nil {
+			if u.TotalBytes != 42 || calls != 1 {
+				t.Fatalf("应交出迟到的那次结果，不重新统计: %+v，统计了 %d 次", u, calls)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("迟到的结果没有交出来: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 遍历途中文件被删掉（清理、任务结束）不让整类统计中止
+func TestWalkSizeSkipsVanishedFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "logs", "1.log"), []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, f, err := walkSize(context.Background(), root, "gone", map[hardlinkKey]bool{})
+	if err != nil || b != 0 || f != 0 {
+		t.Fatalf("不存在的路径应计 0、不报错: %d %d %v", b, f, err)
+	}
+	if b, f, err := walkSize(context.Background(), root, "logs", map[hardlinkKey]bool{}); err != nil || b != 5 || f != 1 {
+		t.Fatalf("统计不对: %d %d %v", b, f, err)
 	}
 }

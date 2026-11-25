@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Cpu, HardDrive, MemoryStick } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
-import { apiErrorText, now, type HostMetricsResponse, type HostSample } from '@danlu/core'
+import { apiErrorText, useNow, type HostMetricsResponse, type HostSample } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { Card, cx, Meter, Skeleton } from './ui'
@@ -15,7 +15,9 @@ export function HostMetrics() {
   const { data, isLoading, error } = useHostMetrics()
   const samples = data?.samples ?? []
   const sample = samples.at(-1)
-  const age = data ? Math.max(0, now() - data.updated_at) : 0
+  // 每秒重画：采样停了以后轮询结果不再变，"数据 N 秒没有更新"要靠它走出来
+  const at = useNow()
+  const age = data ? Math.max(0, at - data.updated_at) : 0
   const stale = data && age > 15
 
   return (

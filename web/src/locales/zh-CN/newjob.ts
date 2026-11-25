@@ -90,6 +90,8 @@ export const newjob = {
   'newjob.notify': '手机推送',
   'newjob.notify_hint': '失败仍会按服务器的推送设置提醒。',
   'newjob.notify_done': '结束时推送',
+  'newjob.notify_push_off': '这台服务器还没开启手机推送，勾上也收不到。',
+  'newjob.notify_push_settings': '推送设置',
 
   // 环境变量
   'newjob.env': '环境变量',

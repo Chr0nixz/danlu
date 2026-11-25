@@ -136,12 +136,16 @@ echo "== 安全入口与登录 =="
 check "未过入口访问首页返回 404" [ "$(code "$BASE/")" = 404 ]
 check "未过入口访问 API 返回 404" [ "$(code "$BASE/api/me")" = 404 ]
 check "错误入口返回 404" [ "$(code "$BASE/wrongentrance")" = 404 ]
+curl -s -D "$T/gate404.headers" -o "$T/gate404.body" "$BASE/api/me"
+check "没过入口的 404 不带安全响应头（不留指纹）" bash -c "! grep -qiE '^(x-frame-options|x-content-type-options|referrer-policy|content-security-policy):' '$T/gate404.headers' && [ ! -s '$T/gate404.body' ]"
 check "正确入口跳转 302" [ "$(code "$BASE/$ENTRANCE")" = 302 ]
 check "过入口后未登录 API 返回 401" [ "$(code "$BASE/api/me")" = 401 ]
 check "未登录不能读取手机接入二维码" [ "$(code "$BASE/api/settings/qr.svg")" = 401 ]
 check "错误密码返回 401" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"username":"admin","password":"nope"}' "$BASE/api/login")" = 401 ]
 check "正确密码登录成功" [ "$(code -X POST -H 'Content-Type: application/json' -d '{"username":"admin","password":"testpass123"}' "$BASE/api/login")" = 200 ]
 check "登录后访问 API 返回 200" [ "$(code "$BASE/api/me")" = 200 ]
+curl -s -D "$T/page.headers" -o /dev/null -b "$JAR" -c "$JAR" "$BASE/"
+check "过了入口的页面带安全响应头" bash -c "grep -qi '^x-frame-options: DENY' '$T/page.headers' && grep -qi '^content-security-policy:' '$T/page.headers'"
 curl -s -D "$T/qr.headers" -b "$JAR" -c "$JAR" -o "$T/qr.svg" "$BASE/api/settings/qr.svg"
 check "设置接口返回 SVG 接入二维码" grep -q '<svg' "$T/qr.svg"
 check "接入二维码禁止缓存" grep -qi '^Cache-Control: private, no-store' "$T/qr.headers"
@@ -346,6 +350,8 @@ check "预约马上收下空闲的 GPU 2，有外部进程的 GPU 3 不收" [ "$
 RB=$(submit "{\"name\":\"res-b\",\"workdir\":\"$W\",\"cmd\":\"true\",\"gpus\":1}")
 res_wait_reason() { [ "$(job "$RB" "'已被预约 #$RID' in d.get('wait_reason','')")" = True ]; }
 check "排队任务的等待原因写出预约" wait_until 10 res_wait_reason
+# 面板按机器码合成等待原因（英文界面不漏中文）：结构化字段指向同一个预约
+check "排队任务的结构化等待原因指向预约" [ "$(job "$RB" "(d.get('wait') or {}).get('blocker',{}).get('kind')=='reserved' and d['wait']['blocker'].get('reservation_id')==$RID")" = True ]
 check "GPU 接口给预约收下的卡带上预约" [ "$(api "$BASE/api/gpus" | json "d['gpus'][2]['reservation']['id']==$RID and d['gpus'][2]['reservation']['status']=='waiting' and d['gpus'][0]['reservation'] is None")" = True ]
 touch "$T/res-go"
 check "占卡的任务结束" wait_status "$RA" succeeded 10
@@ -394,7 +400,7 @@ if [ -n "${CI:-}${E2E_STRICT:-}" ] && sudo -n true 2>/dev/null && [ -d /run/syst
   check "严格任务在自己用户 slice 下的服务里运行" grep -q "user-$(id -u).slice/$SUNIT" "$DANLU_HOME/logs/$SJ.log"
   check "日志开头写明严格限卡" grep -q "严格限卡" "$DANLU_HOME/logs/$SJ.log"
   check "不用卡的严格任务看不到任何卡" grep -q "cvd=\[\] gpus=\[\]" "$DANLU_HOME/logs/$SJ.log"
-  check "环境文件读完即删" [ ! -e "$DANLU_HOME/run/$SJ/env" ]
+  check "环境文件读完即删" bash -c "! compgen -G '$DANLU_HOME/run/$SJ/env*' >/dev/null"
   check "包装脚本记下这个任务自己的 OOM 计数" [ "$(cat "$DANLU_HOME/run/$SJ/oom_kill" 2>/dev/null)" = 0 ]
   strict_manifest() { out=$(job "$SJ" "d.get('output_dir', '')"); [ -f "$out/danlu.json" ] && [ "$(manifest "$out/danlu.json" "d.get('gpu_isolation')")" = strict ]; }
   check "danlu.json 记下严格限卡" wait_until 10 strict_manifest
@@ -541,7 +547,7 @@ check "快照重跑运行旧代码并读取当前数据及被跳过的文件" [ 
 check "快照重跑记录来源和当前版本文件" [ "$(job "$S4C" "d['code_from']==$S4A and 'config/large.bin' in d['snapshot_note'] and d['snapshot_ok']")" = True ]
 check "原快照与重跑任务的代码包复用同一个文件" test "$DANLU_HOME/snapshots/$S4A.tar.gz" -ef "$DANLU_HOME/snapshots/$S4C.tar.gz"
 check "快照重跑结束后标星可保留其文件" [ "$(api -X POST "$BASE/api/jobs/$S4C/star" -d '{"starred":true}' | json "d['starred']")" = True ]
-S4D=$(submit "{\"name\":\"restore-artifacts\",\"workdir\":\"$S4\",\"cmd\":\"cat config/model.weights; [ -e add.py ] && echo has-add || echo no-add; mkdir -p checkpoints && printf model > checkpoints/best.pt\",\"gpus\":0,\"rerun_of\":$S4A,\"code_from\":$S4A}")
+S4D=$(submit "{\"name\":\"restore-artifacts\",\"workdir\":\"$S4\",\"cmd\":\"cat config/model.weights; [ -e add.py ] && echo has-add || echo no-add; mkdir -p checkpoints ../outputs && printf model > checkpoints/best.pt && printf out > ../outputs/best.pt\",\"gpus\":0,\"rerun_of\":$S4A,\"code_from\":$S4A}")
 check "快照重跑用相对路径写出产物" wait_status "$S4D" succeeded 20
 check "快照重跑读到混合目录里被 Git 忽略的文件" [ "$(api "$BASE/api/jobs/$S4D/log?tail=10000" | json "'weights-v1' in d['data']")" = True ]
 check "快照之后新建的代码文件没有混进快照重跑" [ "$(api "$BASE/api/jobs/$S4D/log?tail=10000" | json "'no-add' in d['data']")" = True ]
@@ -572,6 +578,65 @@ first = [j['id'] for j in json.loads(sys.argv[1])['jobs']]
 rest = $NEXT_IDS
 assert first and rest and not set(first) & set(rest), (first, rest)
 " "$FIRST"
+
+echo "== 命令行任务命令（unix socket，FEATURES 5.1）=="
+SOCK=$DANLU_HOME/danlu.sock
+check "serve 在数据目录建了权限 600 的 socket" [ "$(stat -c '%a %F' "$SOCK")" = "600 socket" ]
+CLI1=$(cd "$W" && "$BIN" submit --json -g 0 --key e2e-cli-1 -- python3 -c 'print("cli ok")' | json "d['id']")
+check "submit --json 输出任务对象，工作目录默认是当前目录" [ "$(job "$CLI1" "d['workdir']")" = "$W" ]
+check "多个参数逐个加引号，记录的命令能还原 argv" [ "$(job "$CLI1" "d['cmd']")" = "python3 -c 'print(\"cli ok\")'" ]
+check "命令行提交记在操作记录里，来源是 cli" [ "$(api "$BASE/api/audit" | json "any(e['ip']=='cli' and e['detail'].startswith('#$CLI1 ') for e in d['entries'])")" = True ]
+"$BIN" wait "$CLI1" --timeout 30s >/dev/null; RC=$?
+check "wait 等到成功，退出码 0" [ "$RC" = 0 ]
+check "tail 读到任务输出" bash -c "'$BIN' tail $CLI1 -n 5 | grep -qx 'cli ok'"
+check "同一个 --key 再提交得到同一个任务" [ "$(cd "$W" && "$BIN" submit --json -g 0 --key e2e-cli-1 -- python3 -c 'print("cli ok")' | json "d['id']")" = "$CLI1" ]
+"$BIN" submit -C "$W" -g 0 --key e2e-cli-1 --json -- other >/dev/null 2>"$T/cli-conflict.err"; RC=$?
+check "同一个 key 换了命令：退出码 1，stderr 一行带码的 JSON" bash -c "[ $RC = 1 ] && grep -q '\"code\":\"job_submit_key_conflict\"' '$T/cli-conflict.err'"
+CLI2=$("$BIN" submit -C "$W" -g 0 --json -- 'echo boom; exit 3' | json "d['id']")
+"$BIN" wait "$CLI2" --timeout 30s >/dev/null; RC=$?
+check "失败的任务 wait 退出码 10" [ "$RC" = 10 ]
+check "show 给出失败原因" bash -c "'$BIN' show $CLI2 | grep -q '退出码 3'"
+RERUN=$("$BIN" rerun "$CLI1" --current-code --json)
+check "rerun 按面板规则命名并标上 rerun_of" [ "$(echo "$RERUN" | json "d['name'].endswith('-r2') and d['rerun_of']")" = "$CLI1" ]
+check "rerun 复制原任务的命令" [ "$(echo "$RERUN" | json "d['cmd']")" = "$(job "$CLI1" "d['cmd']")" ]
+check "gpus 列出被外部进程占用的 GPU 3" bash -c "'$BIN' gpus | grep -q '^GPU 3 .*外部进程'"
+check "api GET 原样返回接口响应" [ "$("$BIN" api GET /api/gpus | json "len(d['gpus'])")" = 4 ]
+CLI3=$("$BIN" submit -C "$W" --pin 3 --json -- true | json "d['id']") # GPU 3 被外部占用，一直排队
+"$BIN" wait "$CLI3" --timeout 1s >/dev/null; RC=$?
+check "等不到结束：wait 超时退出码 124" [ "$RC" = 124 ]
+check "cancel 取消排队中的任务" bash -c "'$BIN' cancel $CLI3 | grep -q '已取消 #$CLI3'"
+"$BIN" wait "$CLI3" >/dev/null; RC=$?
+check "取消的任务 wait 退出码 11" [ "$RC" = 11 ]
+"$BIN" show 999999 --json >/dev/null 2>"$T/cli-404.err"; RC=$?
+check "任务不存在：退出码 4，码是 job_not_found" bash -c "[ $RC = 4 ] && grep -q '\"code\":\"job_not_found\"' '$T/cli-404.err'"
+CLI4=$("$BIN" submit -C "$W" -g 0 --json -- 'for i in 1 2 3; do printf "step %s/3\r" $i; sleep 0.3; done; echo; echo end' | json "d['id']")
+FOLLOW=$(timeout 30 "$BIN" tail "$CLI4" -f -n 0); RC=$?
+check "tail -f 跟到任务结束，退出码 0" [ "$RC" = 0 ]
+check "tail -f 把进度条折叠成最后一次的状态" bash -c "printf '%s\n' \"\$1\" | grep -qx 'step 3/3' && ! printf '%s' \"\$1\" | grep -q 'step 1/3'" _ "$FOLLOW"
+check "trace --json 与 /api/trace 同形" [ "$(HOME="$T/userhome" "$BIN" trace --json "$OUTDIR/checkpoints/latest.pt" | json "[m['job']['id'] for m in d['matches']]")" = "[$D]" ]
+check "doctor 的命令行入口检查通过" [ "$("$BIN" doctor --json | json "[c['level'] for c in d['checks'] if c['id']=='cli_socket']")" = "['ok']" ]
+check "strict status --json 可解析" [ "$("$BIN" strict status --json | json "'helper' in d and 'enabled' in d")" = True ]
+"$BIN" prune -h >/dev/null 2>&1; RC=$?
+check "prune -h 退出码 0" [ "$RC" = 0 ]
+DANLU_HOME=$T/no-such-home "$BIN" jobs >/dev/null 2>&1; RC=$?
+check "连不上服务：退出码 3" [ "$RC" = 3 ]
+if sudo -n true 2>/dev/null; then
+  sudo -n env DANLU_HOME="$DANLU_HOME" "$BIN" jobs --json >/dev/null 2>"$T/cli-sudo.err"; RC=$?
+  check "sudo danlu jobs 被拒：退出码 3，码是 socket_uid_mismatch" bash -c "[ $RC = 3 ] && grep -q socket_uid_mismatch '$T/cli-sudo.err'"
+else
+  echo "  - 跳过 sudo 检查：没有免密 sudo"
+fi
+# 服务重启的间隙里 wait 不报错：socket 消失几秒后回来
+CLI5=$("$BIN" submit -C "$W" -g 0 --json -- 'sleep 4' | json "d['id']")
+check "重启前任务已启动" wait_started "$CLI5" 10
+"$BIN" wait "$CLI5" --timeout 60s >/dev/null & WAIT_PID=$!
+sleep 0.5
+kill -TERM "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+check "停服时删掉了 socket 文件" [ ! -e "$SOCK" ]
+sleep 1
+start_server
+wait "$WAIT_PID"; RC=$?
+check "wait 跨过服务重启，等到任务成功" [ "$RC" = 0 ]
 
 echo "== 配置和密码 =="
 "$BIN" port 30001 >/dev/null # 命令行改了配置，还没重启
@@ -649,6 +714,7 @@ check "实际清理命令成功" prune_now
 check "清理后任务记录保留并写入清理时间" [ "$(job "$D" "d['pruned_at'] is not None and d['status']=='succeeded'")" = True ]
 check "完成任务的日志、快照和运行目录已清理" bash -c "test ! -e '$DANLU_HOME/logs/$D.log' && test ! -e '$DANLU_HOME/snapshots/$D.tar.gz' && test ! -e '$DANLU_HOME/run/$D'"
 check "快照重跑写在相对路径下的产物在清理后保留" grep -q model "$DANLU_HOME/run/$S4D/code/checkpoints/best.pt"
+check "快照重跑用 ../ 写进运行目录的产物在清理后保留" grep -q out "$DANLU_HOME/run/$S4D/outputs/best.pt"
 check "快照重跑恢复的代码、链接和包装脚本已清理" bash -c "test ! -e '$DANLU_HOME/run/$S4D/code/train.py' && test ! -L '$DANLU_HOME/run/$S4D/code/data' && test ! -e '$DANLU_HOME/run/$S4D/run.sh' && test ! -e '$DANLU_HOME/snapshots/$S4D.meta.json'"
 check "清理链接不影响原工作目录" bash -c "test -f '$S4/data/sample.bin' && test -f '$S4/config/model.weights'"
 check "快照重跑记为已清理" [ "$(job "$S4D" "d['pruned_at'] is not None")" = True ]

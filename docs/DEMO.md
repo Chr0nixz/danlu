@@ -96,7 +96,7 @@ GET /k3x9p2qa7m4z  ──►  设置 gate cookie（HMAC 签名，HttpOnly，有�
 
 ### 3.2 HTTPS：本地 CA（默认，不需要域名）
 
-- `init` 时生成一个 **"Danlu Local CA"**，再用它给服务器签发证书。这个 CA 带有 **NameConstraints，只能为这台服务器的 IP 签证书**。这样即使 CA 私钥泄露，攻击者也无法用它冒充其他网站。
+- `init` 时生成一个本地 CA（名字是 `Local CA (<公网 IP>)`，不写产品名：证书链在握手时就能看到），再用它给服务器签发证书。2026-11-25 之前生成的 CA 名字里还带着 Danlu，执行 `danlu cert --regen` 换掉（各设备要重新安装 CA）；服务器证书续签时自动换成中性名字。这个 CA 带有 **NameConstraints，只能为这台服务器的 IP 签证书**。这样即使 CA 私钥泄露，攻击者也无法用它冒充其他网站。
 - **先装 CA 再登录**：不装 CA 时浏览器会提示"连接不是私密连接"。跳过警告登录，能拦截连接的人就能冒充面板拿到密码，也能换掉设置页里下载的 CA，所以首次接入不跳过警告。
 - **取回 CA（每台设备一次）**：在电脑上经 SSH 取回，`ssh <服务器> danlu ca > danlu-ca.crt`（`danlu ca` 把 CA 打印到标准输出，指纹打印到标准错误）；手机从电脑传过去。装好后设置页可以再下载、并显示指纹，用来和 `danlu info` 核对。
   - 安卓：设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书；
@@ -188,6 +188,7 @@ finish $?
   | `DANLU_RUN_DIR` | `<数据目录>/run/<id>` | 任务进程的身份标记：取消、收尾清理、认领和 GPU 归属都按它找进程。不用 `DANLU_JOB_ID`，因为编号在每个数据目录里都从 1 开始 |
   | `DANLU_OUTPUT_DIR` | `<output_root>/<项目>/<任务 id>-<任务名>/`（默认 `~/danlu-outputs`） | 保存模型、checkpoint 等训练产物；danlu 会在其中维护 `danlu.json`，不会清理该目录 |
   | `WANDB_TAGS` | 追加 `danlu-<id>` | 在 W&B 里按标签找回任务 |
+  | `SPT_NOENV=1` | 用户设了就照用户的 | setproctitle（Ray 的每个 worker 都调它）默认把进程原来的环境区清零写进标题，`DANLU_RUN_DIR` 随之读不到：占卡的 worker 会被当成外部进程，残留进程也清不掉。设了它 setproctitle 不动环境区 |
 
 - 勾选“Bash 环境”时，danlu 用交互式 Bash 加载服务器用户的 `~/.bashrc`，把其中导出的变量加入任务环境。任务表单里的自定义变量优先于 `.bashrc`，danlu 管理的变量仍由 danlu 注入。文件缺失、加载失败或超过 10 秒时，任务会启动失败。`.bashrc` 里用 `&` 起的后台进程，读完环境后会被结束掉，不会留在服务器上。
 
@@ -218,7 +219,7 @@ finish $?
 1. 判断工作目录是不是 git 仓库：
    - **是**：记录 `git rev-parse HEAD`、分支名、`git status --porcelain`，以及 `git diff HEAD`（跳过二进制文件）。要打包的文件列表用 `git ls-files -co --exclude-standard` 得到，即已跟踪的文件，加上未跟踪但没被 `.gitignore` 忽略的文件。
    - **不是**：遍历整个目录，跳过 `.git`、`__pycache__`、`wandb`、`swanlog`、`node_modules`、`.ipynb_checkpoints` 这些目录。
-2. 过滤：跳过大于 1MB 的单个文件；累计超过 50MB 就停止，并在快照里标记"已截断"。两个阈值都可以配置。
+2. 过滤：跳过大于 1MB 的单个文件；累计超过 50MB 的部分跳过，并在快照里标记"已截断"。两个阈值都可以配置。git 目录先收已跟踪的文件、再收未跟踪的，没写进 `.gitignore` 的日志和输出占不掉代码的额度；已跟踪的文件因为大小没收进去时，备注里说明快照重跑会用工作目录里那时的版本。读不了的文件（没有权限之类）记进跳过清单，不让整份快照失败；快照失败时，已经读到的 commit、分支和未提交改动标记照样记在任务上。
 3. 打包成 `snapshots/<id>.tar.gz`，同时写入 `meta.json`，内容包括：文件清单、git 信息、被跳过的文件及原因。
 4. 详情页的"代码"标签里可以：浏览文件树、查看文件内容（带语法高亮）、查看 git diff、下载 tar.gz。
 5. 快照**不会阻塞任务启动太久**：普通代码仓库只需要不到 1 秒；超过 10 秒会放弃快照，在任务里注明"快照超时"，然后照常启动任务。
@@ -282,9 +283,12 @@ GET  /api/workdirs/recent              最近用过的工作目录
 GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 fail_kind、error_line 和 traceback_offset）
 GET  /api/jobs?finished_from_event=&finished_to_event=  按结束事件范围筛选原批次，包含两端
 GET  /api/jobs?order=ended&before=&before_id=  只要已结束的任务，按结束时间倒序；before / before_id 是上一页最后一条的结束时间和 id（游标翻页，多台服务器的历史按时间合并时用）
+GET  /api/jobs?order=asc               按 id 从旧到新（默认从新到旧）；排队任务就是队列顺序，排队多于一页时取到的是队首
 GET  /api/trace?path=                  从绝对路径反查任务，返回匹配来源（output_dir、run_code（快照重跑的 run/<id>/code/）、danlu_json、guess）
 GET  /api/compare?a=&b=                两次任务的命令词、环境变量差异、快照文件差异、包版本及配方
-POST /api/jobs                         提交任务
+POST /api/jobs                         提交任务；带 submit_key（1–100 个 [A-Za-z0-9._:-]）时同一个 key 只建一个任务：
+                                      重复提交返回已有任务（200，新建是 201）；工作目录、命令、GPU 要求、conda、环境变量、
+                                      inherit_bashrc 或 code_from 不同返回 409 job_submit_key_conflict（名字、备注、结束提醒不比）
 GET  /api/jobs/{id}                    任务详情
 GET  /api/jobs/{id}/env                任务记录的环境包列表原文
 POST /api/jobs/{id}/cancel             取消任务
@@ -325,6 +329,8 @@ POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 
 桌面客户端不走 cookie，而是带 `Authorization: Bearer <设备令牌>`：令牌有效就跳过安全入口和登录检查，无效则和没过入口一样返回空 404。令牌只能在服务器上用 `danlu token create` 创建（能 SSH 登录才说明是本人），面板上只能查看和吊销。
 
+本机命令行（`danlu submit`、`jobs`、`show`、`tail`、`wait`、`cancel`、`rerun`、`gpus`、`api`）走数据目录里的 unix socket `danlu.sock`（权限 0600，只在 Linux 上提供），请求和响应与上面的 `/api` 完全相同，不提供页面。连接建立时用 `SO_PEERCRED` 取对端 uid：和运行 danlu 的是同一个用户就跳过安全入口和登录检查，操作记录的来源记为 `cli`；别的 uid（典型是 `sudo danlu …`）返回 403 `socket_uid_mismatch`。socket 起不来（比如数据目录路径超过 107 字节）不影响服务，`danlu doctor` 的 `cli_socket` 一项会说明。
+
 `GET /api/system` 的 `disks` 数组包含 `id`（设备号）、`path`、`paths`（同一分区上被监测的路径）、`total_bytes`、`available_bytes`（普通用户实际可用）、`data`、`warn` 和可选的 `error`。`disks_updated_at` 是采样时间；整个磁盘采集失败或过期时增加 `disks_error`，不影响 CPU/内存数据。
 
 `GET /api/resources` 每 2 秒采样，`updated_at` 是最近一次成功采样的时间（为 0 表示还没有成功过，其余字段都是零值；采集失败时返回上一份好快照和它自己的时间，不会把旧数据标成刚刚），`samples` 是主机采样次数，`process_samples` 是进程采样次数；小于 2 时速率或进程 CPU 还在起步。`cpu.cores` 的 `-1` 表示还没有第二次采样。`processes` 是 CPU 前 8 与内存前 8 的并集，`job_id` 为 0 表示不是本实例任务，`job_name` 由接口补充。`root_disk` 是根分区 `/`，前端按设备号与 `disks` 去重；磁盘 I/O 只统计物理整盘（`/sys/block/<名字>/device` 存在；LVM/md 的成员常是分区，统计 dm/md 会和整盘重复），按开机以来的累计读写排序；网络汇总只加物理网卡（`/sys/class/net/<名字>/device` 存在），bridge、VLAN、bond、tailscale 等隧道和容器网卡标为 `virtual` 且不计入，一块物理网卡都没有时（容器）去掉认得出的容器网卡再加。`cpu.power_w` 来自 Intel RAPL 或 amd_energy（读不到为 null，`cpu.power_error` 写明原因：内核只允许 root 读这些计数器，普通用户的服务通常读不到），`gpu_power_w` 来自 nvidia-smi，`power_w` 是已知部分合计，`energy_wh` 是本次服务启动以来按采样积分估算的电量，均不含内存、硬盘、风扇和电源损耗。`cpu.freq_mhz` 是各核平均，`freq_max_mhz` 是此刻最快那个核；`temp_c` 是各颗 CPU 封装温度里最高的；不可用时为 null。`GET /api/resources/history` 的 `points` 最多 180 个（桶平均），`peaks` 按原始点计算；历史只保存在内存里，服务重启后清零。`range` 缺省 15m，非法值返回 400。
@@ -341,7 +347,7 @@ POST /api/tokens/{id}/revoke           吊销设备令牌，立即生效
 
 日志搜索按字面忽略大小写匹配，每行保留最后一个回车刷出的文字，匹配结果的 `offset` 是原始行首字节偏移。每次最多 200 条、1 GiB 或 5 秒，长行返回命中附近的片段。清理后的日志返回 410。
 
-`GET /api/doctor` 和 `danlu doctor --json` 调用同一套检查，覆盖 GPU/驱动、conda、systemd、linger、磁盘、证书、端口、时间同步和版本。`danlu doctor` 有 fail 项时退出码为 1；`--json` 跑完即返回 0，结论都在 JSON 里。TOTP 通过 `danlu totp enable|disable` 管理；登录验证码错误和重放都会计入 IP 登录限速，密码正确、还没填验证码的那一步不计入；设备令牌不受影响。
+`GET /api/doctor` 和 `danlu doctor --json` 调用同一套检查，覆盖 GPU/驱动、conda、systemd、linger、磁盘、证书、端口、时间同步和版本。各项并行跑，每项最多等 15 秒，卡在驱动或失联存储上的那项报"没有返回"，不拖住整次体检；网页体检的 GPU 一项读服务的采样缓存，不另起 `nvidia-smi`。`danlu doctor` 有 fail 项时退出码为 1；`--json` 跑完即返回 0，结论都在 JSON 里。TOTP 通过 `danlu totp enable|disable` 管理；登录验证码错误和重放都会计入 IP 登录限速，密码正确、还没填验证码的那一步不计入；设备令牌不受影响。
 
 排队任务视图增加 `wait_reason`，说明队首在等空闲卡、指定卡、外部进程或可信的 GPU/磁盘数据；其他排队任务说明在等前面的任务。面板列表和详情页会显示，启动后清除。
 

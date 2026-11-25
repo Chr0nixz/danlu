@@ -504,3 +504,71 @@ func TestStrictUnavailableMessage(t *testing.T) {
 		t.Fatalf("其他原因不转发原始错误，只指路: %+v", r.requests[1])
 	}
 }
+
+// ntfy 暂时连不上时消息留在发件箱里按退避重试，沿用同一个序列标识；恢复后送达并清掉错误
+func TestFailedPushIsRetriedLater(t *testing.T) {
+	st, s, r := fixture(t)
+	ts := time.Now().Unix()
+	addEvent(t, st, ts, store.EventQueuePaused, nil, `{"kind":"disk"}`)
+	r.status = http.StatusServiceUnavailable
+	step(t, s, ts)
+	if len(r.requests) != 4 || len(s.state.Outbox) != 1 || s.state.Outbox[0].RetryAt <= ts {
+		t.Fatalf("失败的消息应留在发件箱里等重试: %d 次请求，%+v", len(r.requests), s.state.Outbox)
+	}
+	if status, _ := s.Status(); !strings.Contains(status.LastError, "稍后重试") {
+		t.Fatalf("设置页应说明会重试: %+v", status)
+	}
+	step(t, s, ts+1)
+	if len(r.requests) != 4 {
+		t.Fatal("退避时间没到不应重试")
+	}
+	r.status = 200
+	step(t, s, ts+int64(retryMin/time.Second))
+	if len(r.requests) != 5 || len(s.state.Outbox) != 0 || r.requests[4].sequence != r.requests[0].sequence {
+		t.Fatalf("恢复后应送达，沿用同一个序列标识: %+v %+v", r.requests, s.state.Outbox)
+	}
+	if status, _ := s.Status(); status.LastError != "" || status.LastSentAt == nil {
+		t.Fatalf("送达后应清掉错误: %+v", status)
+	}
+}
+
+// 重试也没用的（4xx：topic、令牌错了）不留；失败超过 retryFor 的放弃
+func TestPushRetryGivesUp(t *testing.T) {
+	st, s, r := fixture(t)
+	ts := time.Now().Unix()
+	addEvent(t, st, ts, store.EventQueuePaused, nil, `{"kind":"disk"}`)
+	r.status = http.StatusUnauthorized
+	step(t, s, ts)
+	if len(r.requests) != 1 || len(s.state.Outbox) != 0 {
+		t.Fatalf("401 不应重试: %d 次请求，%+v", len(r.requests), s.state.Outbox)
+	}
+	now := time.Unix(ts, 0)
+	if _, retry := retryLater(Message{FailingSince: ts - int64(retryFor/time.Second)}, errors.New("连接 ntfy 超时"), now); retry {
+		t.Fatal("失败超过 retryFor 应放弃")
+	}
+	m, retry := retryLater(Message{}, &SendError{msg: "ntfy 返回 HTTP 429", Status: 429, RetryAfter: 10 * time.Minute}, now)
+	if !retry || m.RetryAt != ts+600 || m.FailingSince != ts || m.Retries != 1 {
+		t.Fatalf("429 应按 Retry-After 再试: %+v", m)
+	}
+	m, _ = retryLater(Message{Retries: 20, FailingSince: ts}, errors.New("连接 ntfy 超时"), now)
+	if m.RetryAt != ts+int64(retryMax/time.Second) {
+		t.Fatalf("退避应有上限: %+v", m)
+	}
+}
+
+// 限流时不连发四次，马上交回发件箱按 Retry-After 等
+func TestPublisherStopsOnRateLimit(t *testing.T) {
+	var n int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	p := Publisher{Config: config.Notify{NTFY: server.URL + "/topic"}, retryDelay: time.Millisecond}
+	err := p.Send(context.Background(), Message{Body: "内容"})
+	var se *SendError
+	if !errors.As(err, &se) || se.RetryAfter != 2*time.Minute || n != 1 {
+		t.Fatalf("429 应只发一次并带上 Retry-After: %v（%d 次）", err, n)
+	}
+}

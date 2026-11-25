@@ -39,12 +39,14 @@ export function Button({
   variant = 'secondary',
   size = 'md',
   loading,
+  disabled,
   className,
   children,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: Size; loading?: boolean }) {
+  // disabled 单独取出：留在 rest 里会在展开时盖掉这里算好的值，同时传 loading 和 disabled 的按钮加载中仍能点
   return (
-    <button type="button" className={cx(buttonClass(variant, size), className)} disabled={loading || rest.disabled} {...rest}>
+    <button type="button" className={cx(buttonClass(variant, size), className)} {...rest} disabled={loading || disabled}>
       {loading ? <LoaderCircle className="animate-spin" /> : null}
       {loading && size.startsWith('icon') ? null : children}
     </button>
@@ -273,6 +275,26 @@ export function ErrorBox({ error, className, term = false }: { error: unknown; c
   return (
     <Alert tone={term ? 'term' : 'fail'} role="alert" className={className}>
       {msg}
+    </Alert>
+  )
+}
+
+/**
+ * 后台刷新失败、手里还有上一份数据时的页内提示。整页换成 ErrorBox 会卸载页面，
+ * 正在改的设置、日志的滚动位置和搜索、没写完的备注都会丢，所以有旧数据时只用它。
+ */
+export function RefreshError({ error, onRetry, className }: { error: unknown; onRetry?: () => void; className?: string }) {
+  if (!error) return null
+  return (
+    <Alert tone="warn" role="alert" className={className}>
+      <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span>{t('ui.refresh_failed', { error: apiErrorText(error) })}</span>
+        {onRetry && (
+          <Button size="sm" className="-my-2" onClick={onRetry}>
+            {t('common.retry')}
+          </Button>
+        )}
+      </span>
     </Alert>
   )
 }

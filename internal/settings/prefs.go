@@ -170,6 +170,17 @@ func LoadPrefs(st *store.Store) (map[string]any, error) {
 	return out, nil
 }
 
+// NotifyLang 是推送语言偏好（zh-CN 或 en）。偏好在库里按 JSON 存（en 存成带引号的 "en"），
+// 所以要经 LoadPrefs 解析，不能直接拿 GetSetting 的原文比较；读不到时返回空串，推送按中文发。
+func NotifyLang(st *store.Store) string {
+	prefs, err := LoadPrefs(st)
+	if err != nil {
+		return ""
+	}
+	lang, _ := prefs["notify_lang"].(string)
+	return lang
+}
+
 // prefsMu 让两次保存一个接一个处理，免得读改写交错。
 var prefsMu sync.Mutex
 

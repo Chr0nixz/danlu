@@ -181,7 +181,7 @@ func (s *Service) Run(ctx context.Context) {
 
 func (s *Service) step(ctx context.Context, now time.Time) error {
 	if s.completed != nil {
-		return s.finish(*s.completed)
+		return s.finish(*s.completed, now)
 	}
 	next := s.state.clone()
 	dirty, caughtUp := false, false
@@ -224,6 +224,9 @@ func (s *Service) step(ctx context.Context, now time.Time) error {
 	if len(next.Outbox) == 0 {
 		return nil
 	}
+	if next.Outbox[0].RetryAt > now.Unix() {
+		return nil // 上次没发出去，等退避时间到
+	}
 	message := next.Outbox[0]
 	next.Outbox, next.InFlight = slices.Clone(next.Outbox[1:]), &message
 	// 先持久化发送认领；若回执或收尾写库丢失，重启不会再次发送。
@@ -234,11 +237,39 @@ func (s *Service) step(ctx context.Context, now time.Time) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err != nil {
-		log.Printf("手机推送发送失败（已重试 3 次）: %v", err)
-	}
 	s.completed = &err
-	return s.finish(err)
+	return s.finish(err, now)
+}
+
+const (
+	// retryFor 是一条消息从第一次失败算起最多重试多久。跨境访问 ntfy.sh 抖动十几秒、
+	// 自建服务重启几分钟都等得过去；再久的话消息已经过时，放弃并记在设置页
+	retryFor = time.Hour
+	retryMin = 15 * time.Second
+	retryMax = 5 * time.Minute
+)
+
+// retryLater 决定发送失败的消息要不要留在发件箱里再试，返回更新过重试时间的消息。
+// 重定向、4xx 这类重试也没用的，和失败超过 retryFor 的，不再重试。
+// 重试沿用同一个 X-Sequence-ID：上一次其实已经送到时，手机上是替换那条通知，不会多出一条。
+func retryLater(m Message, err error, now time.Time) (Message, bool) {
+	var se *SendError
+	if errors.As(err, &se) && se.Permanent() {
+		return m, false
+	}
+	if m.FailingSince == 0 {
+		m.FailingSince = now.Unix()
+	}
+	if now.Unix()-m.FailingSince >= int64(retryFor/time.Second) {
+		return m, false
+	}
+	delay := min(retryMin<<min(m.Retries, 8), retryMax)
+	if se != nil && se.RetryAfter > delay {
+		delay = min(se.RetryAfter, retryFor)
+	}
+	m.Retries++
+	m.RetryAt = now.Add(delay).Unix()
+	return m, true
 }
 
 func resultValues(err error) map[string]string {
@@ -248,10 +279,21 @@ func resultValues(err error) map[string]string {
 	return map[string]string{"ntfy.last_sent_at": strconv.FormatInt(time.Now().Unix(), 10), "ntfy.last_error": ""}
 }
 
-func (s *Service) finish(err error) error {
+func (s *Service) finish(err error, now time.Time) error {
 	next := s.state.clone()
+	values := resultValues(err)
+	if err != nil && next.InFlight != nil {
+		// 没发出去的放回发件箱最前面，按退避时间再试；它后面的消息照原样排着
+		if m, retry := retryLater(*next.InFlight, err, now); retry {
+			next.Outbox = append([]Message{m}, next.Outbox...)
+			values["ntfy.last_error"] = err.Error() + "，稍后重试"
+			log.Printf("手机推送发送失败，%d 秒后重试: %v", m.RetryAt-now.Unix(), err)
+		} else {
+			log.Printf("手机推送发送失败，不再重试: %v", err)
+		}
+	}
 	next.InFlight = nil
-	if saveErr := s.save(next, resultValues(err)); saveErr != nil {
+	if saveErr := s.save(next, values); saveErr != nil {
 		return saveErr
 	}
 	s.completed = nil

@@ -27,11 +27,16 @@ export function useServerForm<F extends Record<string, unknown>, R>(opt: {
   const [errors, setErrors] = useState<FormErrors<F>>({})
   const uid = useId()
   const keys = Object.keys(base) as Key<F>[]
-  const changed = Object.fromEntries(keys.map((k) => [k, JSON.stringify(form[k]) !== JSON.stringify(base[k])])) as Record<Key<F>, boolean>
+  const changedFrom = (f: F) => Object.fromEntries(keys.map((k) => [k, JSON.stringify(f[k]) !== JSON.stringify(base[k])])) as Record<Key<F>, boolean>
+  const changed = changedFrom(form)
   const dirty = keys.some((k) => changed[k])
 
   const m = useMutation({
-    mutationFn: () => opt.save(form, changed),
+    // 默认提交此刻的表单。传快照时提交快照：数据保留先预览、确认后才保存，保存的必须是预览过的那一份
+    mutationFn: (snapshot: F | void) => {
+      const f = (snapshot as F | undefined) ?? form
+      return opt.save(f, changedFrom(f))
+    },
     onSuccess: (r) => {
       const f = opt.fromResult(r)
       setBase(f)

@@ -18,6 +18,7 @@ export const home = {
   'home.silent_count': '{n} silent',
   'home.running_empty': 'The furnace is idle — no running jobs',
   'home.queued_empty': 'The queue is empty',
+  'home.more_jobs': '{n} more not shown — see the job list',
   'home.recent_title': 'Recently finished',
   'home.all_jobs': 'All jobs',
   'home.recent_empty': 'Nothing out of the furnace yet',

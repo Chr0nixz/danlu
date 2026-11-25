@@ -15,10 +15,12 @@ export const gpus = {
   'gpus.proc_job': '#{id} 的进程',
   'gpus.proc_job_graphics': '#{id} 的图形进程',
   'gpus.proc_external': '外部进程',
+  'gpus.proc_owner_unknown': '归属不明的进程（可能正在退出）',
   'gpus.proc_external_graphics': '外部图形进程',
   'gpus.job_proc_count': '#{job} 的 {n} 个进程',
   'gpus.external_proc_count': '{n} 个外部进程',
   'gpus.no_procs': '卡上暂无该任务的进程',
+  'gpus.no_procs_short': '未见进程',
   'gpus.no_procs_title': '这张卡分给了这个任务，但卡上还没有它的进程：可能还在启动，也可能程序没有用这张卡',
 
   // 进程 tooltip：head 是前半段（pid 列表、用户、图形进程数），整句和预约卡版本复用它

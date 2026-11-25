@@ -58,6 +58,10 @@ func call(ctx context.Context, sub string, stdin []byte, v any) error {
 		}
 		return &Error{ReasonFailed, clip([]byte(detail))}
 	}
+	// 助手只输出一行 JSON，但 sudo 可能在 stdout 上多说几句（密码快过期之类的提示），只解析最后一行
+	if i := bytes.LastIndexByte(out, '\n'); i >= 0 {
+		out = bytes.TrimSpace(out[i+1:])
+	}
 	if jerr := json.Unmarshal(out, v); jerr != nil {
 		return &Error{ReasonFailed, "助手的回答无法解析：" + clip(out)}
 	}
@@ -78,8 +82,8 @@ func Check(ctx context.Context) Status {
 		st.Reason, st.Detail = ReasonProtocol, fmt.Sprintf("助手协议 %d，danlu 需要 %d", res.Protocol, Protocol)
 	case res.Error != "":
 		st.Reason, st.Detail = ReasonFailed, res.Error
-	case res.Systemd > 0 && res.Systemd < 240:
-		st.Reason, st.Detail = ReasonFailed, fmt.Sprintf("systemd %d 太旧，至少要 240", res.Systemd)
+	case res.Systemd > 0 && res.Systemd < minSystemd:
+		st.Reason, st.Detail = ReasonFailed, fmt.Sprintf("systemd %d 太旧，至少要 %d", res.Systemd, minSystemd)
 	default:
 		st.OK = true
 	}

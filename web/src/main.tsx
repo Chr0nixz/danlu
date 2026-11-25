@@ -24,8 +24,9 @@ const pageFallback = <div className="grid min-h-64 place-items-center"><Spinner 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      // 401/404 重试没有意义
-      retry: (n, err) => n < 2 && !(err instanceof ApiError && err.status < 500),
+      // 只有 4xx（401、404 之类）重试没有意义。断网和服务重启时 status 是 0，要重试，
+      // 不然一次网络抖动就把报错交给页面
+      retry: (n, err) => n < 2 && !(err instanceof ApiError && err.status >= 400 && err.status < 500),
       refetchOnWindowFocus: true,
     },
   },

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -76,6 +77,7 @@ type JobStore interface {
 	AppendEvents(...*store.Event) error
 	LatestAlerts() (map[string]store.Event, error)
 	GetJob(int64) (*store.Job, error)
+	JobBySubmitKey(string) (*store.Job, error)
 	JobsByStatus(string) ([]*store.Job, error)
 	JobsWithPendingRecipe() ([]*store.Job, error)
 	TouchWorkdir(string)
@@ -150,12 +152,14 @@ type Manager struct {
 	alertsReady    bool
 	alertError     string
 	gpuErrorSince  time.Time
-	waitReasons    atomic.Pointer[map[int64]string]
-	runStats       map[int64]*runStat
-	runTargets     atomic.Pointer[[]statTarget]
-	procSamples    atomic.Pointer[map[runTarget]procSample]
-	logSamples     atomic.Pointer[map[runTarget]logSample]
-	runtimeViews   atomic.Pointer[map[int64]RuntimeView]
+	// blockedFirst 记队首第一次被挡住时的 GPU 采样时间，队首告警要连续两份采样都挡着才发
+	blockedFirst blockedSeen
+	waitReasons  atomic.Pointer[map[int64]Wait]
+	runStats     map[int64]*runStat
+	runTargets   atomic.Pointer[[]statTarget]
+	procSamples  atomic.Pointer[map[runTarget]procSample]
+	logSamples   atomic.Pointer[map[runTarget]logSample]
+	runtimeViews atomic.Pointer[map[int64]RuntimeView]
 	// ctx 在 Run 里设置；launch 用它派生快照和加载环境的超时，停止服务时立即放弃
 	ctx       context.Context
 	launches  sync.WaitGroup
@@ -264,9 +268,16 @@ type SubmitReq struct {
 	PinnedGPUs    []int             `json:"pinned_gpus"`
 	RerunOf       *int64            `json:"rerun_of"`
 	CodeFrom      *int64            `json:"code_from"`
+	// SubmitKey 是提交幂等键（命令行 --key）：同一个 key 只建一个任务，重复提交返回已有的那个
+	SubmitKey string `json:"submit_key"`
 }
 
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+var submitKeyRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,100}$`)
+
+// CodeSubmitKeyConflict 是"同一个 key 但提交内容不同"的错误码，接口据此返回 409。
+const CodeSubmitKeyConflict = "job_submit_key_conflict"
 
 const maxNameLen = 100
 
@@ -281,12 +292,82 @@ func ValidateMemo(memo string) error {
 const trackerScanLimit = 1 << 20
 
 func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
-	if err := ValidateMemo(req.Memo); err != nil {
-		return nil, err
-	}
+	j, _, err := m.SubmitOnce(req)
+	return j, err
+}
+
+// SubmitOnce 提交任务；existed 为 true 表示同一个 SubmitKey 的任务已经存在，返回的是那个任务，没有新建。
+// 已有任务先于其余校验查找：重试时工作目录哪怕已经变了，也照样拿回第一次提交的结果。
+func (m *Manager) SubmitOnce(req SubmitReq) (j *store.Job, existed bool, err error) {
 	req.Workdir = strings.TrimSpace(req.Workdir)
 	req.Cmd = strings.TrimSpace(req.Cmd)
 	req.Name = strings.TrimSpace(req.Name)
+	if req.SubmitKey != "" {
+		if !submitKeyRe.MatchString(req.SubmitKey) {
+			return nil, false, invalid("job_submit_key_invalid", nil, "submit_key 只能是 1–100 个字母、数字或 . _ : -")
+		}
+		if j, err := m.submittedAs(req); j != nil || err != nil {
+			return j, j != nil, err
+		}
+	}
+	j, err = m.submit(req)
+	if errors.Is(err, store.ErrSubmitKeyExists) {
+		// 并发的同 key 提交，另一个先落了库
+		if j, err = m.submittedAs(req); j == nil && err == nil {
+			err = fmt.Errorf("submit_key %q 撞上唯一索引，却查不到对应的任务", req.SubmitKey)
+		}
+		return j, j != nil, err
+	}
+	return j, false, err
+}
+
+// submittedAs 找同一个 SubmitKey 已经建的任务：没有返回 nil；有但要跑的东西不同，返回冲突错误。
+// 比较决定"跑什么"的字段：工作目录、命令、GPU 要求、conda 环境、环境变量、是否继承 .bashrc、代码来源。
+// 名字、备注、结束提醒不比：重试时它们可能由服务端重新生成，或者只是说明文字。
+func (m *Manager) submittedAs(req SubmitReq) (*store.Job, error) {
+	j, err := m.st.JobBySubmitKey(req.SubmitKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	gpus, pinned := normalizeGPUs(req.GPUs, req.PinnedGPUs)
+	env := req.Env
+	if env == nil {
+		env = map[string]string{}
+	}
+	same := filepath.Clean(req.Workdir) == filepath.Clean(j.Workdir) && req.Cmd == j.Cmd &&
+		gpus == j.GPUsReq && slices.Equal(pinned, j.GPUsPinned) &&
+		strings.TrimSpace(req.CondaEnv) == j.CondaEnv && maps.Equal(env, j.Env) &&
+		req.InheritBashrc == j.InheritBashrc && equalID(req.CodeFrom, j.CodeFrom)
+	if !same {
+		// 码写成字面量：catalog_test 按字面量扫描调用点；manager_test 核对它等于 CodeSubmitKeyConflict
+		return nil, invalid("job_submit_key_conflict", map[string]any{"id": j.ID},
+			"submit_key 已被任务 #%d 用过，但提交的内容不同", j.ID)
+	}
+	return j, nil
+}
+
+func equalID(a, b *int64) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+// normalizeGPUs 指定卡号去重排序；指定了卡号时张数就是卡号个数。
+func normalizeGPUs(n int, pinned []int) (int, []int) {
+	pinned = slices.Clone(pinned)
+	slices.Sort(pinned)
+	pinned = slices.Compact(pinned)
+	if len(pinned) > 0 {
+		n = len(pinned)
+	}
+	return n, pinned
+}
+
+func (m *Manager) submit(req SubmitReq) (*store.Job, error) {
+	if err := ValidateMemo(req.Memo); err != nil {
+		return nil, err
+	}
 	if req.Workdir == "" || !strings.HasPrefix(req.Workdir, "/") {
 		return nil, invalid("job_workdir_abs", nil, "工作目录必须是服务器上的绝对路径")
 	}
@@ -327,13 +408,13 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 		if runner.ReservedEnv(k) {
 			return nil, invalid("job_env_reserved", map[string]any{"name": k}, "环境变量 %s 由 danlu 管理，不能自定义", k)
 		}
+		if strings.ContainsRune(req.Env[k], 0) {
+			// 严格任务的环境文件按 NUL 分隔，取值里的 NUL 会拆出一条新变量，盖过保留变量
+			return nil, invalid("job_env_value_nul", map[string]any{"name": k}, "环境变量 %s 的值不能包含空字符", k)
+		}
 	}
-	pinned := slices.Clone(req.PinnedGPUs)
-	slices.Sort(pinned)
-	pinned = slices.Compact(pinned)
-	if len(pinned) > 0 {
-		req.GPUs = len(pinned)
-	}
+	var pinned []int
+	req.GPUs, pinned = normalizeGPUs(req.GPUs, req.PinnedGPUs)
 	if req.GPUs < 0 || req.GPUs > 64 {
 		return nil, invalid("job_gpus_invalid", nil, "GPU 数量不合法")
 	}
@@ -360,7 +441,7 @@ func (m *Manager) Submit(req SubmitReq) (*store.Job, error) {
 	defer m.mu.Unlock()
 	j := &store.Job{Name: req.Name, Memo: req.Memo, NotifyDone: req.NotifyDone, Workdir: req.Workdir, CondaEnv: strings.TrimSpace(req.CondaEnv), Cmd: req.Cmd,
 		Env: req.Env, InheritBashrc: req.InheritBashrc, GPUsReq: req.GPUs, GPUsPinned: pinned,
-		Status: store.StatusQueued, RerunOf: req.RerunOf, CodeFrom: req.CodeFrom}
+		Status: store.StatusQueued, RerunOf: req.RerunOf, CodeFrom: req.CodeFrom, SubmitKey: req.SubmitKey}
 	if err := m.st.InsertJob(j); err != nil {
 		if errors.Is(err, store.ErrSnapshotUnavailable) {
 			return nil, invalid("job_snapshot_unavailable", map[string]any{"id": *req.CodeFrom}, "源任务 #%d 的代码快照不可用（尚未生成、正在清理或已清理）", *req.CodeFrom)
@@ -614,7 +695,8 @@ func hasExternalProcess(gpus []gpu.GPU, j *store.Job) bool {
 			continue
 		}
 		for _, p := range card.Procs {
-			if p.JobID != j.ID {
+			// 认不出归属的进程（多半是这个任务某个先退出的 rank）不算外部进程
+			if p.JobID != j.ID && !p.OwnerUnknown {
 				return true
 			}
 		}
@@ -885,28 +967,62 @@ func (m *Manager) reserve(j *store.Job, gpus []int, ports map[int]bool, mode lau
 	return true
 }
 
+// codeResult 是启动前快照（或快照重跑时恢复代码）的结果
+type codeResult struct {
+	meta *snapshot.Meta
+	note string // 恢复时的备注
+	err  error
+}
+
+// prepareCode 做快照，快照重跑时改成恢复代码。快照和恢复只在文件之间检查 ctx：卡在失联网络存储上的
+// 一次 lstat、open 或 read 不会返回，只靠 ctx 的话，任务会一直停在 running、pid=0 占着卡，
+// 取消要等它，停服也要等到 systemd 强杀。所以放进 goroutine，超过 SnapshotTimeout 再加一半就不再等：
+// 快照按失败处理（照常启动），恢复按失败处理（启动失败）。danlu 停止时马上返回。
+// 被丢下的那次调用在下一个检查点看到 ctx 已取消就退出，只碰这个任务自己的快照文件和运行目录。
+func (m *Manager) prepareCode(ctx context.Context, j *store.Job, limits snapshot.Options, hadSnapshot bool) codeResult {
+	sctx, cancel := context.WithTimeout(ctx, m.opt.SnapshotTimeout)
+	defer cancel()
+	job := *j // 可能被丢下：不和之后对 j 的修改共用内存
+	done := make(chan codeResult, 1)
+	go func() {
+		var r codeResult
+		if job.CodeFrom == nil {
+			r.meta, r.err = m.snap(sctx, &job, limits)
+		} else {
+			source := *job.CodeFrom
+			if hadSnapshot {
+				source = job.ID
+			}
+			r.meta, r.note, r.err = snapshot.Restore(sctx, m.opt.SnapshotDir, m.opt.RunRoot, job.Workdir, source, job.ID)
+		}
+		done <- r
+	}()
+	limit := m.opt.SnapshotTimeout + m.opt.SnapshotTimeout/2
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r
+	case <-timer.C:
+		log.Printf("任务 #%d 的快照超过 %s 没有返回，工作目录所在的存储可能卡住了，不再等待", j.ID, limit)
+		return codeResult{err: fmt.Errorf("快照超时：超过 %s 没有返回，工作目录所在的存储可能卡住了", limit)}
+	case <-ctx.Done():
+		return codeResult{err: ctx.Err()}
+	}
+}
+
 // launch 是后两步。准备（锁外）：做快照、加载环境，都有超时，danlu 停止时立即放弃；
 // 启动（锁内）：看一眼这期间有没有被取消、danlu 是不是在停止，都没有才 fork/exec 并落库。
 func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Options, mode launchMode) {
 	defer m.launches.Done()
 
-	sctx, cancel := context.WithTimeout(ctx, m.opt.SnapshotTimeout)
 	workdir := j.Workdir
 	hadSnapshot := j.SnapshotOK
-	var meta *snapshot.Meta
-	var snapErr error
-	var restoreNote string
-	if j.CodeFrom == nil {
-		meta, snapErr = m.snap(sctx, j, limits)
-	} else {
-		source := *j.CodeFrom
-		if hadSnapshot {
-			source = j.ID
-		}
-		meta, restoreNote, snapErr = snapshot.Restore(sctx, m.opt.SnapshotDir, m.opt.RunRoot, j.Workdir, source, j.ID)
+	code := m.prepareCode(ctx, j, limits, hadSnapshot)
+	meta, restoreNote, snapErr := code.meta, code.note, code.err
+	if j.CodeFrom != nil {
 		workdir = snapshot.RunCodeDir(m.opt.RunRoot, j.ID)
 	}
-	cancel()
 	var env []string
 	var envErr error
 	if j.CodeFrom != nil && snapErr != nil {
@@ -916,6 +1032,10 @@ func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Opti
 	}
 	if snapErr != nil {
 		j.SnapshotNote = "快照失败: " + snapErr.Error()
+		if j.CodeFrom == nil && meta != nil && meta.Git != nil {
+			// 包没打成，但 commit 已经读到了：照样记下，任务至少知道跑的是哪个版本
+			j.GitCommit, j.GitBranch, j.GitDirty = meta.Git.Commit, meta.Git.Branch, meta.Git.Dirty
+		}
 	} else {
 		j.SnapshotOK = true
 		if meta.Git != nil {
@@ -924,7 +1044,7 @@ func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Opti
 		if j.CodeFrom != nil {
 			j.SnapshotNote = restoreNote
 		} else if meta.SkipCount > 0 {
-			j.SnapshotNote = fmt.Sprintf("有 %d 个文件没有保存（超出大小限制或不是普通文件）", meta.SkipCount)
+			j.SnapshotNote = fmt.Sprintf("有 %d 个文件没有保存（超出大小限制、不是普通文件或读不了）", meta.SkipCount)
 		}
 		if meta.Note != "" && j.CodeFrom == nil {
 			if j.SnapshotNote != "" {
@@ -1031,10 +1151,49 @@ func (m *Manager) launch(ctx context.Context, j *store.Job, limits snapshot.Opti
 
 // finishStrictStartLocked 收尾锁外启动的严格任务。ls 可能为 nil（启动记录意外不见了）。
 // 进程已经起来的任务一律记下 pid 和单元：期间被取消就按运行中的任务取消；danlu 正在停止也不放回队列，
-// 下次启动由 Recover 接管。启动失败时：助手不可用（*strict.Error）第一次放回队列、等复查，再失败才判失败；
-// 其他错误直接判失败。绝不退回不隔离运行。
+// 下次启动由 Recover 接管。启动失败时：期间被取消就记成取消；助手不可用（*strict.Error）第一次放回队列、
+// 等复查，再失败才判失败；其他错误直接判失败。绝不退回不隔离运行。
 func (m *Manager) finishStrictStartLocked(ctx context.Context, j *store.Job, ls *launchState, spec runner.Spec, env []string,
 	started runner.Started, startErr error, hadSnapshot bool) {
+	cancelled := ls != nil && ls.cancelled
+	if startErr != nil {
+		// 报错不等于没起来：单元可能已经在跑，只是助手的回答没传回来（输出解析失败、D-Bus 超时、
+		// 等太久把 sudo 杀了）。认领得到就按启动成功处理；认领不到就按标记清掉可能已经起来的进程，
+		// 再放回队列或判失败，免得任务脱管运行、下一次启动又和它写同一个输出目录
+		if pid, start, ok := m.ex.Adopt(j.ID); ok {
+			log.Printf("任务 #%d 严格启动报错，但进程已经起来（pid %d），按已启动处理: %v", j.ID, pid, startErr)
+			started, startErr = runner.Started{PID: pid, StartTime: start, Unit: started.Unit}, nil
+		} else if n := m.ex.KillAll(j.ID, 0); n > 0 {
+			log.Printf("任务 #%d 严格启动报错，清掉了 %d 个已经起来的进程: %v", j.ID, n, startErr)
+		}
+	}
+	if startErr == nil && started.PID <= 0 {
+		// 服务已经结束，没有活着的包装脚本。记成 running、pid=0 的话，下一轮 reconcile 会当成从没启动过放回队列，
+		// 不计重试次数，每两秒调一次 sudo
+		if pid, launched := m.ex.Launched(j.ID); launched {
+			// 包装脚本跑过（pid 文件在）：一启动就结束了，按退出码收尾。pid 只作记录，收尾只按标记清进程
+			delete(m.strictRetried, j.ID)
+			j.PID, j.Unit, j.OOMBase = max(pid, 0), started.Unit, -1
+			if cancelled {
+				j.CancelRequested = true
+			}
+			m.finalize(j)
+			if ctx.Err() == nil {
+				m.captures.Add(1)
+				go m.captureRecipe(ctx, j.ID, spec, slices.Clone(env))
+			}
+			return
+		}
+		startErr = runner.ErrStrictNoProcess
+	}
+	if startErr != nil && cancelled {
+		delete(m.strictRetried, j.ID)
+		j.CancelRequested = true
+		j.Recipe = nil
+		m.transition(j, store.StatusCancelled, "用户取消")
+		log.Printf("任务 #%d %s 在严格启动期间被取消，启动也没成功: %v", j.ID, j.Name, startErr)
+		return
+	}
 	if startErr != nil {
 		var se *strict.Error
 		if errors.As(startErr, &se) && !m.strictRetried[j.ID] {
@@ -1056,7 +1215,6 @@ func (m *Manager) finishStrictStartLocked(ctx context.Context, j *store.Job, ls 
 	}
 	delete(m.strictRetried, j.ID)
 	j.PID, j.PIDStart, j.Unit, j.OOMBase = started.PID, started.StartTime, started.Unit, -1
-	cancelled := ls != nil && ls.cancelled
 	if cancelled {
 		j.CancelRequested = true
 	}

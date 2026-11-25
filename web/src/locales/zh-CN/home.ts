@@ -20,6 +20,7 @@ export const home = {
   'home.silent_count': '{n} 个无新输出',
   'home.running_empty': '炉子空着，没有正在运行的任务',
   'home.queued_empty': '队列是空的',
+  'home.more_jobs': '还有 {n} 个没列出，到任务列表查看',
   'home.recent_title': '最近完成',
   'home.all_jobs': '全部任务',
   'home.recent_empty': '还没有出炉的任务',

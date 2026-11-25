@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Lock, Minus, Plus, TimerReset } from 'lucide-react'
 import { useId, useState, type FormEvent } from 'react'
-import { duration, now, type Reservation, type ReservationReq } from '@danlu/core'
+import { duration, useNow, type Reservation, type ReservationReq } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useReservations } from '../lib/queries'
@@ -15,14 +15,14 @@ export const cudaEnv = (cards: number[]) => `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_V
 
 const want = (r: Reservation) => (r.pinned_gpus.length ? r.pinned_gpus.length : r.gpus)
 
-function stateText(r: Reservation) {
+function stateText(r: Reservation, now: number) {
   if (r.status === 'waiting') {
     const missing = r.pinned_gpus.filter((g) => !r.held_gpus.includes(g))
     const what = missing.length ? t('reservations.waiting_cards', { gpus: missing.join(', ') }) : t('reservations.claiming_progress', { held: r.held_gpus.length, want: want(r) })
-    return t('reservations.waiting_state', { what, duration: duration(now() - r.created_at) })
+    return t('reservations.waiting_state', { what, duration: duration(now - r.created_at) })
   }
   if (!r.ends_at) return t('reservations.ready_manual')
-  return t('reservations.ready_until', { time: clock(r.ends_at), remaining: duration(r.ends_at - now()) })
+  return t('reservations.ready_until', { time: clock(r.ends_at), remaining: duration(r.ends_at - now) })
 }
 
 function useInvalidate() {
@@ -65,6 +65,8 @@ function ReservationRow({ r }: { r: Reservation }) {
     },
   })
   const ready = r.status === 'active'
+  // 等了多久、还剩多久每秒走一格
+  const state = stateText(r, useNow())
   return (
     <div className="px-3 py-2.5 sm:px-4">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -73,7 +75,7 @@ function ReservationRow({ r }: { r: Reservation }) {
             <Lock className="size-3.5 shrink-0 text-fg-3" aria-hidden />
             <span className="shrink-0 font-medium">{t('reservations.label', { id: r.id })}</span>
             {r.held_gpus.length > 0 && <GpuChips ids={r.held_gpus} className="shrink-0" />}
-            <span className={cx('min-w-0 truncate', ready ? 'text-fg-2' : 'text-fg-3')} title={stateText(r)}>{stateText(r)}</span>
+            <span className={cx('min-w-0 truncate', ready ? 'text-fg-2' : 'text-fg-3')} title={state}>{state}</span>
           </div>
           {r.note && <div className="mt-0.5 truncate pl-[22px] text-xs text-fg-3">{r.note}</div>}
         </div>

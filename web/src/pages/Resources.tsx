@@ -7,6 +7,7 @@ import {
   duration,
   mb,
   now,
+  useNow,
   type Disk,
   type GPU,
   type ResourceHistory,
@@ -1002,7 +1003,11 @@ function ProcessList({ title, sort, processes, cpuKnown }: { title: string; sort
 
 // ───────────────────────── 页面 ─────────────────────────
 
-function Freshness({ age, stale, error, className }: { age: number | null; stale: boolean; error: boolean; className?: string }) {
+/** 数据多久没更新。每秒重画：采样停了以后轮询结果不再变，不靠定时器的话会一直显示刚更新 */
+function Freshness({ at, error, className }: { at: number | null; error: boolean; className?: string }) {
+  const tick = useNow(at != null)
+  const age = at == null ? null : Math.max(0, Math.round(tick - at))
+  const stale = age != null && age > 10
   return (
     <span className={cx('inline-flex items-center gap-1.5 whitespace-nowrap text-xs', stale ? 'text-warn' : 'text-fg-3', className)}>
       <span className={cx('size-1.5 rounded-full', age == null ? 'bg-fg-4' : stale ? 'bg-warn' : 'bg-ok')} aria-hidden />
@@ -1074,7 +1079,6 @@ export function Resources() {
   // updated_at 是最近一次成功采样的时间；0 说明一次都没成功，其它字段全是零值，不能画成"内存 0%"
   const noSample = !data.updated_at
   const age = noSample ? null : ago(data.updated_at)
-  const stale = age != null && age > 10
   const host = data.host
   const hostLine = [host.hostname, host.os, host.kernel && t('resources.host_kernel', { kernel: host.kernel }), host.uptime_seconds > 0 && t('resources.host_uptime', { uptime: fmtUptime(host.uptime_seconds) })].filter(Boolean).join(' · ')
   const gpuList = gpus.data?.gpus ?? []
@@ -1086,12 +1090,12 @@ export function Resources() {
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold">{t('resources.title')}</h1>
             {/* 手机上新鲜度和标题同一行，省出一行给下面的面板 */}
-            <Freshness age={age} stale={stale} error={!!data.error} className="ml-auto sm:hidden" />
+            <Freshness at={noSample ? null : data.updated_at} error={!!data.error} className="ml-auto sm:hidden" />
           </div>
           {hostLine && <p className="truncate text-ui text-fg-3" title={hostLine}>{hostLine}</p>}
         </div>
         <div className="flex items-center gap-3 max-sm:w-full">
-          <Freshness age={age} stale={stale} error={!!data.error} className="max-sm:hidden" />
+          <Freshness at={noSample ? null : data.updated_at} error={!!data.error} className="max-sm:hidden" />
           <Segmented options={rangeOptions()} value={range} onChange={setRange} label={t('resources.history_range')} className="max-sm:w-full" />
         </div>
       </div>

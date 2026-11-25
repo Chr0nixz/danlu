@@ -168,11 +168,15 @@ func Restore(ctx context.Context, snapshots, runRoot, workdir string, source, id
 // 快照一个文件都没收的目录整个链接一次，大的数据目录不用逐个文件处理。
 func linkCurrentFiles(ctx context.Context, code *os.Root, workdir string, meta *Meta) (string, error) {
 	skipped := map[string]bool{}
+	skipList := make([]string, 0, len(meta.Skipped))
 	for _, s := range meta.Skipped {
-		if !fs.ValidPath(s.Path) || s.Path == "." {
+		// 旧版快照把没登记的嵌套仓库原样记成 third_party/lib/，去掉尾斜杠照常链接
+		p := strings.TrimSuffix(s.Path, "/")
+		if !fs.ValidPath(p) || p == "." {
 			return "", fmt.Errorf("快照清单包含无效路径 %q", s.Path)
 		}
-		skipped[s.Path] = true
+		skipped[p] = true
+		skipList = append(skipList, p)
 	}
 	// 原目录里有、快照里没有的条目
 	type candidate struct {
@@ -240,7 +244,8 @@ func linkCurrentFiles(ctx context.Context, code *os.Root, workdir string, meta *
 	}
 	wanted := func(c candidate) bool {
 		switch {
-		case linkAll || skipped[c.rel]:
+		case linkAll || skipped[c.rel] || !fs.ValidPath(c.rel):
+			// 名字不是合法 UTF-8 的文件不进快照，和跳过的文件一样用工作目录里的
 			return true
 		case meta.Git != nil:
 			return ignored[c.rel]
@@ -285,24 +290,24 @@ func linkCurrentFiles(ctx context.Context, code *os.Root, workdir string, meta *
 		}
 	}
 	// 跳过的文件在没有链接的目录里时，单独补上
-	for _, s := range meta.Skipped {
+	for _, p := range skipList {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		top, _, _ := strings.Cut(s.Path, "/")
-		if top == ".git" || underLinked(s.Path, linkedSet) {
+		top, _, _ := strings.Cut(p, "/")
+		if top == ".git" || underLinked(p, linkedSet) {
 			continue
 		}
-		name, err := filepath.Localize(s.Path)
+		name, err := filepath.Localize(p)
 		if err != nil {
-			return "", fmt.Errorf("快照清单包含无效路径 %q", s.Path)
+			return "", fmt.Errorf("快照清单包含无效路径 %q", p)
 		}
 		if _, err := code.Lstat(name); err == nil {
 			continue
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
-		if err := link(s.Path); err != nil {
+		if err := link(p); err != nil {
 			return "", err
 		}
 	}

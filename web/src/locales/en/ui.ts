@@ -23,4 +23,5 @@ export const ui = {
   'ui.copy_denied': 'The browser denied the copy',
   'ui.copy_failed_sr': 'Copy failed: {why}',
   'ui.copy_failed_title': 'Copy failed: {why} — select the text manually',
+  'ui.refresh_failed': 'Update failed: {error}. Showing the last data that loaded.',
 } satisfies Catalog

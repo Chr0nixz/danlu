@@ -9,7 +9,7 @@ import { QueueBanner, QueuePauseButton, QueuePauseError } from '../components/Qu
 import { ReservationList, ReserveButton } from '../components/Reservations'
 import { StarError } from '../components/StarButton'
 import { Card, cx, ErrorBox, SkeletonRows, StatusIcon } from '../components/ui'
-import { now, type Job } from '@danlu/core'
+import { useNow, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
@@ -32,13 +32,26 @@ function GroupEmpty({ children }: { children: ReactNode }) {
   return <div className="px-4 py-3 text-ui text-fg-3 sm:pl-11">{children}</div>
 }
 
+/** 一组多于一页时，列表末尾说明还有多少没列出，链到任务列表 */
+function MoreJobs({ status, shown, total }: { status: 'running' | 'queued'; shown: number; total: number }) {
+  if (shown <= 0 || total <= shown) return null
+  return (
+    <Link to={`/jobs?status=${status}`} className="flex h-9 items-center gap-1 border-t border-line px-4 text-ui text-fg-3 hover:text-fg max-sm:h-11 sm:pl-11">
+      {t('home.more_jobs', { n: total - shown })}
+      <ArrowRight className="size-3.5" aria-hidden />
+    </Link>
+  )
+}
+
 function Summary({ running, queued }: { running: number; queued: number }) {
   const gpus = useGpus()
   const failed = useRecentFailures().data ?? 0
   const list = gpus.data?.gpus ?? []
   const free = list.filter((g) => !gpuBusy(g)).length
   const models = [...new Set(list.map((g) => shortName(g.name)))]
-  const age = gpus.data ? now() - gpus.data.updated_at : 0
+  // 每秒重画：GPU 数据停了以后轮询结果不再变，不靠定时器的话"数据 N 秒没有更新"永远出不来
+  const at = useNow()
+  const age = gpus.data ? at - gpus.data.updated_at : 0
   const stale = gpus.data && age > 15
 
   return (
@@ -101,10 +114,11 @@ export function Home() {
   const active = useActiveJobs()
   const recent = useQuery({ queryKey: ['jobs', 'recent'], queryFn: () => api.jobs({ status: 'succeeded,failed,cancelled', size: 8 }), refetchInterval: 5000 })
 
-  const all = active.data?.jobs ?? []
-  const running = all.filter((j) => j.status === 'running').sort((a, b) => a.id - b.id)
+  const running = active.data?.running ?? []
   const silent = running.filter((j) => j.silent_since).length
-  const queued = all.filter((j) => j.status === 'queued').sort((a, b) => (a.queue_pos ?? 0) - (b.queue_pos ?? 0))
+  const queued = active.data?.queued ?? []
+  const runningTotal = active.data?.runningTotal ?? 0
+  const queuedTotal = active.data?.queuedTotal ?? 0
   const done: Job[] = recent.data?.jobs ?? []
 
   return (
@@ -112,7 +126,7 @@ export function Home() {
       <h1 className="sr-only">{t('home.title')}</h1>
       <QueueBanner />
       <StarError />
-      <Summary running={running.length} queued={queued.length} />
+      <Summary running={runningTotal} queued={queuedTotal} />
       <GpuGrid />
       <ReservationList />
 
@@ -122,13 +136,15 @@ export function Home() {
           <SkeletonRows rows={3} />
         ) : (
           <>
-            <Group icon={<StatusIcon status="running" decorative />} title={t('status.running')} count={running.length}
+            <Group icon={<StatusIcon status="running" decorative />} title={t('status.running')} count={runningTotal}
               extra={silent > 0 && <span className="text-xs text-warn">{t('home.silent_count', { n: silent })}</span>}>
               <JobList jobs={running} showCopy empty={<GroupEmpty>{t('home.running_empty')}</GroupEmpty>} />
+              <MoreJobs status="running" shown={running.length} total={runningTotal} />
             </Group>
-            <Group icon={<StatusIcon status="queued" decorative />} title={t('home.queued')} count={queued.length} extra={<QueuePauseButton />}>
+            <Group icon={<StatusIcon status="queued" decorative />} title={t('home.queued')} count={queuedTotal} extra={<QueuePauseButton />}>
               <QueuePauseError />
               <JobList jobs={queued} showCopy empty={<GroupEmpty>{t('home.queued_empty')}</GroupEmpty>} />
+              <MoreJobs status="queued" shown={queued.length} total={queuedTotal} />
             </Group>
           </>
         )}

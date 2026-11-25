@@ -88,6 +88,8 @@ export const newjob = {
   'newjob.notify': 'Phone push',
   'newjob.notify_hint': "Failures still notify per the server's push settings.",
   'newjob.notify_done': "Completion alert",
+  'newjob.notify_push_off': "Phone push isn't set up on this server, so this alert won't arrive.",
+  'newjob.notify_push_settings': 'Push settings',
 
   // Environment variables
   'newjob.env': 'Environment variables',

@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // JobMarker 的值是任务的运行目录 <数据目录>/run/<id>，每个数据目录都不一样。
@@ -36,6 +38,104 @@ func JobEnv(pid int, runRoot string) (int64, *string) {
 	if err != nil {
 		return 0, nil
 	}
+	return jobFromEnviron(b, runRoot)
+}
+
+// Ownership 是 GPU 上一个进程的归属。
+type Ownership struct {
+	Job  int64   // 本实例任务的编号；0 表示不是（外部进程，或者认不出）
+	CVD  *string // 任务进程启动时的 CUDA_VISIBLE_DEVICES，只有本实例任务的进程才有
+	Gone bool    // 进程已经不在了：nvidia-smi 列出来时还在，读 /proc 时已经退出
+	// Unknown 表示认不出：和 danlu 同一个用户的进程，environ 读到空（正在退出，或者是僵尸）、读不到或读超时。
+	// 多半是刚结束的任务还没退干净的进程，不能当成外部进程告警，但卡照样算占用
+	Unknown bool
+}
+
+// JobOwnership 判断 GPU 上的进程属于本实例的哪个任务。read 读 /proc/<pid>/environ（见 EnvReader）。
+func JobOwnership(pid int, runRoot string, read func(int) ([]byte, error)) Ownership {
+	b, err := read(pid)
+	uid, exists := -1, true
+	if err != nil || len(b) == 0 {
+		uid, exists = OwnerUID(pid)
+	}
+	return classify(b, err, runRoot, uid, exists, os.Geteuid())
+}
+
+// classify 是 JobOwnership 的判断部分：environ 读到了就按 JobMarker 认；读不到或读到空时，
+// 进程不在了就丢掉，别的用户的进程算外部（读不到它的 environ 是正常的，danlu 的任务都以 danlu 的用户运行），
+// 同一用户的算认不出。
+func classify(environ []byte, readErr error, runRoot string, uid int, exists bool, self int) Ownership {
+	if readErr == nil && len(environ) > 0 {
+		if runRoot == "" {
+			return Ownership{}
+		}
+		job, cvd := jobFromEnviron(environ, runRoot)
+		return Ownership{Job: job, CVD: cvd}
+	}
+	switch {
+	case !exists:
+		return Ownership{Gone: true}
+	case uid >= 0 && uid != self:
+		return Ownership{}
+	default:
+		return Ownership{Unknown: true}
+	}
+}
+
+// ErrEnvTimeout 表示读进程环境超时（或者上一次对同一个进程的读取还卡着）。
+var ErrEnvTimeout = errors.New("读进程环境超时")
+
+// EnvReader 读 /proc/<pid>/environ，每次最多等 Timeout（为 0 时 500 毫秒）。
+// 读 environ 要拿目标进程的内存锁：那个进程卡在失联网络存储的缺页里时，读的人也跟着卡住，而且杀不掉。
+// 只靠同步读的话，一个这样的进程（任何用户的）就让 GPU 采样过期、所有 GPU 任务停止调度。
+// 超时后那次读取放着不管（占一个系统线程），同一个进程的那次没回来之前不再发起新的，直接按超时算，
+// 线程不会越积越多。只给一个调用方（GPU 采样）用：同一个进程的并发读取会被当成超时。零值可用。
+type EnvReader struct {
+	Timeout time.Duration
+
+	mu       sync.Mutex
+	inflight map[int]bool
+}
+
+func (r *EnvReader) Read(pid int) ([]byte, error) {
+	r.mu.Lock()
+	if r.inflight[pid] {
+		r.mu.Unlock()
+		return nil, ErrEnvTimeout
+	}
+	if r.inflight == nil {
+		r.inflight = map[int]bool{}
+	}
+	r.inflight[pid] = true
+	r.mu.Unlock()
+	type result struct {
+		b   []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+		r.mu.Lock()
+		delete(r.inflight, pid)
+		r.mu.Unlock()
+		done <- result{b, err}
+	}()
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = 500 * time.Millisecond
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case res := <-done:
+		return res.b, res.err
+	case <-timer.C:
+		return nil, ErrEnvTimeout
+	}
+}
+
+// jobFromEnviron 从 environ 取出本实例任务的编号和选卡变量，不是本实例的任务时返回 0
+func jobFromEnviron(b []byte, runRoot string) (int64, *string) {
 	v, ok := LookupEnv(b, JobMarker)
 	if !ok {
 		return 0, nil

@@ -15,7 +15,7 @@ import (
 
 	"danlu/internal/config"
 	"danlu/internal/notify"
-	"danlu/internal/store"
+	"danlu/internal/settings"
 
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -35,13 +35,14 @@ func cmdNotify(args []string) error {
 		if err != nil {
 			return err
 		}
-		st, err := store.Open(p.DB)
+		st, err := openStore(p)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
 		hostname, _ := os.Hostname()
 		sender := notify.New(st, c.Notify, hostname, c.BaseURL())
+		sender.Lang = func() string { return settings.NotifyLang(st) }
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		if err := sender.Test(ctx); err != nil {
@@ -63,6 +64,9 @@ func cmdNotifySetup(args []string) error {
 	disable := fs.Bool("disable", false, "关闭推送")
 	asJSON := fs.Bool("json", false, "以 JSON 输出订阅地址，不打印二维码")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return errHelpShown // 用法已经打印，以 0 退出
+		}
 		return err
 	}
 	if fs.NArg() != 0 || (*disable && (*server != "" || *topic != "" || *tokenStdin || *newTopic)) || (*newTopic && *topic != "") {

@@ -169,6 +169,8 @@ func TestBuildEnv(t *testing.T) {
 	checks := map[string]string{
 		"PATH": "/usr/bin", "LR": "0.1", "CUDA_VISIBLE_DEVICES": "0,2", "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
 		"PET_MASTER_PORT": "29555", "PYTHONUNBUFFERED": "1", "DANLU_JOB_ID": "12", "WANDB_TAGS": "exp,danlu-12",
+		// setproctitle 不清 environ，任务标记读得到
+		"SPT_NOENV": "1",
 	}
 	for k, want := range checks {
 		if got := get(k); got != want {
@@ -189,6 +191,12 @@ func TestBuildEnv(t *testing.T) {
 	}
 	if get("DANLU_GPUS") != "0,2" || get("DANLU_CVD") != "0,2" || get("DANLU_STRICT") != "<unset>" {
 		t.Errorf("普通任务的 DANLU_GPUS/DANLU_CVD 都是物理卡号: %q %q %q", get("DANLU_GPUS"), get("DANLU_CVD"), get("DANLU_STRICT"))
+	}
+
+	// 用户自己设的 SPT_NOENV 照用户的
+	env = r.BuildEnv(base, Spec{JobID: 12, Name: "x", Env: map[string]string{"SPT_NOENV": "yes"}})
+	if got := get("SPT_NOENV"); got != "yes" {
+		t.Errorf("用户设的 SPT_NOENV 不应被改: %q", got)
 	}
 
 	// 严格任务只看得到分到的卡，从 0 编号；DANLU_GPUS 仍是物理卡号

@@ -8,8 +8,8 @@ import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
 import { ProfileSummary } from '../components/ResourceProfile'
 import { StarButton, StarError, StarMenuItem } from '../components/StarButton'
-import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, Input, Menu, menuItemClass, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
-import { ApiError, compactProgress, duration, failReasonText, fmtTime, isActive, jobDuration, now, sameCodeFailKinds, stripProgressTiming, type Job } from '@danlu/core'
+import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, Input, Menu, menuItemClass, RefreshError, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
+import { ApiError, compactProgress, duration, failReasonText, fmtTime, isActive, jobDuration, sameCodeFailKinds, stripProgressTiming, useNow, waitText, type Job, type JobStatus } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useCopy } from '../lib/useCopy'
@@ -18,6 +18,13 @@ type Tab = 'log' | 'info' | 'code'
 const tabs: Tab[] = ['log', 'info', 'code']
 
 export function JobDetail() {
+  // 换编号（#12 → #10）时整页重挂：改名、取消确认、备注编辑这些状态属于上一个任务，
+  // 留着的话在 #10 上保存会把 #12 的名字写过去
+  const id = useParams().id
+  return <JobDetailPage key={id} />
+}
+
+function JobDetailPage() {
   const id = Number(useParams().id)
   const qc = useQueryClient()
   const notifyToggle = useMutation({
@@ -86,7 +93,9 @@ export function JobDetail() {
       </div>
     )
   }
-  if (q.error) {
+  // 只有一份数据都没拿到才整页报错。轮询失败时手里还有上一份，整页换掉会卸载日志框，
+  // 滚动位置、搜索、没写完的备注和改名都会丢；这时只在页内提示
+  if (q.error && !q.data) {
     // 编号不存在或不是数字；安全入口失效也是 404，但那种要显示原文，告诉用户重新打开入口地址
     const missing = q.error instanceof ApiError && (q.error.status === 400 || q.error.code === 'job_not_found' || q.error.message === '任务不存在')
     return (
@@ -108,6 +117,10 @@ export function JobDetail() {
   // 每种状态只有一个主操作：在跑或排队的是取消，结束了的是重跑（失败的写明"改参数"）
   const canCancel = isActive(j) && !j.cancel_requested
   const notifyLabel = j.notify_done ? t('job.notify_disable') : t('job.notify_enable')
+  // 服务器没开推送（danlu notify setup）时，开关照样记下，但要说清到时收不到：不能让人放心睡觉却等不来通知。
+  // 旧服务器没有 notify 字段，不提示
+  const pushOff = settings.data?.notify ? !settings.data.notify.enabled : false
+  const notifyTitle = pushOff ? t('job.notify_push_off_title', { action: notifyLabel }) : notifyLabel
   const NotifyIcon = j.notify_done ? Bell : BellOff
   const toggleNotify = () => notifyToggle.mutate({ id: j.id, on: !j.notify_done })
   // 和代码无关的失败（服务器重启、被外部终止等）重跑页默认用原任务的快照，按钮和失败说明里的建议说同一件事
@@ -141,6 +154,7 @@ export function JobDetail() {
     <div className="space-y-3 sm:space-y-4">
       <div className="space-y-2">
         <BackLink />
+        <RefreshError error={q.error} onRetry={() => void q.refetch()} />
         {renaming ? (
           <RenameForm
             job={j}
@@ -152,14 +166,17 @@ export function JobDetail() {
         ) : (
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
             <div className="flex min-w-0 flex-1 items-start gap-1">
-              <h1 className="flex min-w-0 items-start gap-2 text-xl font-semibold tracking-tight">
-                <StatusIcon status={j.status} cancelling={j.cancel_requested} className="mt-1.5 size-5" />
-                <span className="min-w-0 break-all">
-                  {j.name}
-                  <span className="ml-2 font-normal whitespace-nowrap text-fg-3">#{j.id}</span>
-                  {j.starred && <Star role="img" aria-label={t('job.starred')} className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
-                </span>
-              </h1>
+              <div className="min-w-0">
+                <h1 className="flex min-w-0 items-start gap-2 text-xl font-semibold tracking-tight">
+                  <StatusIcon status={j.status} cancelling={j.cancel_requested} className="mt-1.5 size-5" />
+                  <span className="min-w-0 break-all">
+                    {j.name}
+                    <span className="ml-2 font-normal whitespace-nowrap text-fg-3">#{j.id}</span>
+                    {j.starred && <Star role="img" aria-label={t('job.starred')} className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
+                  </span>
+                </h1>
+                <Lineage j={j} />
+              </div>
               <button
                 ref={renameButton}
                 type="button"
@@ -177,7 +194,7 @@ export function JobDetail() {
               <StarButton job={j} label />
               {isActive(j) && (
                 <Button size="icon-sm" variant="ghost" loading={notifyToggle.isPending} aria-label={t('job.notify_aria')} aria-pressed={!!j.notify_done}
-                  title={notifyLabel} onClick={toggleNotify}>
+                  title={notifyTitle} onClick={toggleNotify}>
                   <NotifyIcon aria-hidden />
                 </Button>
               )}
@@ -262,12 +279,20 @@ export function JobDetail() {
       {j.status === 'failed' && <FailBox j={j} onShowLog={showLog} />}
       {j.status !== 'failed' && j.fail_reason && <Alert>{j.fail_reason}</Alert>}
       {j.notes && <Alert>{t('job.notes_alert', { notes: j.notes })}</Alert>}
+      {isActive(j) && j.notify_done && pushOff && (
+        <Alert tone="warn">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
+            <span>{t('job.notify_push_off')}</span>
+            <Link to="/settings/mobile" className={cx(alertAction, alertActionTone)}>{t('job.notify_push_settings')}</Link>
+          </div>
+        </Alert>
+      )}
       {j.status === 'running' && j.silent_since && (
         // 操作写成一行文字链接：不撑高提示框（日志要留在首屏），点击区各自向上下撑到 44px。
         // 取消任务用失败红并单独靠右，和两个只是去看一眼的操作分开，这时候最容易手抖
         <Alert tone="warn">
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-            <span className="max-sm:basis-full">{t('job.silent_for', { duration: duration(now() - j.silent_since) })}</span>
+            <span className="max-sm:basis-full"><SilentFor since={j.silent_since} /></span>
             <button type="button" className={cx(alertAction, alertActionTone)} onClick={() => showLog()}>{t('job.show_log_tail')}</button>
             {terminal && <Link to={`/terminal?job_id=${j.id}`} className={cx(alertAction, alertActionTone)}>{t('job.open_terminal')}</Link>}
             {canCancel && (
@@ -297,7 +322,7 @@ export function JobDetail() {
             (j.pruned_at ? <PrunedFiles job={j} /> : j.status === 'queued' ? (
               <Card className="px-4 py-12 text-center text-ui text-fg-3">
                 {j.queue_pos ? t('job.queued_log_hint_pos', { pos: j.queue_pos }) : t('job.queued_log_hint')}
-                {j.wait_reason && <p className="mt-2 px-2 break-words text-fg-2">{j.wait_reason}</p>}
+                {waitText(j) && <p className="mt-2 px-2 break-words text-fg-2">{waitText(j)}</p>}
               </Card>
             ) : (
               <LogViewer key={j.id} jobId={j.id} offset={logOffset} onJump={showLog} />
@@ -563,6 +588,39 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
   )
 }
 
+/**
+ * 标题下面一行重跑关系：重跑自哪个任务、重跑成了哪些任务，各带状态图标。
+ * 失败的任务打开时一眼看到"已经重跑成 #6 并成功了"，不用再去任务列表里找；重跑出来的任务也能一步回到原任务。
+ * 没有重跑关系时不占位置。和标题里的名字左对齐（状态图标 20px + 间距 8px）
+ */
+function Lineage({ j }: { j: Job }) {
+  const parent = j.rerun_parent ?? (j.rerun_of ? { id: j.rerun_of, status: null } : null)
+  const reruns = j.reruns ?? []
+  if (!parent && !reruns.length) return null
+  const ref = (r: { id: number; status: JobStatus | null }) => (
+    <Link key={r.id} to={`/jobs/${r.id}`} className="inline-flex items-center gap-1 font-medium text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg">
+      #{r.id}
+      {r.status && <StatusIcon status={r.status} className="size-3.5" />}
+    </Link>
+  )
+  return (
+    <p className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 pl-7 text-ui text-fg-3">
+      {parent && (
+        <span className="inline-flex items-center gap-1.5">
+          {t('job.lineage_from')}
+          {ref(parent)}
+        </span>
+      )}
+      {reruns.length > 0 && (
+        <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span>{t('job.lineage_to')}</span>
+          {reruns.map(ref)}
+        </span>
+      )}
+    </p>
+  )
+}
+
 function Meta({ label, children, className, live, wrap }: { label: ReactNode; children: ReactNode; className?: string; live?: boolean; wrap?: boolean }) {
   return (
     <div className={cx('min-w-0 space-y-1', className)}>
@@ -575,7 +633,13 @@ function Meta({ label, children, className, live, wrap }: { label: ReactNode; ch
 }
 
 /** 详情页顶部的一排关键信息：状态、卡、环境、时长、代码版本。手机上三列两行，日志框才能留在首屏 */
+/** 无输出时长，每秒走一格。单独一个组件：整个详情页不用跟着每秒重画 */
+function SilentFor({ since }: { since: number }) {
+  return <>{t('job.silent_for', { duration: duration(useNow() - since) })}</>
+}
+
 function MetaStrip({ j }: { j: Job }) {
+  const at = useNow(isActive(j))
   const d = jobDuration(j)
   const gpus = j.gpus_assigned.length ? j.gpus_assigned : j.gpus_pinned
   const exited = j.exit_code !== null && j.status !== 'succeeded'
@@ -615,7 +679,7 @@ function MetaStrip({ j }: { j: Job }) {
         <span className="truncate">{j.conda_env || <span className="text-fg-3">{t('job.conda_none')}</span>}</span>
       </Meta>
       <Meta label={j.status === 'running' ? t('job.meta_elapsed') : j.status === 'queued' ? t('job.meta_waited') : t('job.meta_duration')}>
-        {j.status === 'queued' ? duration(now() - j.created_at) : d !== null ? duration(d) : <span className="text-fg-3">-</span>}
+        {j.status === 'queued' ? duration(at - j.created_at) : d !== null ? duration(d) : <span className="text-fg-3">-</span>}
       </Meta>
       <Meta
         label={

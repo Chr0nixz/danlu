@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,10 @@ type Started struct {
 	StartTime uint64
 	Unit      string
 }
+
+// ErrStrictNoProcess 表示严格单元起来了，但包装脚本没有运行：job-exec 在 exec 包装脚本之前就失败了
+// （环境太大、日志打不开之类，原因在系统日志里）。
+var ErrStrictNoProcess = errors.New("严格限卡的服务已经结束，但包装脚本没有运行（danlu job-exec 在启动包装脚本前失败，原因见 journalctl）")
 
 // JobMarker 是任务进程的身份标记，值是 RunDir(id)，见 procfs.JobMarker。
 const JobMarker = procfs.JobMarker
@@ -187,6 +192,12 @@ func (r *Runner) BuildEnv(base []string, s Spec) []string {
 	set("DANLU_PORT", strconv.Itoa(s.Port))
 	// 输出重定向到文件时 Python 默认整块缓冲，日志会迟迟不出现
 	set("PYTHONUNBUFFERED", "1")
+	// setproctitle（Ray 的每个 worker 都调它）默认把进程原来的 environ 内存区清零、写进标题，
+	// /proc/<pid>/environ 里就读不到 DANLU_RUN_DIR：占卡的 worker 被当成外部进程，任务结束后的残留进程也杀不到。
+	// 这个变量让它不动 environ（标题长度限在原来的命令行之内）。用户自己设了就照用户的
+	if _, ok := m["SPT_NOENV"]; !ok {
+		set("SPT_NOENV", "1")
+	}
 	set("DANLU_JOB_ID", id)
 	set("DANLU_JOB_NAME", s.Name)
 	set(JobMarker, r.RunDir(s.JobID))

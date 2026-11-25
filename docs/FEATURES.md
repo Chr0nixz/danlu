@@ -23,7 +23,7 @@
 | | 3.3 | 命令参数编辑 | 手机上在长命令里改一个数很费劲 | 2 | 中 | 否，只改前端 |
 | | 3.4 | 参数扫描与任务组 | 10 个任务要提交 10 次，提交后混在列表里 | 3 | 大 | 少量 |
 | 第三批：看结果 | 4.1 | 输出文件浏览 | 看样例图和评测结果要开终端 | 4、6 | 中 | 否 |
-| 第四批：看需要 | 5.1 | 命令行提交 | rsync 之后还要切到浏览器填表 | — | 中 | 否 |
+| 第四批：看需要 | 5.1 | 命令行提交 | rsync 之后还要切到浏览器填表；AI 编程助手没有任务入口 | — | 中 | 是（提交幂等） |
 | | 5.2 | GPU 预约（已做） | 丹炉外的任务和临时调试，卡被排队的任务抢走 | 6 | 中 | 是 |
 | | 5.3 | 依赖、自动重试、时长上限、调用栈 | 见第 5.3 节 | — | — | — |
 
@@ -411,35 +411,161 @@ ntfy 现在只推失败（[notify.go](../internal/notify/notify.go#L294) 跳过�
 
 ## 5. 第四批：看需要
 
-### 5.1 命令行提交
+### 5.1 命令行提交（2026-11-24 已实现：脚本与 AI 编程助手调用）
 
 **问题**
 
 - 日常流程是：本地改代码 → rsync → 切到浏览器 → 选目录、粘命令、提交。前两步在终端里一条脚本就完成了，最后一步却要换工具。
 - 扫描和批量评测有时用脚本生成更方便；让 AI 编程助手改完代码直接跑实验，也需要一个不用浏览器的入口。
+- 现有 CLI 只管运维（`init`、`doctor`、`prune`……），任务一条命令都没有。AI 助手今天只能拿设备令牌自己拼 HTTPS 请求：端口、CA、令牌、`Content-Type` 都要手写，而设备令牌是全权的（能改密码、开网页终端）。2026-11-24 的 CLI 审阅还发现：业务错误一律退出码 1、只有中文文本；`trace`、`strict status` 没有 `--json`；提交没有幂等，SSH 在提交途中断开时，调用方不知道该不该重试。
 
 **怎么用**
 
 ```bash
-rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 --notify -- torchrun --nproc_per_node 4 train.py --lr 3e-4'
+# 本地：同步代码 → 提交 → 等结果 → 看日志尾巴
+rsync -a ./ gpu1:~/proj/
+id=$(ssh gpu1 "cd ~/proj && danlu submit -g 4 -e torch2 --key lr3e-4-$(git rev-parse --short HEAD) --json -- torchrun --nproc_per_node 4 train.py --lr 3e-4" | jq .id)
+ssh gpu1 "danlu wait $id --timeout 6h"; echo "退出码 $?"   # 0 成功，10 失败，11 取消，124 超时
+ssh gpu1 "danlu tail $id -n 80"
 ```
 
-- `danlu submit`：工作目录默认是当前目录，打印任务编号和面板里的路径 `/jobs/<id>`（不带安全入口）。
-- 另有 `danlu jobs`（列表）、`danlu show <id>`、`danlu tail [-f] <id>`（任务日志）和 `danlu cancel <id>`。`danlu logs` 已经用来看服务日志，所以任务日志用 `tail`。
-- 都支持 `--json`，方便脚本和 AI 助手解析。
+`danlu logs` 已经用来看服务日志，所以任务日志用 `tail`。
+
+**命令**
+
+| 命令 | 作用 | 走的接口 |
+|---|---|---|
+| `danlu submit [选项] -- <命令…>` | 提交任务 | `POST /api/jobs` |
+| `danlu jobs [--status s1,s2] [-q 文本] [--workdir 目录] [--limit N] [--json]` | 任务列表，新的在前，默认 20 条 | `GET /api/jobs` |
+| `danlu show <id> [--json]` | 任务详情 | `GET /api/jobs/{id}` |
+| `danlu tail <id> [-n 行数] [-f] [--raw]` | 任务日志尾部；`-f` 跟到任务结束 | `GET /api/jobs/{id}/log?tail=`、`…/log/stream` |
+| `danlu wait <id>… [--timeout 时长] [--json]` | 等到这些任务都结束 | 每 2 秒 `GET /api/jobs/{id}` |
+| `danlu cancel <id>… [--json]` | 取消 | `POST /api/jobs/{id}/cancel` |
+| `danlu rerun <id> [--snapshot \| --current-code] [-n 名字] [--memo 文本] [--notify \| --no-notify] [--key K] [--json]` | 按原参数重跑 | `GET` 原任务后 `POST /api/jobs` |
+| `danlu gpus [--json]` | 每张卡的占用（任务、外部进程、预约）和队首等待原因，提交前判断要几张卡；`--json` 是 `{"gpus":…,"queue":…,"queued":N,"queue_head":任务对象或 null}` | `GET /api/gpus`、`GET /api/queue`、`GET /api/jobs?status=queued` |
+| `danlu api <方法> <路径> [--data JSON \| --data @文件 \| --data -]` | 兜底：直接调任意 `/api` 接口，原样打印响应体 | 任意 |
+
+`danlu api` 只接受 `/api/` 开头的路径，不支持日志 SSE 和终端 WebSocket 这类长连接；成功的响应边读边写到 stdout，不设大小上限（日志、快照下载也能用）。另外顺手补齐现有命令：`trace` 加 `--json`（与 `GET /api/trace` 同形），`strict status` 加 `--json`；`prune -h`、`notify setup -h` 改为退出码 0（现在用 `ContinueOnError`，会报"flag: help requested"并返回 1）。
+
+**submit 的参数**
+
+- **工作目录**：默认是当前目录（`os.Getwd`，不解析软链接，和面板里手填的一样），`-C 目录` 指定。
+- **命令**：`--` 之后只有一个参数时，原样作为 shell 脚本（可以写 `&&`、管道）；有多个参数时逐个按 POSIX 规则加引号再用空格拼起来，记录下来的命令重跑时得到同一个 argv。多行脚本用 `--cmd-file 文件`，`--cmd-file -` 从标准输入读；它和 `--` 二选一。经 `ssh 主机 '…'` 调用时远端 shell 已经拆过一次引号，这条规则保证拆完的 argv 不会再被拆一次。
+- **GPU**：`-g N`，`-g 0` 是纯 CPU 任务；`--pin 0,2` 指定卡号，和 `-g` 二选一。都不写时按面板偏好 `ui.new_job_gpus`。
+- **conda**：`-e 环境名`。不写就不激活：面板的"自动选择"依赖页面上的环境列表，命令行不去猜。
+- **环境变量**：`--var K=V`，可重复，保留变量的校验和面板相同。**不继承调用方 shell 的环境**：任务的环境是 danlu 服务的环境加 `--var`，再加（可选的）`.bashrc`，和面板提交完全一样，同一条记录在哪里重跑结果都一样。`--bashrc` / `--no-bashrc`，默认按 `ui.new_job_bashrc`。
+- **其余**：`-n 名字`（默认规则和面板一样，由服务端生成）、`--memo 文本`、`--notify` / `--no-notify`（默认按 `ui.new_job_notify_done`）、`--key K`（幂等，见下）。
+- 偏好在提交时经 socket 从 `GET /api/settings` 的 `prefs` 读，所以面板上改的默认值对命令行同样生效。
+- **输出**：文字为 `已提交 #42（排队中）` 加一行面板路径 `/jobs/42`（不带安全入口）；`--json` 输出与 `POST /api/jobs` 响应相同的任务对象。
+
+**rerun 的规则** 与面板的"重跑"一致：
+
+- 复制工作目录、命令、conda、环境变量、`.bashrc`、GPU 张数或指定卡号，带上 `rerun_of`。
+- 名字按面板的 `rerunName`：`x` → `x-r2`，`x-r2` → `x-r3`。在 Go 里实现一份，加对照单测。
+- `--snapshot` 用原任务的代码快照（`code_from`），`--current-code` 用工作目录现在的代码。都不写时按面板的默认：失败类型在 `sameCodeFailKinds`（`reboot`、`killed`、`signal`、`nccl`）里且快照可用就用快照，否则用当前代码。
+- `--key` 不从原任务复制。
+
+**幂等键 `--key`**
+
+- **为什么**：SSH 在提交途中断开时，调用方不知道任务有没有落库；AI 助手遇到超时的第一反应是重试，结果重复占卡。
+- **格式**：`--key` 写 1–100 个 `[A-Za-z0-9._:-]` 字符，进 `SubmitReq.submit_key`。迁移加 `jobs.submit_key TEXT`（可空）和部分唯一索引 `WHERE submit_key IS NOT NULL`。key 永久有效、跨重启，只在 `InsertJob` 写入，以后不再改，所以不进 `SaveJob` 的列清单。
+- **流程**：`Manager.Submit` 一开始先按 key 查已有任务，找到就不做其余校验，直接比对、返回。没找到再走原流程；插入时撞上唯一索引（并发的同 key 提交）就再查一次，返回先落库的那个。
+- **返回**：重复提交不新建任务，接口返回已有任务，状态码 200（新建是 201）；CLI 文字提示 `已存在 #42（同一个 --key）`，`--json` 输出同一个任务对象。同一个 key 但决定跑什么的内容不同（工作目录、命令、GPU 要求、conda、环境变量、是否继承 `.bashrc`、代码来源）：409 `job_submit_key_conflict`，不新建；名字、备注、结束提醒不比（重试时名字可能由服务端重新生成）。格式不对：400 `job_submit_key_invalid`。
+- 任务对象加 `submit_key`（没有就不出现这个字段）。面板以后也可以用它防止手机网络抖动时重复提交（每次打开表单生成一个），不在本条范围内。
+
+**wait 与 tail**
+
+- **`wait` 的退出码**：全部成功返回 0；有失败返回 10；没有失败但有取消返回 11；`--timeout` 到了还有任务没结束返回 124，和 coreutils 的 `timeout` 一样。
+- **`wait` 的输出**：文字为每个任务一行（状态、用时、失败原因）；`--json` 输出 `{"jobs":[任务对象…]}`，超时也照样输出当前状态。
+- **服务重启间隙**：`danlu restart`、升级时 socket 会消失几秒，`wait` 和 `tail -f` 遇到连不上会重试，最多 60 秒，之后才按"连不上服务"退出；`wait` 的重试也算在 `--timeout` 里，到点按超时（124）退出。服务接受了连接但 30 秒没响应（刚启动、还在接管任务）也按连不上处理。
+- **`tail -n`**：默认 50 行。取尾部（最多 4 MiB，即接口上限）后截最后 N 行。
+- **折叠进度条**：默认把 tqdm 的 `\r` 进度折叠成最后一次的状态，每行只留最后一个 `\r` 之后的内容。Go 里实现与 `@danlu/core` 相同的规则，加对照单测。输出不是终端时同时去掉 ANSI 颜色（`logs.StripANSI`）。`--raw` 原样输出字节。原因是进度条刷新会把几十行日志撑成几百 KB，AI 助手的上下文放不下。
+- **`tail -f`**：先打印尾部（最后一行还没写完就先不打印），再从这一行的开头接 `log/stream` 续读，同一行不会被拆成两行；收到 `end` 事件后退出，退出码和 `wait` 相同。日志已被清理（410）时按普通错误退出。
+
+**给脚本和 AI 助手的约定**（新命令全部遵守，写进 README）
+
+- **stdout 只放结果**：提示、警告、错误都写到 stderr。
+- **`--json` 成功时**：stdout 是一个 JSON 对象，字段与 `/api` 相同，跟着 `APIVersion` 走。
+- **`--json` 失败时**：stderr 是一行 `{"error":"…","code":"…","params":{…}}`。`code` 和接口错误码是同一张表（`writeErrC`、哨兵表、`scheduler` 的校验码）。只在本地出现的错误用 CLI 自己的码：`cli_usage`、`cli_unreachable`、`cli_unsupported`（不是 Linux）、`cli_server_old`（服务端还没有这个接口）、`cli_error`（其他本地错误）；服务端没给码的错误（500 等）记为 `server_error`。
+- **退出码**：
+
+  | 码 | 含义 |
+  |---|---|
+  | 0 | 成功（`-h` 把用法打印到 stdout，也是 0） |
+  | 1 | 其他错误：校验失败、服务端错误 |
+  | 2 | 用法错误：参数不对、未知命令 |
+  | 3 | 连不上服务：没在运行、socket 不存在、身份不符 |
+  | 4 | 任务不存在 |
+  | 10 / 11 / 124 | 只有 `wait`、`tail -f`：失败 / 取消 / 超时 |
+
+- **从不交互**：不读终端、不提问；只有 `--cmd-file -` 和 `--data -` 读标准输入。
+- **不泄露**：不打印安全入口、密码和令牌，面板链接只给路径。
+- **语言**：文字输出保持中文（I18N.md 的 CLI 例外不变）；程序据 `--json` 和 `code` 判断，不解析文字。
+- **时间**：JSON 里是 Unix 秒，与接口相同；文字里是本地时间。
+
+现有运维命令的退出码不变（它们的 1 本来就同时代表校验失败和服务端错误），以后逐个往这张表上靠。
 
 **规则**
 
-- 能 SSH 登录就证明了身份，和 `danlu token create` 是同一个道理，所以不需要密码或令牌。
-- 只连本机正在运行的 danlu，不直接写数据库：所有状态变化仍然只经过 `scheduler.Manager`。
+- 能 SSH 登录就证明了身份，和 `danlu token create` 是同一个道理，所以不需要密码或令牌。这条路径不扩大权限：同一个用户本来就能读写数据目录、执行 `danlu passwd`。
+- 只连本机正在运行的 danlu，不直接读写数据库：所有状态变化仍然只经过 `scheduler.Manager`。
+- 一个数据目录一个 socket：`DANLU_HOME` 指向哪个实例，命令行就连哪个，和"进程身份是运行目录"同一个思路。
 
 **改动**
 
-- **服务端**：监听一个 unix socket（`~/.danlu/danlu.sock`，目录 0700，socket 0600），用 `SO_PEERCRED` 确认对方的 uid 和 danlu 相同。之后把请求交给同一套 `/api` 路由，身份记为"命令行"，审计日志照记。这部分是 Linux 专用，放在 `*_linux.go`。
-- **CLI**：子命令就是这个 socket 上的普通 HTTP 客户端，请求和响应格式和 `/api` 一样。
-- **文档**：README 加一段 rsync + submit 的示例脚本。
+- **服务端 socket**（Linux 专用，`*_linux.go`；`*_other.go` 不监听，命令行报 `cli_unsupported`）：
+  - 路径 `<数据目录>/danlu.sock`。数据目录本来就是 0700，socket 建好后 chmod 0600。
+  - `serve` 拿到 `serve.lock` 之后先删掉残留的 socket 文件再监听：有锁在，删掉的不可能是另一个实例的。
+  - 和 TCP 端口一起在 `Recover()` 之前监听。socket 监听失败（例如数据目录路径超过 `sun_path` 的 107 字节）不阻止启动，只记日志；`doctor` 加一项"命令行入口"。
+  - 用单独一个 `http.Server` 承载 socket，handler 和超时与 TCP 那个相同。停服时和 TCP 一起 `Shutdown`，同样受 `cancelBase` 管：`tail -f` 的 SSE 会马上退出，客户端随后按重启间隙重试。
+- **身份与鉴权**：
+  - `ConnContext` 用 `SO_PEERCRED`（`golang.org/x/sys/unix`，已是间接依赖）取对方的 uid，放进连接的 context。只能从连接本身得到，请求头伪造不了。
+  - 包一层 handler：uid 和 danlu 自己的 euid 不同就返回 403 `socket_uid_mismatch`。典型情况是 `sudo danlu submit`，root 不受 0600 限制，CLI 据此提示"请用运行 danlu 的用户执行"。
+  - `auth.Middleware` 认出 socket 请求后跳过入口 gate 和会话检查；`Content-Type` 检查和 1 MB 请求体上限照旧。`Auth.Authorized` 对 socket 请求返回 true：对方的 uid 在连接期间不会变，也没有会话可以注销。
+  - `auth.ClientIP` 对 socket 请求返回 `cli`，审计日志里与现有 CLI 操作（`token_create` 等）记法一致。
+  - socket 上开放整个 `/api`（理由见"规则"），不提供静态页面。
+- **调度器与库**：
+  - `SubmitReq.SubmitKey` 及上面的查重流程；manager_test 加同 key 两次、内容冲突、并发提交三例。
+  - 迁移追加 `jobs.submit_key` 和唯一索引，编号取落地时的下一个（现在是 19；第二批的迁移先落地就顺延），不进 `release/0.2`。
+- **接口**（全是加法，不升 `APIVersion`）：
+  - `POST /api/jobs` 收 `submit_key`，重复时返回 200；任务对象加 `submit_key`。
+  - 新错误码 `job_submit_key_invalid`、`job_submit_key_conflict`、`socket_uid_mismatch` 进中英文目录。
+  - `packages/core` 同步类型；`desktop` 保持能编译。
+- **CLI 代码**：
+  - `cmd/danlu/client.go`：socket 上的 `http.Client`，`DialContext` 连 unix socket，Host 固定为 `danlu`。负责错误解析、`--json` 错误输出和重启间隙重试。
+  - `cmd/danlu/jobs.go`：上面这些命令。
+  - `main` 增加带退出码的错误类型，取代现在一律 `os.Exit(1)`。
+  - POSIX 加引号的函数和 `\r` 折叠都放在 `internal` 包里，单测覆盖：加引号后在 Linux 上经 `sh -c` 还原出同一个 argv；折叠结果与 core 的用例一致。
+- **文档**：
+  - README 新增"命令行与 AI 助手"一节：rsync + submit + wait 的示例脚本、退出码表，以及给 AI 助手的允许列表建议。允许 `submit`、`jobs`、`show`、`tail`、`wait`、`cancel`、`rerun`、`gpus`、`trace`、`doctor --json`、`info --json`、`prune --dry-run`、`api GET`；不放进去的是 `init`、`cert`、`passwd`、`entrance --reset`、`port`、`prune`、`replace`、`update`、`restart`、`strict`、`totp`、`token` 和非 GET 的 `api`，因为它们一条就能让所有设备连不上面板或删掉文件。
+  - AGENTS.md 的"Request gating"加 socket 这条路径和 `SO_PEERCRED` 检查。
+  - DEMO.md 补 `submit_key`。
 
-**是否做**：取决于你平时会不会从终端或脚本发任务 ❓。
+**验收**
+
+- **单测**：
+  - 客户端对 `httptest` 起的 unix socket 服务的请求、错误解析和退出码。macOS 上也能跑。
+  - 加引号往返、`\r` 折叠、`rerunName`。
+  - Submit 的 key 三例。
+- **e2e**（假 GPU，新增一节）：
+  - `submit --json` 能用 jq 解析。
+  - `wait` 四种退出码：成功、`exit 1` 的命令、取消、超时。
+  - `tail -f` 在任务结束时退出。
+  - `wait` 期间 `danlu restart` 不报错。
+  - 同一个 key 提交两次得到同一个任务，改了命令得到 409。
+  - `api GET /api/gpus` 正常返回。
+  - socket 的权限是 0600。
+  - `sudo danlu jobs` 得到 403 `socket_uid_mismatch`（CI 有免密 sudo）。
+- **真机**：在 hsy 上从 Mac 经 ssh 跑一遍示例脚本，再让 AI 编程助手只看 README 那一节，自己完成一次"改代码 → 提交 → 等 → 读日志"。
+
+**不做**
+
+- **MCP server**：有 shell 的 AI 助手用 CLI 就够了。
+- **`submit --wait`**：用 `submit` 加 `wait` 组合。
+- **继承调用方的环境变量**：理由见 submit 的参数。
+- **不经 SSH 的远程调用、设备令牌分权限**：不在本条范围；设备令牌仍是全权的，给 AI 助手用时要知道这一点。
+
+**状态（2026-11-24）**：已在 main 上实现（迁移 19，不进 `release/0.2`）。Go 单测覆盖幂等提交（同 key、冲突、并发）、socket 鉴权与 403、加引号往返和 `\r` 折叠，命令行在进程内对真 `/api` 跑了提交、列表、详情、等待（四种退出码）、取消、重跑、日志尾部与跟随、`gpus` 和 `api`；Linux vet 与三端类型检查通过。e2e 新增一节、`SO_PEERCRED` 和 socket 文件的 Linux 单测待 Linux/CI 执行，真机验收（hsy 上走一遍示例脚本，再让 AI 助手只看 README 自己跑一次实验）随使用补验。
 
 ### 5.2 GPU 预约（2026-11-21 已实现）
 
@@ -490,7 +616,7 @@ rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 -
 
 **规则**
 
-- **权限边界**：助手是 danlu 二进制的 root 副本 `/usr/local/libexec/danlu-gpu-helper`，sudoers 只放行 `start`、`check` 两个子命令。它只会收紧：进程永远以调用者（`SUDO_UID`）身份、在 `user-<uid>.slice` 里运行，资源限制和附加组照抄 danlu 进程；调用者能选的只有放行哪些卡和执行什么（本来就能以自己的身份执行）。助手不写文件，只读 `/proc`、`/sys`、stat `/dev`。
+- **权限边界**：助手是 danlu 二进制的 root 副本 `/usr/local/libexec/danlu-gpu-helper`，sudoers 只放行 `start`、`check` 两个子命令。它只会收紧：进程永远以调用者（`SUDO_UID`）身份、在 `user-<uid>.slice` 里运行，组由 systemd 按用户库取（不照抄任何进程），资源限制照抄调用助手的 danlu 进程（`danlu_pid` 必须是助手的祖先，读不到限制就拒绝；协议 2，11-23 审阅 P1-1）；调用者能选的只有放行哪些卡和执行什么（本来就能以自己的身份执行）。助手不写文件，只读 `/proc`、`/sys`、stat `/dev`。
 - **设备**：`DevicePolicy=closed`，按 `/proc/devices` 放行除 GPU 以外的所有驱动（排除 `/dev/nvidia[0-9]*`、`/dev/dri/*` 所在的主设备号），再按路径放行驱动公共节点和分到的卡的 `/dev/nvidiaN`、DRM 节点（按 PCI 总线号对上次号）。设备限制只用来隔离 GPU，不顺带做沙箱。
 - **启动**：每个任务一个 `danlu-job-<uid>-<数据目录哈希>-<id>-<时间戳>.service`（`Type=exec`、`KillMode=process`、`OOMPolicy=continue`、`--collect`），`ExecStart` 是 `danlu job-exec`：以用户身份读丹炉写的 NUL 分隔环境文件（读完即删）、接好日志、exec 包装脚本。pid 文件、进程组、`DANLU_RUN_DIR` 都和普通任务一样，所以接管、取消、清理不变；任务不在 danlu.service 的 cgroup 里，重启 danlu 天然不影响它。
 - **编号**：严格任务注入 `CUDA_VISIBLE_DEVICES=0..k-1`，`DANLU_GPUS` 仍是物理卡号，`DANLU_CVD` 是应注入的值（包装脚本据此纠正 conda 环境的改动）。日志开头写"严格限卡，程序里的编号是 …"。
@@ -503,7 +629,7 @@ rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 -
 
 **已知边界**
 
-- 需要 systemd ≥ 240 和 cgroup v2（v1 理论上也行，没试过）；只支持整卡，不支持 MIG。
+- 需要 systemd ≥ 243（`OOMPolicy=` 从这一版开始才有）和 cgroup v2（v1 理论上也行，没试过）；只支持整卡，不支持 MIG。
 - Mesa 会尝试打开被拦的 `/dev/dri` 节点，日志里多几行 `libEGL warning: … Permission denied`，无害。
 - 网页终端不是任务，不受限。
 - 升级 danlu 不会更新 root 拥有的助手；协议变了会提示重新运行 `sudo danlu strict install`。
@@ -525,7 +651,7 @@ rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 -
 | 第一批 | `jobs.memo`、`jobs.profile_json`、`jobs.notify_done` | `POST /api/jobs/{id}/memo`、`POST /api/jobs/{id}/notify`、`GET /api/jobs/{id}/log/search` | `runtime.silence_alert`、`notify.queue_drained` | `queue_drained`、告警 `silent:<id>` |
 | 第二批 | `jobs.queue_order`（迁移时设为 id）、`jobs.held`、表 `job_groups`、`jobs.group_id`、`jobs.params_json` | `POST /api/jobs/{id}/edit`、`POST /api/jobs/batch`、`POST /api/jobs/{id}/move`、`POST /api/jobs/{id}/hold`、`POST /api/groups`、`GET /api/groups/{id}` | — | `job_edited`、`job_moved`、`job_held` |
 | 第三批 | — | `GET /api/jobs/{id}/files`、`GET /api/jobs/{id}/files/raw` | — | — |
-| 第四批 | 表 `gpu_reservations`（5.2，已做，迁移 16） | `GET/POST /api/reservations`、`POST /api/reservations/{id}/release`、`POST /api/reservations/{id}/extend`，`/api/gpus` 加 `reservation`；unix socket 入口 | — | `reservation_ready`、`reservation_expiring`、`reservation_ended` |
+| 第四批 | 表 `gpu_reservations`（5.2，已做，迁移 16）；`jobs.submit_key` 及其部分唯一索引（5.1） | `GET/POST /api/reservations`、`POST /api/reservations/{id}/release`、`POST /api/reservations/{id}/extend`，`/api/gpus` 加 `reservation`；unix socket 入口，`POST /api/jobs` 加 `submit_key`（重复时 200），任务加 `submit_key`（5.1） | — | `reservation_ready`、`reservation_expiring`、`reservation_ended` |
 | 第四批 · 严格限卡 | `jobs.unit`（5.4，已做，迁移 18） | `POST /api/settings/strict`，`GET /api/settings` 加 `strict`，任务加 `unit` | 库里 `runtime.strict_gpu`（面板开关） | 告警 `strict_unavailable` |
 
 **新的注入变量**：`DANLU_GROUP_ID`（任务组成员）；`WANDB_RUN_GROUP`（仅在用户没有设置时注入）。
@@ -539,9 +665,11 @@ rsync -a ./ gpu1:~/proj/ && ssh gpu1 'cd ~/proj && danlu submit -g 4 -e torch2 -
 3. 已定首次默认关闭结束推送，记住上次成功提交时的选择。
 4. 文件浏览的运行目录默认只显示这个任务改过的文件（是，可以切换成全部）。
 5. 扫描变量的写法 `{{name}}`，一次最多 64 个任务（是）。
-6. 命令行提交做不做（看你是否从终端或脚本发任务）。
+6. 已定做命令行提交，2026-11-24 按脚本和 AI 编程助手调用实现（5.1）。
 
 ---
 变更记录
+- v4（2026-11-24）：5.1 已实现；补上实现时定下的细节：`cli_error`、`server_error` 两个码，`gpus --json` 的形状，`rerun` 的 `--notify`；按审阅把 `--key` 的冲突判断扩到 conda、环境变量、`.bashrc` 和代码来源（扫参数复用 key 时第二组参数不会被悄悄吞掉）。
+- v3（2026-11-24）：按当天的 CLI 审阅细化 5.1 命令行提交，面向脚本和 AI 编程助手：新增 `wait`、`rerun`、`gpus`、`api` 命令；`--key` 提交幂等（新迁移、重复时 200、冲突 409）；统一 `--json` 错误输出和退出码表；`tail` 默认折叠进度条；socket 身份检查与审计记法；给 AI 助手的允许列表建议。顺带补 `trace --json`、`strict status --json`，修 `prune`/`notify setup` 的 `-h` 退出码。
 - v2（2026-11-06）F1 已实现，纳入 v0.2.0，真机验收待补。
 - v1（2026-11-04）：初稿。按"省心、批量、看结果、看需要"分四批，细化 ROADMAP 理想线，并新增日志搜索、命令参数编辑、命令行提交、GPU 保留四项提议。

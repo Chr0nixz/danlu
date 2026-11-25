@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"danlu/internal/auth"
 	"danlu/internal/config"
 	"danlu/internal/gpu"
+	"danlu/internal/localsock"
 	"danlu/internal/notify"
 	"danlu/internal/qrutil"
 	"danlu/internal/retention"
@@ -50,6 +52,18 @@ const usage = `danlu — GPU 服务器训练任务管理面板
 
 用法: danlu <命令> [参数]
 
+任务（连接本机正在运行的 danlu；除 tail、api 外都有 --json，每条命令 -h 看参数）：
+  submit [选项] -- <命令…>   提交任务，工作目录默认是当前目录；--key 防止重试时重复提交
+  jobs              任务列表
+  show <id>         任务详情
+  tail <id>         任务日志尾部；-f 跟到任务结束
+  wait <id>…        等任务结束：成功 0，失败 10，取消 11，超时 124
+  cancel <id>…      取消任务
+  rerun <id>        按原参数重跑；--snapshot 用原任务的代码快照
+  gpus              每张卡的占用和队首在等什么
+  api <方法> <路径>  直接调用 /api 接口
+
+管理：
   init              初始化：生成端口、安全入口、密码和证书；--no-qr 不打印二维码
   serve             启动服务
   info              显示访问地址等信息；--json 输出给桌面客户端读取；--no-qr 不打印二维码
@@ -66,13 +80,14 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   logs [-n 行数]    查看服务日志（journalctl）
   prune             按保留策略清理任务文件；--dry-run 预览，--older-than 72h 指定时长
   notify            手机推送：setup 配置订阅 | test 发一条测试
-  trace <路径>      从 checkpoint 路径反查任务
+  trace <路径>      从 checkpoint 路径反查任务；--json 输出结构化结果
   doctor            检查服务器状态；--json 输出结构化结果
   update            用当前新程序更新正在运行的 danlu，自动定位并重启服务
   replace <路径>    升级用：用当前这个程序替换 <路径> 上的 danlu，然后重启服务
   version           显示版本
 
 数据目录默认是 ~/.danlu，可以用环境变量 DANLU_HOME 指定。
+退出码：0 成功，1 其他错误，2 用法错误；任务命令另有 3 连不上服务，4 任务不存在。
 `
 
 func main() {
@@ -88,6 +103,24 @@ func main() {
 	args := os.Args[2:]
 	var err error
 	switch os.Args[1] {
+	case "submit":
+		err = cmdSubmit(args)
+	case "jobs":
+		err = cmdJobs(args)
+	case "show":
+		err = cmdShow(args)
+	case "tail":
+		err = cmdTail(args)
+	case "wait":
+		err = cmdWait(args)
+	case "cancel":
+		err = cmdCancel(args)
+	case "rerun":
+		err = cmdRerun(args)
+	case "gpus":
+		err = cmdGpus(args)
+	case "api":
+		err = cmdAPI(args)
 	case "init":
 		err = cmdInit(args)
 	case "serve":
@@ -137,12 +170,10 @@ func main() {
 		fmt.Print(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令 %q\n\n%s", os.Args[1], usage)
-		os.Exit(2)
+		os.Exit(exitUsage)
 	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "错误:", err)
-		os.Exit(1)
-	}
+	// 错误到 stderr："错误: …"，带 --json 的任务命令是一行 {"error","code","params"}；退出码见 exit.go
+	exitWith(err)
 }
 
 func paths() config.Paths { return config.PathsFor(config.Home()) }
@@ -239,6 +270,13 @@ func cmdInit(args []string) error {
 	if err := p.MkdirAll(); err != nil {
 		return err
 	}
+	// 先开库再动证书：库打不开（例如是旧版本）时什么都不改。反过来的话 CA 已经换掉，
+	// 正在运行的服务一分钟内加载新证书，所有设备都不再信任它
+	st, err := openStore(p)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
 	if _, err := config.EnsureSecret(p); err != nil {
 		return err
 	}
@@ -247,11 +285,11 @@ func cmdInit(args []string) error {
 			return fmt.Errorf("生成证书失败: %w", err)
 		}
 	}
-	if err := setPassword(p, pw); err != nil {
+	if err := setPassword(st, pw); err != nil {
 		return err
 	}
 	// 重新初始化时清掉面板上改过的安全设置和运行设置，不然新生成的入口和新配置会被库里的旧值盖住
-	if err := resetPanelSettings(p); err != nil {
+	if err := resetPanelSettings(st); err != nil {
 		return err
 	}
 	if err := config.Save(p, c); err != nil {
@@ -338,13 +376,7 @@ func cmdServe(args []string) error {
 	hostname, _ := os.Hostname()
 	notifier := notify.New(st, c.Notify, hostname, c.BaseURL())
 	// 推送语言：面板可改的 ui.notify_lang 偏好（settings 表），发送时读取，改动对未发批次也生效
-	notifier.Lang = func() string {
-		v, err := st.GetSetting("ui.notify_lang")
-		if err != nil {
-			return ""
-		}
-		return v
-	}
+	notifier.Lang = func() string { return settings.NotifyLang(st) }
 	if err := notifier.Initialize(); err != nil {
 		log.Printf("初始化手机推送失败，将在后台重试: %v", err)
 	}
@@ -451,6 +483,18 @@ func cmdServe(args []string) error {
 		return err
 	}
 	defer ln.Close()
+	// 本机命令行入口（unix socket，FEATURES 5.1）也在接管任务之前监听；已经拿着 serve.lock，
+	// 残留的 socket 文件可以放心删。起不来不影响服务，只是 danlu submit 等命令暂不可用
+	sockPath := localsock.Path(p.Home)
+	sockLn, err := localsock.Listen(sockPath)
+	if err != nil {
+		if !errors.Is(err, localsock.ErrUnsupported) {
+			log.Printf("命令行入口没有启动，danlu submit 等命令暂不可用: %v", err)
+		}
+		sockLn = nil
+	} else {
+		defer sockLn.Close() // 关闭时删掉 socket 文件
+	}
 	mgr.Recover()
 	// Run 退出前会等正在启动的任务都落库。数据库要在它之后关：defer 按相反的顺序执行
 	mgrDone := make(chan struct{})
@@ -500,8 +544,34 @@ func cmdServe(args []string) error {
 		ErrorLog: log.New(filteredWriter{}, "", log.LstdFlags),
 	}
 
+	// socket 上的服务器：同一套 /api，超时与 TCP 相同；连接建立时取对端 uid（SO_PEERCRED），
+	// auth 只认这个值，同一个用户免入口和会话，别的 uid 由 LocalHandler 返回 403
+	var localSrv *http.Server
+	if sockLn != nil {
+		localSrv = &http.Server{
+			Handler:     srv.LocalHandler(),
+			BaseContext: httpSrv.BaseContext,
+			ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+				uid, ok := localsock.PeerUID(conn)
+				if !ok {
+					uid = -1
+				}
+				return auth.WithLocalPeer(ctx, uid)
+			},
+			ReadHeaderTimeout: httpSrv.ReadHeaderTimeout,
+			ReadTimeout:       httpSrv.ReadTimeout,
+			WriteTimeout:      httpSrv.WriteTimeout,
+			IdleTimeout:       httpSrv.IdleTimeout,
+			MaxHeaderBytes:    httpSrv.MaxHeaderBytes,
+			ErrorLog:          httpSrv.ErrorLog,
+		}
+	}
+
 	log.Printf("danlu %s 启动，数据目录 %s", version, p.Home)
 	log.Printf("访问地址 %s/%s", c.BaseURL(), au.Security().Entrance)
+	if localSrv != nil {
+		log.Printf("命令行入口 %s", sockPath)
+	}
 	serve := func() error { return httpSrv.Serve(ln) }
 	switch c.TLS.Mode {
 	case config.TLSLocalCA, config.TLSFile:
@@ -523,20 +593,38 @@ func cmdServe(args []string) error {
 	default:
 		log.Printf("⚠ 没有启用 HTTPS，只能用于本地测试")
 	}
+	// 两个服务器同时停：先后停的话，等 TCP 请求时 socket 还在接新请求，前一个耗尽 5 秒还会让后一个来不及等完。
+	// 两条退出路径都要停命令行入口：它的请求不能和随后关闭的数据库赛跑
+	shutdown := func() {
+		cancelBase() // 日志 SSE 这类长连接马上退出
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = httpSrv.Shutdown(sctx) }) // 等正在处理的请求（比如提交任务）完成
+		if localSrv != nil {
+			wg.Go(func() { _ = localSrv.Shutdown(sctx) })
+		}
+		wg.Wait()
+	}
 	errc := make(chan error, 1)
 	go func() { errc <- serve() }()
+	if localSrv != nil {
+		go func() {
+			if err := localSrv.Serve(sockLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("命令行入口停止: %v", err)
+			}
+		}()
+	}
 	select {
 	case err := <-errc:
+		shutdown()
 		return err
 	case <-ctx.Done():
 	}
 
 	log.Printf("正在停止 danlu")
-	cancelBase()
-	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(sctx) // 等正在处理的请求（比如提交任务）完成
-	<-mgrDone                  // 等调度循环和正在启动的任务都落库
+	shutdown()
+	<-mgrDone // 等调度循环和正在启动的任务都落库
 	log.Printf("danlu 已停止（正在运行的训练任务不受影响）")
 	return nil
 }
@@ -575,7 +663,7 @@ func overlayPanelSettings(p config.Paths, c *config.Config) ([]string, error) {
 	if _, err := os.Stat(p.DB); errors.Is(err, os.ErrNotExist) {
 		return nil, nil // 还没启动过，库里什么都没有
 	}
-	st, err := store.Open(p.DB)
+	st, err := openStore(p)
 	if err != nil {
 		return nil, err
 	}
@@ -705,7 +793,7 @@ func cmdToken(args []string) error {
 	asJSON := fs.Bool("json", false, "以 JSON 输出")
 	fs.Parse(args[1:])
 
-	st, err := store.Open(paths().DB)
+	st, err := openStore(paths())
 	if err != nil {
 		return err
 	}
@@ -794,7 +882,12 @@ func cmdPasswd(args []string) error {
 	if len(*pw) < 8 {
 		return errors.New("密码至少 8 位")
 	}
-	if err := setPassword(p, *pw); err != nil {
+	st, err := openStore(p)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := setPassword(st, *pw); err != nil {
 		return err
 	}
 	// 旧版本把哈希放在配置文件里，删掉免得留着两份
@@ -817,7 +910,7 @@ func cmdTOTP(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := store.Open(p.DB)
+	st, err := openStore(p)
 	if err != nil {
 		return err
 	}
@@ -868,12 +961,7 @@ func cmdTOTP(args []string) error {
 }
 
 // resetPanelSettings 清掉面板上改过的安全设置和运行设置，回到新配置文件的值。面板偏好（ui.*）保留。
-func resetPanelSettings(p config.Paths) error {
-	st, err := store.Open(p.DB)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
+func resetPanelSettings(st *store.Store) error {
 	if err := auth.ResetSecurity(st); err != nil {
 		return err
 	}
@@ -881,12 +969,7 @@ func resetPanelSettings(p config.Paths) error {
 }
 
 // setPassword 把密码存进数据库，并让所有已登录的会话失效。服务正在运行时也立即生效。
-func setPassword(p config.Paths, pw string) error {
-	st, err := store.Open(p.DB)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
+func setPassword(st *store.Store, pw string) error {
 	if err := auth.SetPassword(st, pw); err != nil {
 		return err
 	}
@@ -901,6 +984,7 @@ func cmdStrict(args []string) error {
 	}
 	fs := flag.NewFlagSet("strict "+args[0], flag.ExitOnError)
 	userFlag := fs.String("user", "", "授权的用户名或 uid，默认是执行 sudo 的用户")
+	asJSON := fs.Bool("json", false, "status 以 JSON 输出")
 	fs.Parse(args[1:])
 	switch args[0] {
 	case "install", "uninstall":
@@ -920,8 +1004,10 @@ func cmdStrict(args []string) error {
 		}
 		return strict.Install(target, self, os.Stdout)
 	case "status":
+		// enabled 是面板开关；以 root 执行时不打开数据库（免得留下 root 拥有的文件），JSON 里为 null
+		var enabled *bool
 		if os.Geteuid() != 0 {
-			st, err := store.Open(paths().DB)
+			st, err := openStore(paths())
 			if err != nil {
 				return err
 			}
@@ -930,11 +1016,18 @@ func cmdStrict(args []string) error {
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return err
 			}
-			fmt.Println("开关    ", map[bool]string{true: "开启", false: "关闭"}[v == "1"])
+			on := v == "1"
+			enabled = &on
+			if !*asJSON {
+				fmt.Println("开关    ", map[bool]string{true: "开启", false: "关闭"}[on])
+			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		res := strict.Check(ctx)
+		if *asJSON {
+			return printJSON(map[string]any{"enabled": enabled, "installed": strict.Installed(), "helper": res})
+		}
 		if res.OK {
 			fmt.Println("助手     可用，版本", res.HelperVersion)
 			return nil
@@ -960,7 +1053,7 @@ func cmdEntrance(args []string) error {
 		if err != nil {
 			return err
 		}
-		st, err := store.Open(p.DB)
+		st, err := openStore(p)
 		if err != nil {
 			return err
 		}

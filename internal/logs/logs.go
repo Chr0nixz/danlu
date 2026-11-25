@@ -86,6 +86,24 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07`)
 
 func StripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
+// CollapseCR 模拟终端的回车：每行只保留最后一个 \r 之后的内容，tqdm 进度条折叠成最后一次的状态。
+// 行尾的 \r 先去掉：print(..., end="\r") 只是把光标移回行首，这一行在终端上还看得见。
+// 与 @danlu/core 的 collapseCR 规则相同（packages/core/src/terminal.ts），命令行 danlu tail 用它。
+func CollapseCR(s string) string {
+	if !strings.Contains(s, "\r") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		if j := strings.LastIndexByte(l, '\r'); j >= 0 {
+			l = l[j+1:]
+		}
+		lines[i] = l
+	}
+	return strings.Join(lines, "\n")
+}
+
 // BannerPrefix 是 runner 包装脚本在任务开始和结束时打印的提示行的前缀。
 const BannerPrefix = "[danlu] 任务"
 

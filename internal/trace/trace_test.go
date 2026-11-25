@@ -23,7 +23,9 @@ func TestSearchByOutputDirManifestAndGuess(t *testing.T) {
 	if err := st.InsertJob(job); err != nil {
 		t.Fatal(err)
 	}
+	started := int64(1_700_000_000)
 	job.OutputDir = filepath.Join(root, "project", "1-train")
+	job.StartedAt = &started
 	if err := st.SaveJob(job); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +34,7 @@ func TestSearchByOutputDirManifestAndGuess(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(manifestDir, "nested"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest, _ := json.Marshal(map[string]any{"id": job.ID})
+	manifest, _ := json.Marshal(map[string]any{"id": job.ID, "workdir": workdir, "command": job.Cmd, "started_at": started})
 	if err := os.WriteFile(filepath.Join(manifestDir, "danlu.json"), manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +97,52 @@ func TestSearchByOutputDirManifestAndGuess(t *testing.T) {
 	}
 	if len(result.Matches) != 1 || result.Matches[0].Job.ID != job.ID || result.Matches[0].Source != SourceManifest {
 		t.Fatalf("parent manifest fallback failed: %+v", result.Matches)
+	}
+}
+
+// 编号在每个数据目录里都从 1 开始：另一个实例（或重装前）写的清单，编号对上本实例里无关的同号任务时不能认
+func TestManifestFromAnotherInstance(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "danlu.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	workdir := filepath.Join(t.TempDir(), "project")
+	started := int64(1_700_000_000)
+	job := &store.Job{Name: "train", Workdir: workdir, Cmd: "python train.py", Status: store.StatusSucceeded, StartedAt: &started}
+	if err := st.InsertJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveJob(job); err != nil {
+		t.Fatal(err)
+	}
+	for name, doc := range map[string]map[string]any{
+		"别的工作目录":        {"id": job.ID, "workdir": "/elsewhere", "command": job.Cmd, "started_at": started},
+		"同目录同命令、启动时间不同": {"id": job.ID, "workdir": workdir, "command": job.Cmd, "started_at": started + 3600},
+		"没有启动时间、命令不同":   {"id": job.ID, "workdir": workdir, "command": "python eval.py"},
+		"只有编号的旧格式":      {"id": job.ID},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			b, _ := json.Marshal(doc)
+			if err := os.WriteFile(filepath.Join(dir, "danlu.json"), b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Search(st, filepath.Join(t.TempDir(), "outputs"), "", filepath.Join(dir, "best.pt"))
+			if err != nil || len(result.Matches) != 0 {
+				t.Fatalf("不是本实例这个任务写的清单不应命中: %+v %v", result.Matches, err)
+			}
+		})
+	}
+	// 本任务写的：命中
+	dir := t.TempDir()
+	b, _ := json.Marshal(map[string]any{"id": job.ID, "workdir": workdir, "command": job.Cmd, "started_at": started})
+	if err := os.WriteFile(filepath.Join(dir, "danlu.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Search(st, filepath.Join(t.TempDir(), "outputs"), "", filepath.Join(dir, "best.pt"))
+	if err != nil || len(result.Matches) != 1 || result.Matches[0].Job.ID != job.ID {
+		t.Fatalf("本任务的清单应命中: %+v %v", result.Matches, err)
 	}
 }
 

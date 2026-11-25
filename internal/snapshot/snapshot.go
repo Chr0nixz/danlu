@@ -91,41 +91,46 @@ func metaPath(dir string, id int64) string {
 }
 func diffPath(dir string, id int64) string { return filepath.Join(dir, fmt.Sprintf("%d.diff", id)) }
 
-// Take 生成快照。超时（ctx）或出错时删除半成品并返回错误。
+// Take 生成快照。超时（ctx）或出错时删除半成品并返回错误；这时如果已经读到 git 信息，
+// 返回的 Meta 不为 nil、只有 Git 有效，调用方照样记下 commit、分支和有没有未提交改动。
+//
+// git 目录先收被跟踪的文件，再收未跟踪的：总大小上限按先到先得，没写进 .gitignore 的日志、输出
+// 不能把预算占满、挤掉代码。单个文件读不了（没有权限、刚被删掉）记进跳过清单，不让整份快照失败。
 func Take(ctx context.Context, workdir, dir string, id int64, opt Options) (*Meta, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	meta := &Meta{Workdir: workdir, CreatedAt: time.Now().Unix(), Files: []FileEntry{}, Skipped: []Skip{}}
 	var candidates []string
+	var tracked int
 	var diff []byte
 	isGit, note := gitCheck(ctx, workdir)
 	meta.Note = note
 	if isGit {
 		meta.Git, diff = gitInfo(ctx, workdir, true)
-		files, err := gitFiles(ctx, workdir)
+		files, others, err := gitFiles(ctx, workdir)
 		if err != nil {
-			return nil, err
+			return gitOnly(meta), err
 		}
-		candidates = files
+		candidates, tracked = append(files, others...), len(files)
 	} else {
 		files, err := walkFiles(ctx, workdir, meta)
 		if err != nil {
 			return nil, err
 		}
+		sort.Strings(files)
 		candidates = files
 	}
-	sort.Strings(candidates)
 
 	arch := ArchivePath(dir, id)
-	err := writeArchive(ctx, workdir, arch, candidates, opt, meta)
+	err := writeArchive(ctx, workdir, arch, candidates, tracked, opt, meta)
 	if err != nil {
 		os.Remove(arch)
-		return nil, err
+		return gitOnly(meta), err
 	}
 	mb, _ := json.Marshal(meta)
 	if err := os.WriteFile(metaPath(dir, id), mb, 0o600); err != nil {
-		return nil, err
+		return gitOnly(meta), err
 	}
 	if len(diff) > 0 {
 		_ = os.WriteFile(diffPath(dir, id), diff, 0o600)
@@ -140,7 +145,24 @@ func (m *Meta) skip(p, reason string) {
 	}
 }
 
-func writeArchive(ctx context.Context, workdir, out string, files []string, opt Options, meta *Meta) error {
+// addNote 在备注后面接一句
+func (m *Meta) addNote(note string) {
+	if m.Note != "" {
+		note = m.Note + "；" + note
+	}
+	m.Note = note
+}
+
+// gitOnly 是快照失败时交给调用方的 Meta：只留 git 信息（commit 在失败前已经读到了）。没有 git 信息时为 nil
+func gitOnly(m *Meta) *Meta {
+	if m.Git == nil {
+		return nil
+	}
+	return &Meta{Workdir: m.Workdir, CreatedAt: m.CreatedAt, Git: m.Git}
+}
+
+// writeArchive 按顺序把 files 收进包里，前 tracked 个是 git 跟踪的文件（非 git 目录为 0）。
+func writeArchive(ctx context.Context, workdir, out string, files []string, tracked int, opt Options, meta *Meta) error {
 	f, err := os.OpenFile(out, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -148,9 +170,15 @@ func writeArchive(ctx context.Context, workdir, out string, files []string, opt 
 	defer f.Close()
 	gz := gzip.NewWriter(f)
 	tw := tar.NewWriter(gz)
-	for _, rel := range files {
+	badNames, trackedTooBig, unreadable := 0, 0, 0
+	for i, rel := range files {
 		if err := ctx.Err(); err != nil {
 			return errors.New("快照超时")
+		}
+		if !fs.ValidPath(rel) || rel == "." {
+			// 恢复和对比都认不了这样的名字，跳过清单里也写不进：不收，计数写进备注
+			badNames++
+			continue
 		}
 		full := filepath.Join(workdir, filepath.FromSlash(rel))
 		fi, err := os.Lstat(full)
@@ -165,20 +193,61 @@ func writeArchive(ctx context.Context, workdir, out string, files []string, opt 
 			}
 			continue
 		}
+		// 先打开再看大小：打开失败（没有读取权限、刚被删掉）只跳过这一个文件；
+		// 大小取打开后的 fstat，和真正读的是同一个文件
+		src, err := os.Open(full)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // 在 Lstat 和打开之间被删掉了，和已删除的文件一样
+		}
+		if err != nil {
+			unreadable++
+			reason := "读取失败"
+			if errors.Is(err, fs.ErrPermission) {
+				reason = "没有读取权限"
+			}
+			meta.skip(rel, reason)
+			continue
+		}
+		if fi, err = src.Stat(); err != nil || !fi.Mode().IsRegular() {
+			src.Close()
+			unreadable++
+			meta.skip(rel, "读取失败")
+			continue
+		}
+		tooBig := ""
 		if fi.Size() > opt.MaxFile {
-			meta.skip(rel, fmt.Sprintf("超过单文件上限（%s）", humanSize(fi.Size())))
-			continue
-		}
-		if meta.TotalSize+fi.Size() > opt.MaxTotal {
+			tooBig = fmt.Sprintf("超过单文件上限（%s）", humanSize(fi.Size()))
+		} else if meta.TotalSize+fi.Size() > opt.MaxTotal {
 			meta.Truncated = true
-			meta.skip(rel, "超过快照总大小上限")
+			tooBig = "超过快照总大小上限"
+		}
+		if tooBig != "" {
+			src.Close()
+			meta.skip(rel, tooBig)
+			if i < tracked {
+				trackedTooBig++
+			}
 			continue
 		}
-		if err := addFile(tw, full, rel, fi); err != nil {
+		err = addFile(tw, src, rel, fi)
+		src.Close()
+		if err != nil {
 			return err
 		}
 		meta.TotalSize += fi.Size()
 		meta.Files = append(meta.Files, FileEntry{Path: rel, Size: fi.Size()})
+	}
+	// 被跟踪的文件先收、未跟踪的后收；清单还是按路径排好，查看和对比都按这个顺序
+	sort.Slice(meta.Files, func(i, j int) bool { return meta.Files[i].Path < meta.Files[j].Path })
+	if trackedTooBig > 0 {
+		meta.addNote(fmt.Sprintf("有 %d 个 git 跟踪的文件超过快照大小上限没有保存，用快照重跑时它们用的是工作目录里那时的版本，"+
+			"可以在设置里调大快照的大小上限", trackedTooBig))
+	}
+	if unreadable > 0 {
+		meta.addNote(fmt.Sprintf("有 %d 个文件读不了（比如没有读取权限），没有保存", unreadable))
+	}
+	if badNames > 0 {
+		meta.addNote(fmt.Sprintf("有 %d 个文件的名字不是合法的 UTF-8，没有收进快照，用快照重跑时链接工作目录里现在的版本", badNames))
 	}
 	if err := tw.Close(); err != nil {
 		return err
@@ -189,18 +258,17 @@ func writeArchive(ctx context.Context, workdir, out string, files []string, opt 
 	return f.Close()
 }
 
-func addFile(tw *tar.Writer, full, rel string, fi os.FileInfo) error {
-	src, err := os.Open(full)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
+// addFile 把已经打开的文件写进包。文件在读的过程中变短或读出错时整份快照失败：
+// 包头里已经写了大小，不能只收半个文件（这比打开失败少见得多：要正好在复制时被截断）。
+func addFile(tw *tar.Writer, src *os.File, rel string, fi os.FileInfo) error {
 	hdr := &tar.Header{Name: rel, Mode: int64(fi.Mode().Perm()), Size: fi.Size(), ModTime: fi.ModTime(), Typeflag: tar.TypeReg}
 	if err := tw.WriteHeader(hdr); err != nil {
 		return err
 	}
-	_, err = io.CopyN(tw, src, fi.Size())
-	return err
+	if _, err := io.CopyN(tw, src, fi.Size()); err != nil {
+		return fmt.Errorf("读 %s 时出错: %w", rel, err)
+	}
+	return nil
 }
 
 func walkFiles(ctx context.Context, root string, meta *Meta) ([]string, error) {
@@ -235,8 +303,15 @@ func isCodeFile(name string) bool {
 
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := execx.Command(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = gitEnv()
 	return execx.Output(cmd)
+}
+
+// gitEnv 是在用户仓库里跑 git 的环境。GIT_OPTIONAL_LOCKS=0：git status 默认会拿 .git/index.lock
+// 回写索引，超时整组 SIGKILL 时来不及删锁，用户之后的 git add/commit 就报另一个 git 进程在运行；
+// 后台调用也不该和用户自己的提交抢锁。git 文档对后台调用就是这么建议的。
+func gitEnv() []string {
+	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C")
 }
 
 func gitOK(ctx context.Context, dir string) bool {
@@ -262,7 +337,11 @@ func gitCheck(ctx context.Context, dir string) (bool, string) {
 
 const maxDiff = 5 << 20
 
-// gitInfo 读 commit、分支和工作区状态；withDiff 时再取未提交的改动（git diff HEAD，可能很慢）。
+// gitInfo 读 commit、分支和工作区状态；withDiff 时再取未提交的改动（相对 HEAD，可能很慢）。
+//
+// 改动用底层命令 diff-index 取，不用 git diff：git diff 会先刷新索引再拿 index.lock 回写，
+// 不看 GIT_OPTIONAL_LOCKS。两者输出的补丁一样，只改了修改时间的文件也都不算改动；
+// diff-index 还不读用户的 diff.* 界面配置，格式稳定。
 func gitInfo(ctx context.Context, dir string, withDiff bool) (*GitInfo, []byte) {
 	g := &GitInfo{}
 	if out, err := git(ctx, dir, "rev-parse", "HEAD"); err == nil {
@@ -280,7 +359,7 @@ func gitInfo(ctx context.Context, dir string, withDiff bool) (*GitInfo, []byte) 
 	}
 	var diff []byte
 	if withDiff && g.Commit != "" {
-		if out, err := git(ctx, dir, "diff", "HEAD", "--no-color", "--no-ext-diff", "--", "."); err == nil {
+		if out, err := git(ctx, dir, "diff-index", "-p", "--no-color", "--no-ext-diff", "HEAD", "--", "."); err == nil {
 			diff = out
 		}
 	}
@@ -290,23 +369,35 @@ func gitInfo(ctx context.Context, dir string, withDiff bool) (*GitInfo, []byte) 
 	return g, diff
 }
 
-// gitFiles 列出已跟踪的文件，加上未跟踪但没被 .gitignore 忽略的文件（相对 dir）。
-func gitFiles(ctx context.Context, dir string) ([]string, error) {
-	out, err := git(ctx, dir, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-	if err != nil {
-		return nil, fmt.Errorf("git ls-files 失败: %w", err)
-	}
+// gitFiles 列出已跟踪的文件（tracked），和未跟踪但没被 .gitignore 忽略的文件（others），相对 dir，各自按路径排序。
+// 分开列是为了先收代码：快照总大小上限按先到先得。
+func gitFiles(ctx context.Context, dir string) (tracked, others []string, err error) {
 	seen := map[string]bool{}
-	var files []string
-	for _, p := range bytes.Split(out, []byte{0}) {
-		s := string(p)
-		if s == "" || seen[s] {
-			continue
+	list := func(args ...string) ([]string, error) {
+		out, err := git(ctx, dir, append([]string{"ls-files", "-z"}, args...)...)
+		if err != nil {
+			return nil, fmt.Errorf("git ls-files 失败: %w", err)
 		}
-		seen[s] = true
-		files = append(files, s)
+		var files []string
+		for _, p := range bytes.Split(out, []byte{0}) {
+			// 没登记成子模块的嵌套仓库列成带尾斜杠的目录（third_party/lib/），去掉斜杠后按目录跳过
+			s := strings.TrimSuffix(string(p), "/")
+			if s == "" || seen[s] {
+				continue // 冲突中的文件在 --cached 里按阶段重复出现
+			}
+			seen[s] = true
+			files = append(files, s)
+		}
+		sort.Strings(files)
+		return files, nil
 	}
-	return files, nil
+	if tracked, err = list("--cached"); err != nil {
+		return nil, nil, err
+	}
+	if others, err = list("--others", "--exclude-standard"); err != nil {
+		return nil, nil, err
+	}
+	return tracked, others, nil
 }
 
 // gitIgnored 返回 paths（相对 dir）里现在被 .gitignore 忽略的那些。已跟踪的文件不算忽略。
@@ -316,7 +407,7 @@ func gitIgnored(ctx context.Context, dir string, paths []string) (map[string]boo
 		return ignored, nil
 	}
 	cmd := execx.Command(ctx, "git", "-C", dir, "check-ignore", "-z", "--stdin")
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = gitEnv()
 	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
 	out, err := execx.Output(cmd)
 	var exit *exec.ExitError

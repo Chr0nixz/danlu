@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { setLocale } from '../src/i18n.ts'
-import { exitCodeOnly, failReasonText, failText, queuePauseText } from '../src/format.ts'
+import { exitCodeOnly, failReasonText, failText, queuePauseText, waitText } from '../src/format.ts'
 
 afterEach(() => setLocale('zh-CN'))
 
@@ -78,4 +78,20 @@ test('queuePauseText：按 kind 合成，旧服务器回退原文', () => {
   assert.equal(queuePauseText({ paused: true, kind: 'fail_fast', job_id: 7, fail_seconds: 4 }), 'Job #7 failed 4s after starting; launching further jobs is paused')
   // 旧服务器英文界面回退中文原文（数据）
   assert.equal(queuePauseText({ paused: true, kind: 'disk', reason: '旧原文' }), '旧原文')
+})
+test('waitText：按 wait 机器码合成，zh 与服务器 Text() 逐字一致，英文不漏中文', () => {
+  const ext = { kind: 'gpus', need: 2, free: 0, blocker: { kind: 'external', gpu: 3, pid: 900003 } }
+  assert.equal(waitText({ wait: ext }), '等待 2 张空闲卡（当前 0 张可用）；GPU 3 有外部进程（PID 900003）')
+  assert.equal(waitText({ wait: { kind: 'ahead' } }), '等待前面的任务')
+  assert.equal(waitText({ wait: { kind: 'gpus', need: 1, blocker: { kind: 'job_proc', gpu: 1, job_id: 7, pid: 42 } } }),
+    '等待 1 张空闲卡（当前 0 张可用）；GPU 1 有任务 #7 的进程（PID 42），这张卡没有分给它')
+  // 旧服务器只有原文
+  assert.equal(waitText({ wait_reason: '等待调度' }), '等待调度')
+  assert.equal(waitText({}), '')
+  setLocale('en')
+  assert.equal(waitText({ wait: ext }), 'Waiting for 2 free GPUs (0 available); GPU 3 has an external process (PID 900003)')
+  assert.equal(waitText({ wait: { kind: 'gpus', need: 1, free: 0 } }), 'Waiting for 1 free GPU (0 available)')
+  assert.equal(waitText({ wait: { kind: 'pinned', pinned: [0, 2], blocker: { kind: 'reserved', gpu: 2, reservation_id: 4 } } }),
+    'Waiting for GPU 0,2; GPU 2 is held by reservation #4')
+  assert.equal(waitText({ wait: { kind: 'paused' }, wait_reason: '队列已暂停：手动暂停' }), 'Queue paused')
 })

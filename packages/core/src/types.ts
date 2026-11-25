@@ -76,6 +76,8 @@ export interface Job {
   snapshot_note: string
   rerun_of: number | null
   code_from?: number
+  /** 提交幂等键（命令行 danlu submit --key）；没有时不出现 */
+  submit_key?: string
   created_at: number
   started_at: number | null
   ended_at: number | null
@@ -85,7 +87,36 @@ export interface Job {
   /** 日志中第一个 Python traceback 的字节偏移 */
   traceback_offset?: number
   queue_pos?: number
+  /** 中文原文，旧服务器只有它；新服务器同时给结构化的 wait，显示时用 waitText 合成 */
   wait_reason?: string
+  wait?: QueueWait
+  /** 只在单个任务详情里有：重跑自的任务和它的状态 */
+  rerun_parent?: JobRef
+  /** 只在单个任务详情里有：从这个任务重跑出来的任务（最多 5 个） */
+  reruns?: JobRef[]
+}
+
+export interface JobRef {
+  id: number
+  status: JobStatus
+}
+
+/** 排队任务在等什么（internal/scheduler/wait.go） */
+export interface QueueWait {
+  kind: 'ahead' | 'scheduling' | 'queue_state' | 'paused' | 'disk_check' | 'gpu_data' | 'strict' | 'res_loading' | 'gpus' | 'pinned'
+  need?: number
+  free?: number
+  pinned?: number[]
+  blocker?: QueueWaitBlocker
+}
+
+export interface QueueWaitBlocker {
+  kind: 'reserved' | 'unknown_mem' | 'external' | 'job_proc' | 'owner_unknown'
+  gpu: number
+  reservation_id?: number
+  mem_mb?: number
+  pid?: number
+  job_id?: number
 }
 
 export type TraceSource = 'output_dir' | 'run_code' | 'danlu_json' | 'guess'
@@ -145,6 +176,8 @@ export interface Proc {
   graphics?: boolean
   /** 任务进程启动时的 CUDA_VISIBLE_DEVICES（空串表示没设），GPU UUID 已换成卡号；只有本实例任务的进程有，旧版服务器没有这个字段 */
   cuda_visible?: string
+  /** 认不出归属：和 danlu 同一用户的进程正在退出、是僵尸或读超时（job_id 为 0）。卡照样算占用，但不当外部进程告警 */
+  owner_unknown?: boolean
 }
 
 export interface GPU {
@@ -645,6 +678,8 @@ export interface SubmitReq {
   pinned_gpus: number[]
   rerun_of: number | null
   code_from?: number
+  /** 提交幂等键：同一个 key 只建一个任务，重复提交返回已有的那个（200，新建是 201） */
+  submit_key?: string
 }
 
 export interface JobsQuery {
@@ -658,8 +693,11 @@ export interface JobsQuery {
   ended_after?: number
   finished_from_event?: number
   finished_to_event?: number
-  /** 'ended'：只要已结束的，按结束时间倒序，配合 before / before_id 翻页 */
-  order?: 'ended'
+  /**
+   * 'ended'：只要已结束的，按结束时间倒序，配合 before / before_id 翻页；
+   * 'asc'：按 id 从旧到新，排队任务就是队列顺序。不传时按 id 从新到旧
+   */
+  order?: 'ended' | 'asc'
   /** 上一页最后一条的结束时间和 id */
   before?: number
   before_id?: number

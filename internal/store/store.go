@@ -154,13 +154,55 @@ var migrations = []string{
 	`ALTER TABLE jobs ADD COLUMN fail_detail TEXT NOT NULL DEFAULT '';`,
 	// 严格限卡：任务所在的 systemd 服务名，空串表示普通任务
 	`ALTER TABLE jobs ADD COLUMN unit TEXT NOT NULL DEFAULT '';`,
+	// 提交幂等（命令行 --key）：同一个 key 只建一个任务。只在插入时写，以后不改
+	`ALTER TABLE jobs ADD COLUMN submit_key TEXT;
+	CREATE UNIQUE INDEX jobs_submit_key ON jobs(submit_key) WHERE submit_key IS NOT NULL;`,
 }
 
 // keepBackups 是升级前备份最多保留的份数。
 const keepBackups = 5
 
 // Open 打开数据库并执行迁移。要升级表结构时，先把旧库备份到数据库所在目录的 backup/ 下。
+// 只有 serve 用它升级已有的库；命令行只用它新建库，见 OpenCurrent。
 func Open(path string) (*Store, error) {
+	s, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.migrate(path); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("数据库迁移失败: %w", err)
+	}
+	return s, nil
+}
+
+// OutdatedError 表示库比程序旧（Have 为 0 是还没建表的新库），要先迁移才能用。
+type OutdatedError struct{ Have, Want int }
+
+func (e *OutdatedError) Error() string {
+	return fmt.Sprintf("数据库是旧版本（版本 %d，这个程序要 %d）", e.Have, e.Want)
+}
+
+// OpenCurrent 打开已经是当前版本的库，不迁移也不备份。库比程序旧时返回 *OutdatedError：
+// 命令行只新建库（Have 为 0），不升级已有的库，否则新版程序的一条命令会把旧版服务的库升级掉，
+// 旧服务下次启动就因为库比它新而起不来。
+func OpenCurrent(path string) (*Store, error) {
+	s, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	v, err := s.version()
+	if err == nil && v < len(migrations) {
+		err = &OutdatedError{Have: v, Want: len(migrations)}
+	}
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func openDB(path string) (*Store, error) {
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -168,48 +210,89 @@ func Open(path string) (*Store, error) {
 	}
 	// 单连接：并发量很小，避免 SQLite 写锁冲突
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
-	if err := s.migrate(filepath.Join(filepath.Dir(path), "backup")); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("数据库迁移失败: %w", err)
-	}
-	return s, nil
+	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate(backupDir string) error {
+// version 读库的 user_version；库比程序新时报错
+func (s *Store) version() (int, error) {
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
-		return err
+		return 0, err
 	}
 	if v > len(migrations) {
-		return fmt.Errorf("数据库是新版本的 danlu 建的（版本 %d，这个程序只认识到 %d），请换回新版本的程序", v, len(migrations))
+		return v, fmt.Errorf("数据库是新版本的 danlu 建的（版本 %d，这个程序只认识到 %d），请换回新版本的程序", v, len(migrations))
 	}
-	if v > 0 && v < len(migrations) {
-		if err := s.backup(backupDir, v); err != nil {
-			return fmt.Errorf("升级前备份数据库失败: %w", err)
+	return v, nil
+}
+
+// migrate 把 path 处的库升到当前版本。升级已有的库之前先备份到同目录的 backup/。
+//
+// 待执行的迁移和版本号放在同一个事务里：要么全部生效，要么库原样不动，不会停在中间版本。
+// 停在中间版本的话，迁移持续失败时 systemd 每 3 秒重启一次，每次备份的都是中间版本，
+// 十几秒后唯一能给旧程序用的备份就被轮换掉了。
+func (s *Store) migrate(path string) error {
+	v, err := s.version()
+	if err != nil {
+		return err
+	}
+	if v == len(migrations) {
+		return nil
+	}
+	if v > 0 {
+		dir := filepath.Join(filepath.Dir(path), "backup")
+		if !backedUp(dir, path, v) {
+			if err := s.backup(dir, v); err != nil {
+				return fmt.Errorf("升级前备份数据库失败: %w", err)
+			}
 		}
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
 	}
 	for i := v; i < len(migrations); i++ {
-		// 迁移和版本号放在同一个事务里：要么都生效，要么都不生效，不会留下改了一半的库
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
 		if _, err := tx.Exec(migrations[i]); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("第 %d 次迁移失败: %w", i+1, err)
 		}
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", len(migrations))); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// backedUp 判断 backup/ 里是否已有这个版本、而且之后库没再变过的备份；有就不用再备份。
+// 迁移持续失败时服务每 3 秒重启一次，每次都 VACUUM INTO 整库复制，既白写磁盘，又把更早的备份轮换掉。
+//
+// "没变过"看修改时间：备份要严格晚于库文件，也晚于有内容的 WAL（打开库时新建的空 WAL 不算）。
+// 修改时间精度粗的文件系统上，同一秒内的写入会让两者相等，这时照样再备份。拿不准一律再备份。
+func backedUp(dir, dbPath string, version int) bool {
+	matches, _ := filepath.Glob(filepath.Join(dir, fmt.Sprintf("danlu-*-v%d.db", version)))
+	var newest time.Time
+	for _, m := range matches {
+		if fi, err := os.Stat(m); err == nil && fi.Size() > 0 && fi.ModTime().After(newest) {
+			newest = fi.ModTime()
 		}
 	}
-	return nil
+	if newest.IsZero() {
+		return false
+	}
+	db, err := os.Stat(dbPath)
+	if err != nil || !newest.After(db.ModTime()) {
+		return false
+	}
+	wal, err := os.Stat(dbPath + "-wal")
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return true
+	case err != nil:
+		return false
+	}
+	return wal.Size() == 0 || newest.After(wal.ModTime())
 }
 
 // backup 用 VACUUM INTO 生成一份一致的副本（WAL 里还没合并的内容也在里面），只保留最近 keepBackups 份。
@@ -373,6 +456,8 @@ type Job struct {
 	CreatedAt       int64            `json:"created_at"`
 	StartedAt       *int64           `json:"started_at"`
 	EndedAt         *int64           `json:"ended_at"`
+	// SubmitKey 是提交时带的幂等键，没有就是空串。只在 InsertJob 写，SaveJob 不写
+	SubmitKey string `json:"submit_key,omitempty"`
 }
 
 type Recipe struct {
@@ -403,7 +488,7 @@ func (j *Job) Finished() bool {
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
 	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
-	inherit_bashrc, boot_id, notes, fail_kind, fail_detail, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, memo, profile_json, notify_done, unit`
+	inherit_bashrc, boot_id, notes, fail_kind, fail_detail, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, memo, profile_json, notify_done, unit, submit_key`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -416,11 +501,12 @@ func scanJob(r scanner) (*Job, error) {
 		pidStart                                     int64
 		pruned, codeFrom                             sql.NullInt64
 		profileJSON                                  string
+		submitKey                                    sql.NullString
 	)
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
 		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
-		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.FailDetail, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom, &j.Memo, &profileJSON, &j.NotifyDone, &j.Unit)
+		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.FailDetail, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom, &j.Memo, &profileJSON, &j.NotifyDone, &j.Unit, &submitKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -428,6 +514,7 @@ func scanJob(r scanner) (*Job, error) {
 		return nil, err
 	}
 	j.PIDStart = uint64(pidStart)
+	j.SubmitKey = submitKey.String
 	_ = json.Unmarshal([]byte(envJSON), &j.Env)
 	if j.Env == nil {
 		j.Env = map[string]string{}
@@ -473,21 +560,31 @@ func scanJob(r scanner) (*Job, error) {
 
 var ErrSnapshotUnavailable = errors.New("源任务的代码快照不可用")
 
+// ErrSubmitKeyExists：已有任务用过这个提交幂等键（并发的同 key 提交撞上唯一索引）。
+var ErrSubmitKeyExists = errors.New("提交幂等键已被使用")
+
 func (s *Store) InsertJob(j *Job) error {
 	if j.CreatedAt == 0 {
 		j.CreatedAt = time.Now().Unix()
 	}
 	env, _ := json.Marshal(j.Env)
+	var submitKey any
+	if j.SubmitKey != "" {
+		submitKey = j.SubmitKey
+	}
 	// 在同一条写语句里核对源快照和登记引用，与清理器的认领互斥。
 	res, err := s.db.Exec(`INSERT INTO jobs (name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned,
-		status, rerun_of, created_at, inherit_bashrc, code_from, memo, notify_done)
-		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR EXISTS (
+		status, rerun_of, created_at, inherit_bashrc, code_from, memo, notify_done, submit_key)
+		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR EXISTS (
 			SELECT 1 FROM jobs WHERE id=? AND snapshot_ok=1 AND pruned_at IS NULL AND pruning=0
 				AND (pid>0 OR ended_at IS NOT NULL)
 		)`,
 		j.Name, j.Workdir, j.CondaEnv, j.Cmd, string(env), j.GPUsReq, JoinInts(j.GPUsPinned),
-		j.Status, j.RerunOf, j.CreatedAt, j.InheritBashrc, j.CodeFrom, j.Memo, j.NotifyDone, j.CodeFrom, j.CodeFrom)
+		j.Status, j.RerunOf, j.CreatedAt, j.InheritBashrc, j.CodeFrom, j.Memo, j.NotifyDone, submitKey, j.CodeFrom, j.CodeFrom)
 	if err != nil {
+		if submitKey != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: jobs.submit_key") {
+			return ErrSubmitKeyExists
+		}
 		return err
 	}
 	if n, err := res.RowsAffected(); err != nil {
@@ -579,6 +676,11 @@ func (s *Store) GetJob(id int64) (*Job, error) {
 	return scanJob(s.db.QueryRow("SELECT "+jobCols+" FROM jobs WHERE id=?", id))
 }
 
+// JobBySubmitKey 按提交幂等键找任务，没有时返回 ErrNotFound。
+func (s *Store) JobBySubmitKey(key string) (*Job, error) {
+	return scanJob(s.db.QueryRow("SELECT "+jobCols+" FROM jobs WHERE submit_key=?", key))
+}
+
 // JobsByStatus 按 id 升序返回，排队任务的顺序就是提交顺序。
 func (s *Store) JobsByStatus(status string) ([]*Job, error) {
 	return s.queryJobs("SELECT "+jobCols+" FROM jobs WHERE status=? ORDER BY id", status)
@@ -601,6 +703,30 @@ func (s *Store) JobsWithPendingRecipe() ([]*Job, error) {
 	return s.queryJobs("SELECT " + jobCols + " FROM jobs WHERE COALESCE(json_extract(recipe_json,'$.pending'),0)=1 ORDER BY id")
 }
 
+// JobRef 是另一个任务的编号和状态，详情页画重跑关系用。
+type JobRef struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+}
+
+// Reruns 列出从这个任务重跑出来的任务（rerun_of 指向它），按编号从小到大，最多 limit 个。
+func (s *Store) Reruns(id int64, limit int) ([]JobRef, error) {
+	rows, err := s.db.Query(`SELECT id, status FROM jobs WHERE rerun_of=? ORDER BY id LIMIT ?`, id, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []JobRef
+	for rows.Next() {
+		var r JobRef
+		if err := rows.Scan(&r.ID, &r.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 type JobFilter struct {
 	Statuses                           []string
 	Workdir                            string
@@ -615,8 +741,11 @@ type JobFilter struct {
 	// 结束时间只精确到秒，同一秒结束的任务再按 id 区分。BeforeID 为 0 时取这一秒之前的。
 	Before   int64
 	BeforeID int64
-	Limit    int
-	Offset   int
+	// Ascending 按 id 从旧到新排（ByEnded 时不生效）。排队任务按 id 出队，这就是队列顺序：
+	// 排队任务多于一页时，面板和命令行取的是队首那一页，不是最新提交的那一页
+	Ascending bool
+	Limit     int
+	Offset    int
 }
 
 func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
@@ -649,6 +778,9 @@ func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
 		args = append(args, EventJobFinished, f.FinishedFromEvent, f.FinishedToEvent)
 	}
 	order := " ORDER BY id DESC"
+	if f.Ascending {
+		order = " ORDER BY id"
+	}
 	if f.ByEnded {
 		where = append(where, "ended_at IS NOT NULL")
 		order = " ORDER BY ended_at DESC, id DESC"

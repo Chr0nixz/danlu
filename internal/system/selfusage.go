@@ -92,38 +92,66 @@ type selfScanFunc func(context.Context, string, string, func() (DBStats, error))
 
 // boundedSelfScan 给整次统计加超时。超时的统计留在后台等它返回，期间直接报错，不叠加新的遍历
 // （boundedStat 同款）；ctx 取消时扫描内部也会尽快退出。
+//
+// 超时以后才做完的那次结果留着，下一次调用直接交出去：数据目录大、存储慢时一次统计可能比超时还长，
+// 丢掉的话下一轮又从头扫、又超时，这份数据就永远出不来。
 func boundedSelfScan() selfScanFunc {
-	var mu sync.Mutex
-	busy := false
+	return boundSelfScan(scanSelfUsage, selfScanTimeout)
+}
+
+func boundSelfScan(scan selfScanFunc, timeout time.Duration) selfScanFunc {
 	type result struct {
 		u   SelfUsage
 		err error
 	}
+	var mu sync.Mutex
+	busy, abandoned := false, false
+	var late *result
 	return func(ctx context.Context, home, dbPath string, dbStats func() (DBStats, error)) (SelfUsage, error) {
 		mu.Lock()
+		if late != nil {
+			r := *late
+			late = nil
+			mu.Unlock()
+			return r.u, r.err
+		}
 		if busy {
 			mu.Unlock()
 			return SelfUsage{}, errors.New("上一次统计仍未返回，可能是存储卡住了")
 		}
-		busy = true
+		busy, abandoned = true, false
 		mu.Unlock()
 		done := make(chan result, 1)
 		go func() {
-			u, err := scanSelfUsage(ctx, home, dbPath, dbStats)
+			u, err := scan(ctx, home, dbPath, dbStats)
 			mu.Lock()
+			defer mu.Unlock()
 			busy = false
-			mu.Unlock()
+			if abandoned {
+				late = &result{u, err} // 调用方已经不等了：留给下一次
+				return
+			}
 			done <- result{u, err}
 		}()
-		timer := time.NewTimer(selfScanTimeout)
+		timer := time.NewTimer(timeout)
 		defer timer.Stop()
+		var giveUp error
 		select {
 		case r := <-done:
 			return r.u, r.err
 		case <-timer.C:
-			return SelfUsage{}, fmt.Errorf("统计超过 %s 未返回，可能是存储卡住了", selfScanTimeout)
+			giveUp = fmt.Errorf("统计超过 %s 未返回，可能是存储卡住了", timeout)
 		case <-ctx.Done():
-			return SelfUsage{}, ctx.Err()
+			giveUp = ctx.Err()
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		select {
+		case r := <-done: // 正好在这时做完
+			return r.u, r.err
+		default:
+			abandoned = true
+			return SelfUsage{}, giveUp
 		}
 	}
 }
@@ -252,6 +280,9 @@ func scanSelfUsage(ctx context.Context, home, dbPath string, dbStats func() (DBS
 func walkSize(ctx context.Context, root, rel string, seen map[hardlinkKey]bool) (bytes uint64, files int, err error) {
 	n := 0
 	err = filepath.WalkDir(filepath.Join(root, rel), func(p string, d fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // 遍历途中被删掉了（清理、任务结束）：跳过，不让整类统计中止、曲线假下跌
+		}
 		if err != nil {
 			return err
 		}
@@ -265,6 +296,9 @@ func walkSize(ctx context.Context, root, rel string, seen map[hardlinkKey]bool) 
 			return nil
 		}
 		fi, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}

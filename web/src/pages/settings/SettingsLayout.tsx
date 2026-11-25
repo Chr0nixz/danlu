@@ -3,7 +3,7 @@ import { Archive, Gauge, History, type LucideIcon, Server, ShieldCheck, SlidersH
 import { useEffect, useRef, type ComponentType } from 'react'
 import { Navigate, NavLink, useNavigate, useParams } from 'react-router'
 import type { Settings as SettingsData } from '@danlu/core'
-import { cx, ErrorBox, Select, Skeleton } from '../../components/ui'
+import { cx, ErrorBox, RefreshError, Select, Skeleton } from '../../components/ui'
 import { api } from '../../lib/api'
 import { t } from '../../lib/i18n'
 import { Audit } from './Audit'
@@ -86,12 +86,16 @@ export function SettingsLayout() {
           ))}
         </Select>
         <div ref={content} tabIndex={-1} aria-label={t(group.labelKey)} role="region" className="min-w-0 space-y-4 outline-none">
-          {s.isLoading ? (
-            <Skeleton className="h-56 w-full rounded-lg" />
+          {/* 只有一份数据都没拿到才整页报错。5 秒轮询失败时手里还有上一份：卸载分组组件会丢掉没保存的改动，只在上方提示 */}
+          {s.data ? (
+            <>
+              <RefreshError error={s.error} onRetry={() => void s.refetch()} />
+              <group.Component st={s.data} />
+            </>
           ) : s.error ? (
             <ErrorBox error={s.error} />
           ) : (
-            <group.Component st={s.data!} />
+            <Skeleton className="h-56 w-full rounded-lg" />
           )}
         </div>
       </div>

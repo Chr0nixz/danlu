@@ -160,6 +160,7 @@ F1 随 `v0.2.0` 定版。后续功能按 [PLAN.md](PLAN.md) 分批推进。
 
 ---
 变更记录
+- v2.23（2026-11-23）：只有 serve 升级数据库。其他命令改走 `openStore`：只新建库（占着 `serve.lock`），已有的旧库一律拒绝并提示 `danlu restart`；`init --force` 先开库再重新生成 CA，库打不开时什么都不改。11-22 的初版是"拿得到 `serve.lock` 才替它升级"，11-23 审阅指出服务重启的间隙、停着的时候锁也是空的，改成更严的规则。起因是 hsy 上用测试程序执行 `strict status` 把正在运行的旧版服务的库升到了迁移 18，旧服务若重启会因库比它新而起不来。
 - v2.22（2026-11-22）：理想线新增严格限卡（FEATURES 5.4，PLAN F4）：hsy 上用 `scripts/s0/strict-probe.sh` 确认 cgroup 设备控制后 CUDA/NVML/EGL 只看得到放行的卡并从 0 编号；新增 root 助手（`danlu strict install`、sudoers 只放行 start/check）、`danlu job-exec`、迁移 18 `jobs.unit`、`POST /api/settings/strict`（additive，API 版本不变）、告警 `strict_unavailable`。GPU 进程记下启动时的 `CUDA_VISIBLE_DEVICES`（UUID 换成卡号），任务进程跑到没分给它的卡上时告警并推送一次。Go 单测、Linux vet、三端类型检查通过；e2e 新增一节（CI 免密 sudo 下跑）。同日 hsy 测试实例上真机验收通过隔离、编号、取消、重启接管和关开关（CHECKLIST G2/G3 记录），预约配合、LIBERO 和卸载待补。
 - v2.21（2026-11-21）：理想线新增 GPU 预约（FEATURES 5.2，PLAN F4）：迁移 16 加表 `gpu_reservations`，新增 `/api/reservations` 系列接口，`/api/gpus` 每张卡加 `reservation`（additive，API 版本不变）；预约先于排队任务收卡，已收的卡不分配、其上的外部进程不触发队首阻塞告警；就绪和到期前 10 分钟推送。Go 单测、Linux vet、三端类型检查、面板构建和桌面 clippy 通过，面板在 macOS 假 GPU 环境下目视检查过手机和电脑两种宽度；e2e 新增检查待 Linux/CI 执行，真机待验。
 - v2.20（2026-11-20）：设置页按分组拆成子页面（概览、调度与告警、数据保留、面板偏好、安全与登录、手机与证书、操作记录）。调度与告警、终端保留时长和保留策略可在面板上改，存数据库、保存即生效，`config.toml` 只当初始值；收紧保留策略前先预览并确认，保存后马上清理一次。新增手机和电脑共用的面板偏好（新建任务默认值、每页条数、日志默认换行、资源页告警阈值）和只存浏览器的日志字号。新增 `/api/settings/runtime`、`retention`、`retention/preview`、`prefs`，`GET /api/settings` 增加 runtime、retention、prune、prefs（additive，API 版本不变）。Go 单测、Linux vet、三端类型检查和面板构建通过；e2e 新增检查待 Linux/CI 执行，面板目视待补验。

@@ -194,3 +194,116 @@ func TestStrictCancelDuringStart(t *testing.T) {
 	h.tick()
 	h.expect(a, store.StatusCancelled)
 }
+
+// 锁外调助手期间被取消，助手随后失败：记成取消，不能放回队列、等助手恢复后照常启动占卡
+func TestStrictCancelledWhileStartFails(t *testing.T) {
+	h, gate := strictHarness(t, 1)
+	a := h.add(1)
+	h.ex.mu.Lock()
+	h.ex.strictErr = &strict.Error{Reason: strict.ReasonFailed, Detail: "systemd-run 失败"}
+	h.ex.strictHook = func(runner.Spec) {
+		if _, err := h.m.Cancel(a); err != nil {
+			t.Error(err)
+		}
+	}
+	h.ex.mu.Unlock()
+	h.tick()
+	h.expect(a, store.StatusCancelled)
+	gate.set(strict.Status{OK: true, CheckedAt: 2})
+	h.ex.mu.Lock()
+	h.ex.strictErr, h.ex.strictHook = nil, nil
+	h.ex.mu.Unlock()
+	h.tick()
+	h.expect(a, store.StatusCancelled)
+	if n := len(h.ex.startedIDs()); n != 0 {
+		t.Fatalf("取消了的任务不能再启动: %d 次", n)
+	}
+}
+
+// 助手报错，但单元其实已经起来了（回答没传回来）：认领它，不放回队列再起一份
+func TestStrictStartErrorButUnitRunning(t *testing.T) {
+	h, _ := strictHarness(t, 1)
+	a := h.add(1)
+	h.ex.mu.Lock()
+	h.ex.strictFn = func(s runner.Spec) (runner.Started, error) {
+		h.ex.pidFile[s.JobID], h.ex.alive[4242] = 4242, true
+		return runner.Started{}, &strict.Error{Reason: strict.ReasonFailed, Detail: "助手的回答无法解析"}
+	}
+	h.ex.mu.Unlock()
+	h.tick()
+	j := h.job(a)
+	if j.Status != store.StatusRunning || j.PID != 4242 || j.PIDStart != startOf(4242) {
+		t.Fatalf("起来了的单元应该被认领: %+v", j)
+	}
+	h.tick()
+	h.expect(a, store.StatusRunning)
+	h.ex.mu.Lock()
+	h.ex.alive[4242], h.ex.exit[a] = false, 0
+	h.ex.mu.Unlock()
+	h.tick()
+	h.expect(a, store.StatusSucceeded)
+}
+
+// 助手报错、认领不到：先按标记清掉可能已经起来的进程，再放回队列
+func TestStrictStartErrorKillsStrays(t *testing.T) {
+	h, _ := strictHarness(t, 1)
+	a := h.add(1)
+	h.ex.mu.Lock()
+	h.ex.leftovers = 2
+	h.ex.strictErr = &strict.Error{Reason: strict.ReasonFailed, Detail: "等助手超时"}
+	h.ex.mu.Unlock()
+	h.tick()
+	h.expect(a, store.StatusQueued)
+	h.ex.mu.Lock()
+	left := h.ex.leftovers
+	h.ex.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("放回队列前应按标记清掉残留进程，还剩 %d 个", left)
+	}
+}
+
+// 助手说成功，但服务已经结束、拿不到活着的包装脚本
+func TestStrictStartWithoutPID(t *testing.T) {
+	h, _ := strictHarness(t, 2)
+
+	// 没有 pid 文件：包装脚本没运行（job-exec 先失败了）。判启动失败，不当成"从没启动过"每轮重试
+	a := h.add(1)
+	h.ex.mu.Lock()
+	h.ex.strictFn = func(s runner.Spec) (runner.Started, error) {
+		h.ex.started = append(h.ex.started, s)
+		return runner.Started{Unit: "danlu-job-test.service"}, nil
+	}
+	h.ex.mu.Unlock()
+	h.tick()
+	h.tick()
+	j := h.job(a)
+	if j.Status != store.StatusFailed || j.FailKind != "start" || !strings.Contains(j.FailReason, "包装脚本没有运行") {
+		t.Fatalf("没有运行包装脚本应判启动失败: %+v", j)
+	}
+	if n := len(h.ex.startedIDs()); n != 1 {
+		t.Fatalf("不能反复重试: 启动了 %d 次", n)
+	}
+
+	// 有 pid 文件和退出码：一启动就跑完了，按退出码收尾
+	b := h.add(1)
+	h.ex.mu.Lock()
+	h.ex.strictFn = func(s runner.Spec) (runner.Started, error) {
+		h.ex.pidFile[s.JobID], h.ex.exit[s.JobID] = 4343, 0
+		return runner.Started{Unit: "danlu-job-test-b.service"}, nil
+	}
+	h.ex.mu.Unlock()
+	h.tick()
+	if j := h.job(b); j.Status != store.StatusSucceeded || j.Unit != "danlu-job-test-b.service" {
+		t.Fatalf("跑完了的任务应按退出码收尾: %+v", j)
+	}
+}
+
+// 取值里的 NUL 在严格任务 NUL 分隔的环境文件里会拆出一条新变量，提交时就拒绝
+func TestSubmitRejectsNULInEnvValue(t *testing.T) {
+	h := newHarness(t, 1)
+	_, err := h.m.Submit(SubmitReq{Workdir: t.TempDir(), Cmd: "true", Env: map[string]string{"FOO": "a\x00CUDA_VISIBLE_DEVICES=0,1"}})
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Code != "job_env_value_nul" || ve.Params["name"] != "FOO" {
+		t.Fatalf("应拒绝含 NUL 的环境变量值: %v", err)
+	}
+}

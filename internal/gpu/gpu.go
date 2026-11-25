@@ -31,6 +31,9 @@ type Proc struct {
 	// CUDAVisible 是任务进程启动时的 CUDA_VISIBLE_DEVICES（空串表示没设，GPU UUID 换成了卡号，见 cardsInCVD），只有本实例任务的进程才有。
 	// 任务进程出现在没分给它的卡上时，拿它和分配的卡比，就知道是不是启动器或脚本改写了选卡变量
 	CUDAVisible *string `json:"cuda_visible,omitempty"`
+	// OwnerUnknown 表示认不出归属：和 danlu 同一用户的进程正在退出、是僵尸，或者读 environ 超时（JobID 为 0）。
+	// 多半是刚结束的任务没退干净的进程。卡照样算占用，但不当外部进程告警、不记"运行期间出现过外部进程"
+	OwnerUnknown bool `json:"owner_unknown,omitempty"`
 }
 
 type GPU struct {
@@ -106,6 +109,15 @@ type SMI struct {
 	nextExtrasAt atomic.Int64                                     // UnixNano；在此之前只用基本查询
 	extrasLog    sync.Once                                        // 降级日志只打印一次
 	query        func(context.Context, ...string) ([]byte, error) // 测试时替换
+	env          procfs.EnvReader                                 // 读进程 environ，带超时
+}
+
+// ownership 判断 GPU 上的进程属于本实例的哪个任务（见 procfs.JobOwnership）
+func (s *SMI) ownership(pid int) procfs.Ownership {
+	if s.RunRoot == "" {
+		return procfs.Ownership{}
+	}
+	return procfs.JobOwnership(pid, s.RunRoot, s.env.Read)
 }
 
 const gpuQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,pci.bus_id"
@@ -219,8 +231,11 @@ func (s *SMI) Query(ctx context.Context) ([]GPU, error) {
 			continue
 		}
 		// 别的数据目录的 danlu 任务也算外部进程：编号可能和本实例的任务相同
-		job, cvd := procfs.JobEnv(a.PID, s.RunRoot)
-		p := Proc{PID: a.PID, UsedMemMB: a.UsedMemMB, User: procfs.Owner(a.PID), JobID: job, CUDAVisible: cvd}
+		own := s.ownership(a.PID)
+		if own.Gone {
+			continue // 列出来以后已经退出了
+		}
+		p := Proc{PID: a.PID, UsedMemMB: a.UsedMemMB, User: procfs.Owner(a.PID), JobID: own.Job, CUDAVisible: own.CVD, OwnerUnknown: own.Unknown}
 		gpus[i].Procs = append(gpus[i].Procs, p)
 	}
 	threshold := s.unknownThreshold()
@@ -230,8 +245,7 @@ func (s *SMI) Query(ctx context.Context) ([]GPU, error) {
 		out, err := execx.Output(execx.Command(pctx, "nvidia-smi", "-q", "-d", "PIDS"))
 		cancel()
 		if err == nil {
-			addOtherProcs(gpus, ParsePIDs(string(out)), threshold,
-				func(pid int) (int64, *string) { return procfs.JobEnv(pid, s.RunRoot) }, procfs.Owner)
+			addOtherProcs(gpus, ParsePIDs(string(out)), threshold, s.ownership, procfs.Owner)
 		}
 	}
 	markUnknownMemory(gpus, threshold)
@@ -375,7 +389,7 @@ func normalizeBusID(id string) string {
 //
 // 不属于本实例任务、显存又不超过阈值的进程不列出来：Xorg、桌面这类小进程每张卡上都可能有，
 // 列成外部进程会让所有卡都分不出去。它们的显存照旧算进未知占用，加起来超过阈值时卡一样不分配。
-func addOtherProcs(gpus []GPU, entries []PIDEntry, thresholdMB int, jobOf func(int) (int64, *string), owner func(int) string) {
+func addOtherProcs(gpus []GPU, entries []PIDEntry, thresholdMB int, ownership func(int) procfs.Ownership, owner func(int) string) {
 	byBus := make(map[string]int, len(gpus))
 	for i, g := range gpus {
 		if id := normalizeBusID(g.BusID); id != "" {
@@ -387,12 +401,12 @@ func addOtherProcs(gpus []GPU, entries []PIDEntry, thresholdMB int, jobOf func(i
 		if !ok || slices.ContainsFunc(gpus[i].Procs, func(p Proc) bool { return p.PID == e.PID }) {
 			continue
 		}
-		job, cvd := jobOf(e.PID)
-		if job == 0 && e.UsedMemMB <= thresholdMB {
+		own := ownership(e.PID)
+		if own.Gone || (own.Job == 0 && e.UsedMemMB <= thresholdMB) {
 			continue
 		}
-		gpus[i].Procs = append(gpus[i].Procs, Proc{PID: e.PID, UsedMemMB: e.UsedMemMB, User: owner(e.PID), JobID: job,
-			Graphics: e.Type != "" && !strings.Contains(e.Type, "C"), CUDAVisible: cvd})
+		gpus[i].Procs = append(gpus[i].Procs, Proc{PID: e.PID, UsedMemMB: e.UsedMemMB, User: owner(e.PID), JobID: own.Job,
+			Graphics: e.Type != "" && !strings.Contains(e.Type, "C"), CUDAVisible: own.CVD, OwnerUnknown: own.Unknown})
 	}
 }
 

@@ -89,7 +89,7 @@ func TestGateAndLogin(t *testing.T) {
 func TestForgedGateRejected(t *testing.T) {
 	srv, c := setup(t)
 	u, _ := url.Parse(srv.URL)
-	c.Jar.SetCookies(u, []*http.Cookie{{Name: gateCookie, Value: "9999999999.forgedsignature"}})
+	c.Jar.SetCookies(u, []*http.Cookie{{Name: gateName(t), Value: "9999999999.forgedsignature"}})
 	if got := status(t, c, "GET", srv.URL+"/", ""); got != 404 {
 		t.Fatalf("伪造的 gate cookie 应被拒绝，实际 %d", got)
 	}
@@ -350,5 +350,30 @@ func TestTOTPLoginAndReplayProtection(t *testing.T) {
 	}
 	if on, err := TOTPEnabled(st); err != nil || on {
 		t.Fatalf("关闭后应显示未开启: %v %v", on, err)
+	}
+}
+
+// gateName 是 setup 里那个实例的 gate cookie 名字
+func gateName(t *testing.T) string {
+	t.Helper()
+	gate, _ := cookieNames([]byte("0123456789abcdef"))
+	return gate
+}
+
+// cookie 不分端口：同一台机器上两个实例（secret 不同）的 cookie 名字必须不同，不然在同一个浏览器里互相覆盖。
+// 名字里也不带产品名
+func TestCookieNamesPerInstance(t *testing.T) {
+	g1, s1 := cookieNames([]byte("instance-one-secret"))
+	g2, s2 := cookieNames([]byte("instance-two-secret"))
+	if g1 == g2 || s1 == s2 || g1 == s1 {
+		t.Fatalf("不同实例的 cookie 名字应不同: %s %s %s %s", g1, s1, g2, s2)
+	}
+	if again, _ := cookieNames([]byte("instance-one-secret")); again != g1 {
+		t.Fatal("同一个实例的名字应稳定")
+	}
+	for _, n := range []string{g1, s1} {
+		if strings.Contains(strings.ToLower(n), "danlu") || (&http.Cookie{Name: n, Value: "x"}).Valid() != nil {
+			t.Fatalf("cookie 名字不合法或带产品名: %q", n)
+		}
 	}
 }

@@ -67,7 +67,7 @@ export function Retention({ st }: { st: Settings }) {
         cacheKey="retention"
         update={(patch) => api.updateRetention(patch).then((r) => r.retention)}
         intercept={intercept}
-        busy={preview.isPending}
+        busy={preview.isPending || confirm !== null}
         savedText={t('settings.retention.saved')}
       >
         {preview.error && (

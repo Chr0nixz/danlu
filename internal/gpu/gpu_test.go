@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"danlu/internal/procfs"
 )
 
 func TestParseGPUExtras(t *testing.T) {
@@ -317,7 +319,7 @@ func TestAddOtherProcs(t *testing.T) {
 	}
 	jobs := map[int]int64{5001: 7, 5002: 7}
 	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024,
-		func(pid int) (int64, *string) { return jobs[pid], nil }, func(int) string { return "alice" })
+		func(pid int) procfs.Ownership { return procfs.Ownership{Job: jobs[pid]} }, func(int) string { return "alice" })
 	if len(gpus[0].Procs) != 1 {
 		t.Fatalf("Xorg 这类小的外部图形进程不应列出，compute-apps 里已有的进程不应重复: %+v", gpus[0].Procs)
 	}
@@ -332,9 +334,22 @@ func TestAddOtherProcs(t *testing.T) {
 
 	// 不属于任务但显存超过阈值的图形进程列成外部进程，和以前算未知占用一样让卡不可分配
 	gpus = []GPU{{Index: 2, BusID: "00000000:3D:00.0", MemUsedMB: 11264}}
-	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024, func(int) (int64, *string) { return 0, nil }, func(int) string { return "bob" })
+	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024, func(int) procfs.Ownership { return procfs.Ownership{} }, func(int) string { return "bob" })
 	if len(gpus[0].Procs) != 1 || gpus[0].Procs[0].PID != 5002 || gpus[0].Procs[0].JobID != 0 || !gpus[0].Procs[0].Graphics {
 		t.Fatalf("大的外部图形进程应列出: %+v", gpus[0].Procs)
+	}
+}
+
+// 列出来以后已经退出的进程丢掉；认不出归属（正在退出的任务进程）的照样列出、带上标记
+func TestAddOtherProcsGoneAndUnknown(t *testing.T) {
+	gpus := []GPU{{Index: 2, BusID: "00000000:3D:00.0", MemUsedMB: 11264}}
+	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024, func(int) procfs.Ownership { return procfs.Ownership{Gone: true} }, func(int) string { return "bob" })
+	if len(gpus[0].Procs) != 0 {
+		t.Fatalf("已经退出的进程不应列出: %+v", gpus[0].Procs)
+	}
+	addOtherProcs(gpus, ParsePIDs(pidsSample), 1024, func(int) procfs.Ownership { return procfs.Ownership{Unknown: true} }, func(int) string { return "bob" })
+	if len(gpus[0].Procs) != 1 || !gpus[0].Procs[0].OwnerUnknown || gpus[0].Procs[0].JobID != 0 {
+		t.Fatalf("认不出归属的大进程应列出并带标记: %+v", gpus[0].Procs)
 	}
 }
 

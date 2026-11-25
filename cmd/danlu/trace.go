@@ -4,14 +4,20 @@ import (
 	"fmt"
 
 	"danlu/internal/config"
-	"danlu/internal/store"
 	"danlu/internal/trace"
 )
 
 func cmdTrace(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("用法：danlu trace <服务器上的绝对路径>")
+	fs := newFlags("trace", "danlu trace <服务器上的绝对路径> [--json]")
+	asJSON := fs.Bool("json", false, "以 JSON 输出（与 GET /api/trace 相同）")
+	pos, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
 	}
+	if len(pos) != 1 {
+		return usageErr("用法：danlu trace <服务器上的绝对路径> [--json]")
+	}
+	args = pos
 	p, c, err := loadEffective()
 	if err != nil {
 		return err
@@ -20,7 +26,7 @@ func cmdTrace(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := store.Open(p.DB)
+	st, err := openStore(p)
 	if err != nil {
 		return err
 	}
@@ -29,6 +35,9 @@ func cmdTrace(args []string) error {
 	result, err := trace.Search(st, root, p.Run, args[0])
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return printJSON(result)
 	}
 	fmt.Println("路径：", result.Path)
 	if len(result.Matches) == 0 {

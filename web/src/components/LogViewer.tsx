@@ -1,4 +1,4 @@
-import { LogRenderer, useJobLog } from '@danlu/core'
+import { apiErrorText, LogRenderer, useJobLog } from '@danlu/core'
 import { useMutation } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Download, Search, WrapText } from 'lucide-react'
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
@@ -63,7 +63,7 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
   /** 工具栏里多了"上一个 / 下一个命中"时，手机上放不下文字，只留图标 */
   compact: boolean
 }) {
-  const { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart, windowLimited } = useJobLog(api, jobId, { offset })
+  const { raw, start, loading, error, ended, loadingOlder, olderError, loadOlder, exactStart, windowLimited } = useJobLog(api, jobId, { offset })
   const [follow, setFollow] = useState(offset === undefined)
   // 打开时换不换行在「设置 → 面板偏好」里改；这里随时切换，只管这一次。
   // 直接打开任务页时偏好可能还没到：到了之后，只要还没手动切换过就跟上
@@ -164,6 +164,12 @@ function LogOutput({ jobId, offset, box, onTail, tools, compact }: {
         {windowLimited && <span className="truncate px-1.5">{t('job.log_window_full')}</span>}
         <span className="ml-auto" />
         {tools}
+        {start > 0 && !windowLimited && !!olderError && !loadingOlder && (
+          // 只是往前读失败：日志照常接收，按钮还能再点
+          <span role="alert" className="truncate px-1.5 text-[#ff7b72]" title={apiErrorText(olderError)}>
+            {t('job.log_load_older_failed')}
+          </span>
+        )}
         {start > 0 && !windowLimited && (
           <button type="button" className={tb} aria-label={t('job.log_load_older')} title={t('job.log_load_older')} disabled={loadingOlder} onClick={loadOlder}>
             {loadingOlder ? <Spinner className="size-3.5" /> : <ArrowUp />}

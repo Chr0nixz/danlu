@@ -281,6 +281,7 @@ export const zhCN = {
   'log.next': '下一个',
   'log.search_title': '搜索（{mod}+F）',
   'log.earlier': '更早',
+  'log.earlier_failed': '更早的日志没读到',
   'log.loading': '读取中…',
   'log.waiting': '等待输出…',
   'log.back_bottom': '回到底部',

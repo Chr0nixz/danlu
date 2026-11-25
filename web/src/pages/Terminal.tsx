@@ -6,7 +6,7 @@ import { Minus, Plus, Send, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Navigate, useSearchParams } from 'react-router'
 import { type TerminalSession } from '@danlu/core'
-import { Button, Card, cx, Dialog, ErrorBox, Spinner, Textarea } from '../components/ui'
+import { Button, Card, cx, Dialog, ErrorBox, RefreshError, Spinner, Textarea } from '../components/ui'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { saveTerminalFontSize, storedTerminalFontSize } from '../lib/localPrefs'
@@ -79,7 +79,8 @@ export function Terminal() {
   }
 
   if (settings.data && settings.data.terminal_enabled !== true) return <Navigate to="/" replace />
-  if (settings.error) return <ErrorBox error={settings.error} />
+  // 手机从后台回来时设置重取可能失败：手里有上一份就照常显示，整页报错会销毁 xterm、断开会话
+  if (settings.error && !settings.data) return <ErrorBox error={settings.error} />
 
   return (
     <div className="space-y-3">
@@ -93,7 +94,7 @@ export function Terminal() {
       </div>
 
       {openError !== null && <ErrorBox error={openError} />}
-      {sessions.error && <ErrorBox error={sessions.error} />}
+      {sessions.data ? <RefreshError error={sessions.error} onRetry={() => void sessions.refetch()} /> : <ErrorBox error={sessions.error} />}
 
       {items.length > 0 && (
         // 和页内标签页同一套键盘约定：只有选中的会话能 Tab 到，左右方向键和 Home / End 切换
@@ -377,6 +378,29 @@ function TerminalSessionPanel({
     if (escape) setAlt(false)
   }
 
+  // Ctrl、Alt 锁定时按下的下一个字符。实体键盘和 iOS 在 keydown 里就拿得到（onDraftKey）；安卓软键盘组字时
+  // keydown 的 key 是 Unidentified，只能等 beforeinput 取 data。组字中的输入取消不了：先发出去，
+  // 等这次输入落地后失焦再聚焦结束组字，把草稿改回原样
+  useEffect(() => {
+    const el = draftInput.current
+    if (!el || !(ctrl || alt)) return
+    const onBeforeInput = (event: InputEvent) => {
+      if (!event.data || !event.inputType.startsWith('insert')) return
+      const before = el.value
+      event.preventDefault()
+      sendKey([...event.data].at(-1)!)
+      if (!event.cancelable) {
+        requestAnimationFrame(() => {
+          el.blur()
+          el.focus({ preventScroll: true })
+          setDraft(before)
+        })
+      }
+    }
+    el.addEventListener('beforeinput', onBeforeInput)
+    return () => el.removeEventListener('beforeinput', onBeforeInput)
+  })
+
   const onDraftKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if ((ctrl || alt) && event.key.length === 1 && !event.nativeEvent.isComposing) {
       event.preventDefault()
@@ -444,6 +468,12 @@ function TerminalSessionPanel({
             rows={1}
             aria-label={t('terminal.input_aria')}
             placeholder={t('terminal.input_placeholder')}
+            // 命令不是句子：不自动大写、不纠正、不标拼写错误
+            autoCapitalize="off"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            enterKeyHint="send"
             className="max-h-28 min-h-11 flex-1 resize-y py-2.5 font-mono text-[13px]"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onDraftKey}

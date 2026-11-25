@@ -48,26 +48,60 @@ func strictCheck(ctx context.Context) (Check, bool) {
 	return Check{"strict", "warn", "严格限卡助手", st.Reason + "：" + st.Detail, "在服务器上重新运行 sudo danlu strict install"}, true
 }
 
+// GPUCache 是服务里一直在采的 GPU 数据（*gpu.Monitor）。网页体检传它，GPU 一项读缓存、不另起 nvidia-smi：
+// 驱动卡住时 nvidia-smi 杀不掉，每点一次体检就多一个卡死的进程和一个等它的 goroutine。
+type GPUCache interface {
+	Latest() ([]gpu.GPU, time.Time, error)
+	MachineLatest() (gpu.MachineInfo, time.Time, error)
+}
+
+// Run 做一次完整体检（命令行用：自己跑 nvidia-smi）。
 func Run(ctx context.Context, cfg *config.Config, paths config.Paths, version string, apiVersion int) Report {
+	return RunWith(ctx, cfg, paths, version, apiVersion, nil)
+}
+
+// RunWith 和 Run 一样，gpus 不为 nil 时 GPU 一项读服务的采样缓存。
+func RunWith(ctx context.Context, cfg *config.Config, paths config.Paths, version string, apiVersion int, gpus GPUCache) Report {
 	ctx, cancel := context.WithTimeout(ctx, 24*time.Second)
 	defer cancel()
-	checks := make([]Check, 0, 16)
-	checks = append(checks, gpuCheck(ctx, cfg.Runtime.UnknownGPUMemoryMB), condaCheck(ctx, cfg.Runtime.CondaBase))
-	checks = append(checks, platformChecks(ctx, paths)...)
-	outputRoot, err := config.ResolvePath(cfg.Runtime.OutputRoot)
-	if err != nil {
-		checks = append(checks, Check{"output_disk", "fail", "输出目录磁盘", err.Error(), "修正 runtime.output_root 配置"})
-	} else {
-		checks = append(checks,
-			diskCheck("data_disk", "数据目录磁盘", paths.Home, cfg.Runtime.DiskWarnGB, cfg.Runtime.DiskMinGB),
-			diskCheck("output_disk", "输出目录磁盘", outputRoot, cfg.Runtime.DiskWarnGB, cfg.Runtime.DiskMinGB),
-		)
+	one := func(f func(context.Context) Check) func(context.Context) []Check {
+		return func(ctx context.Context) []Check { return []Check{f(ctx)} }
 	}
-	checks = append(checks, certificateChecks(cfg, paths)...)
-	checks = append(checks, portCheck(cfg))
-	if c, ok := strictCheck(ctx); ok {
-		checks = append(checks, c)
+	items := []item{
+		{"gpu", "NVIDIA 驱动与 GPU", "检查 NVIDIA 驱动和 nvidia-smi", one(func(ctx context.Context) Check {
+			if gpus != nil {
+				return gpuCacheCheck(gpus)
+			}
+			return gpuCheck(ctx, cfg.Runtime.UnknownGPUMemoryMB)
+		})},
+		{"conda", "conda 环境", "检查 conda 命令和服务运行环境", one(func(ctx context.Context) Check { return condaCheck(ctx, cfg.Runtime.CondaBase) })},
+		{"platform", "systemd 与系统服务", "检查 systemctl 是否卡住", func(ctx context.Context) []Check { return platformChecks(ctx, paths) }},
+		{"cli_socket", "命令行入口", "运行 danlu restart", func(context.Context) []Check {
+			if c, ok := localSocketCheck(paths); ok {
+				return []Check{c}
+			}
+			return nil
+		}},
+		{"data_disk", "数据目录磁盘", "检查数据目录所在的文件系统是否卡住", one(func(context.Context) Check {
+			return diskCheck("data_disk", "数据目录磁盘", paths.Home, cfg.Runtime.DiskWarnGB, cfg.Runtime.DiskMinGB)
+		})},
+		{"output_disk", "输出目录磁盘", "检查输出目录所在的文件系统（网络存储）是否卡住", one(func(context.Context) Check {
+			outputRoot, err := config.ResolvePath(cfg.Runtime.OutputRoot)
+			if err != nil {
+				return Check{"output_disk", "fail", "输出目录磁盘", err.Error(), "修正 runtime.output_root 配置"}
+			}
+			return diskCheck("output_disk", "输出目录磁盘", outputRoot, cfg.Runtime.DiskWarnGB, cfg.Runtime.DiskMinGB)
+		})},
+		{"server_cert", "服务器证书", "检查数据目录所在的文件系统是否卡住", func(context.Context) []Check { return certificateChecks(cfg, paths) }},
+		{"port", "服务端口", "", one(func(context.Context) Check { return portCheck(cfg) })},
+		{"strict", "严格限卡助手", "在服务器上重新运行 sudo danlu strict install", func(ctx context.Context) []Check {
+			if c, ok := strictCheck(ctx); ok {
+				return []Check{c}
+			}
+			return nil
+		}},
 	}
+	checks := runItems(ctx, items, itemLimit)
 	versionLevel, versionFix := "ok", ""
 	if !releaseVersion(version) {
 		versionLevel, versionFix = "warn", "使用带正式版本 tag、工作区干净时的构建"
@@ -77,6 +111,77 @@ func Run(ctx context.Context, cfg *config.Config, paths config.Paths, version st
 		Detail: fmt.Sprintf("%s；API %d", valueOrNA(version), apiVersion), Fix: versionFix,
 	})
 	return Report{Checks: checks}
+}
+
+// item 是一项（或一组）检查；超时时用 id、title、fix 报一条"没有返回"。
+type item struct {
+	id, title, fix string
+	run            func(context.Context) []Check
+}
+
+// itemLimit 是每项检查最多等多久。各项并行跑：nvidia-smi 卡在驱动里、statfs 卡在失联的网络存储上时
+// 都杀不掉，等它的话体检永远不返回（网页上每点一次就多挂一个请求）
+var itemLimit = 15 * time.Second
+
+// runItems 并行跑各项检查，按原顺序收结果。超过 limit（或 ctx 结束）还没返回的报 fail，不再等它。
+func runItems(ctx context.Context, items []item, limit time.Duration) []Check {
+	results := make([]chan []Check, len(items))
+	for i, it := range items {
+		ch := make(chan []Check, 1)
+		results[i] = ch
+		go func() { ch <- it.run(ctx) }()
+	}
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	expired := false
+	checks := make([]Check, 0, 20)
+	for i, ch := range results {
+		var got []Check
+		done := false
+		if !expired {
+			select {
+			case got = <-ch:
+				done = true
+			case <-timer.C:
+				expired = true
+			case <-ctx.Done():
+				expired = true
+			}
+		}
+		if !done {
+			select {
+			case got = <-ch: // 已经超时：这时做完了的照收
+				done = true
+			default:
+			}
+		}
+		if !done {
+			it := items[i]
+			checks = append(checks, Check{it.id, "fail", it.title,
+				fmt.Sprintf("超过 %d 秒没有返回，可能卡在驱动或失联的存储上", int(limit.Seconds())), it.fix})
+			continue
+		}
+		checks = append(checks, got...)
+	}
+	return checks
+}
+
+// gpuCacheCheck 读服务的 GPU 采样缓存，不另起 nvidia-smi。
+func gpuCacheCheck(c GPUCache) Check {
+	const id, title, fix = "gpu", "NVIDIA 驱动与 GPU", "检查 NVIDIA 驱动和 nvidia-smi"
+	cards, at, err := c.Latest()
+	if err != nil {
+		return Check{id, "fail", title, err.Error(), fix}
+	}
+	if at.IsZero() {
+		return Check{id, "warn", title, "服务刚启动，还没有采到 GPU 数据", "稍后再体检一次"}
+	}
+	info, _, err := c.MachineLatest()
+	detail := fmt.Sprintf("驱动 %s；CUDA %s；%d 张 GPU", valueOrNA(info.DriverVersion), valueOrNA(info.CUDAVersion), len(cards))
+	if err != nil && !errors.Is(err, gpu.ErrMachineInfoNotReady) {
+		detail += "；读驱动版本失败：" + err.Error()
+	}
+	return Check{ID: id, Level: "ok", Title: title, Detail: detail}
 }
 
 // releaseVersion 判断是否为正式版本：开发构建以 dev 开头，带未提交改动的构建以 -dirty 结尾。

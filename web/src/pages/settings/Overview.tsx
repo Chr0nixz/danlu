@@ -33,6 +33,8 @@ const doctorTitleKeys: Record<string, Parameters<typeof t>[0]> = {
   service_load: 'settings.doctor.service_load',
   linger: 'settings.doctor.linger',
   time_sync: 'settings.doctor.time_sync',
+  cli_socket: 'settings.doctor.cli_socket',
+  platform: 'settings.doctor.platform',
 }
 
 export function Overview({ st }: { st: Settings }) {

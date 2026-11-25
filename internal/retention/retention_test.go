@@ -275,15 +275,29 @@ func TestPruneKeepsArtifactsOfSnapshotRerun(t *testing.T) {
 	}
 	id := fmt.Sprint(j.ID)
 	put(filepath.Join(p.Paths.Logs, id+".log"), strings.Repeat("x", 100))
-	meta, _ := json.Marshal(snapshot.Meta{Files: []snapshot.FileEntry{{Path: "train.py"}, {Path: "cfg/a.yaml"}, {Path: "src/model.py"}}})
+	meta, _ := json.Marshal(snapshot.Meta{Files: []snapshot.FileEntry{{Path: "train.py", Size: 8}, {Path: "cfg/a.yaml", Size: 5},
+		{Path: "src/model.py", Size: 5}, {Path: "results/metrics.json", Size: 6}, {Path: "results/same.json", Size: 4}}})
 	put(filepath.Join(p.Paths.Snapshots, id+".meta.json"), string(meta))
 	put(filepath.Join(p.Paths.Snapshots, id+".tar.gz"), "tar")
 	run := filepath.Join(p.Paths.Run, id)
 	code := filepath.Join(run, "code")
-	put(filepath.Join(run, "run.sh"), "wrapper")
-	put(filepath.Join(code, "train.py"), "print(1)")
-	put(filepath.Join(code, "cfg/a.yaml"), "lr: 1")
-	put(filepath.Join(code, "src/model.py"), "model")
+	// 时间顺序：恢复代码 → 写包装脚本 → 任务运行
+	restoredAt := time.Now().Add(-time.Hour)
+	wrapperAt, ranAt := restoredAt.Add(time.Second), restoredAt.Add(time.Minute)
+	putAt := func(path, content string, at time.Time) {
+		t.Helper()
+		put(path, content)
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	putAt(filepath.Join(code, "train.py"), "print(1)", restoredAt)
+	putAt(filepath.Join(code, "cfg/a.yaml"), "lr: 1", restoredAt)
+	putAt(filepath.Join(code, "src/model.py"), "model", restoredAt)
+	putAt(filepath.Join(run, "run.sh"), "wrapper", wrapperAt)
+	putAt(filepath.Join(run, "cmd.sh"), "train", wrapperAt)
+	putAt(filepath.Join(run, "pid"), "42", ranAt)
+	putAt(filepath.Join(run, "exitcode"), "0", ranAt)
 	put(filepath.Join(work, "data/sample.bin"), "数据")
 	if err := os.Symlink(filepath.Join(work, "data"), filepath.Join(code, "data")); err != nil {
 		t.Skipf("当前系统不能创建符号链接: %v", err)
@@ -293,8 +307,14 @@ func TestPruneKeepsArtifactsOfSnapshotRerun(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(filepath.Join(code, "cfg/out.json"), strings.Repeat("o", 1000))
+	// 快照里带着上一次的结果，任务用相对路径覆盖：大小变了的、大小没变的都是这次的产物
+	putAt(filepath.Join(code, "results/metrics.json"), `{"acc": 0.93}`, ranAt)
+	putAt(filepath.Join(code, "results/same.json"), "new!", ranAt)
+	// 任务写 ../outputs/best.pt，落在运行目录里
+	put(filepath.Join(run, "outputs/best.pt"), strings.Repeat("b", 1000))
 
-	managed := int64(100 + len(meta) + len("tar") + len("wrapper") + len("print(1)") + len("lr: 1") + len("model"))
+	managed := int64(100 + len(meta) + len("tar") + len("wrapper") + len("train") + len("42") + len("0") +
+		len("print(1)") + len("lr: 1") + len("model"))
 	p.Options = Options{KeepDays: 90, DryRun: true}
 	r, err := p.Prune(context.Background())
 	if err != nil || r.TotalBytes != managed || len(r.Jobs) != 1 || r.Jobs[0].Bytes != managed {
@@ -304,12 +324,15 @@ func TestPruneKeepsArtifactsOfSnapshotRerun(t *testing.T) {
 	if _, err := p.Prune(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, rel := range []string{"checkpoints/best.pt", "checkpoints/latest.pt", "cfg/out.json"} {
-		if _, err := os.Lstat(filepath.Join(code, rel)); err != nil {
-			t.Fatalf("误删产物 %s: %v", rel, err)
+	for _, path := range []string{filepath.Join(code, "checkpoints/best.pt"), filepath.Join(code, "checkpoints/latest.pt"),
+		filepath.Join(code, "cfg/out.json"), filepath.Join(code, "results/metrics.json"), filepath.Join(code, "results/same.json"),
+		filepath.Join(run, "outputs/best.pt")} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("误删产物 %s: %v", path, err)
 		}
 	}
-	for _, path := range []string{filepath.Join(run, "run.sh"), filepath.Join(code, "train.py"), filepath.Join(code, "cfg/a.yaml"),
+	for _, path := range []string{filepath.Join(run, "run.sh"), filepath.Join(run, "cmd.sh"), filepath.Join(run, "pid"),
+		filepath.Join(run, "exitcode"), filepath.Join(code, "train.py"), filepath.Join(code, "cfg/a.yaml"),
 		filepath.Join(code, "src"), filepath.Join(code, "data"), filepath.Join(p.Paths.Snapshots, id+".meta.json")} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("%s 应该已清理: %v", path, err)
@@ -340,10 +363,11 @@ func TestPruneDoesNotFollowParentSymlinkIntoOtherJob(t *testing.T) {
 	victimFile := filepath.Join(p.Paths.Run, fmt.Sprint(victim.ID), "code", "cfg", "a.yaml")
 	put(victimFile, "lr: 1")
 	id := fmt.Sprint(old.ID)
-	meta, _ := json.Marshal(snapshot.Meta{Files: []snapshot.FileEntry{{Path: "train.py"}, {Path: "cfg/a.yaml"}}})
+	meta, _ := json.Marshal(snapshot.Meta{Files: []snapshot.FileEntry{{Path: "train.py", Size: 8}, {Path: "cfg/a.yaml", Size: 5}}})
 	put(filepath.Join(p.Paths.Snapshots, id+".meta.json"), string(meta))
 	code := filepath.Join(p.Paths.Run, id, "code")
 	put(filepath.Join(code, "train.py"), "print(1)")
+	put(filepath.Join(p.Paths.Run, id, "run.sh"), "wrapper")
 	target := filepath.Join("..", "..", fmt.Sprint(victim.ID), "code", "cfg")
 	if err := os.Symlink(target, filepath.Join(code, "cfg")); err != nil {
 		t.Skipf("当前系统不能创建符号链接: %v", err)
@@ -363,6 +387,36 @@ func TestPruneDoesNotFollowParentSymlinkIntoOtherJob(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(code, "train.py")); !os.IsNotExist(err) {
 		t.Fatalf("恢复出来的代码应该已清理: %v", err)
+	}
+}
+
+// 没有包装脚本时分不清 code/ 里的文件有没有被任务改写过，一律留下，也不计入总量
+func TestPruneKeepsRerunCodeWithoutWrapper(t *testing.T) {
+	p := newPruner(t)
+	j := addJob(t, p, 120, store.StatusSucceeded)
+	id := fmt.Sprint(j.ID)
+	meta, _ := json.Marshal(snapshot.Meta{Files: []snapshot.FileEntry{{Path: "train.py", Size: 8}}})
+	if err := os.WriteFile(filepath.Join(p.Paths.Snapshots, id+".meta.json"), meta, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := filepath.Join(p.Paths.Run, id, "code")
+	if err := os.MkdirAll(code, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(code, "train.py"), []byte("print(1)"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.Options = Options{KeepDays: 90, DryRun: true}
+	r, err := p.Prune(context.Background())
+	if want := int64(100 + len(meta)); err != nil || len(r.Jobs) != 1 || r.Jobs[0].Bytes != want {
+		t.Fatalf("期望只算日志和清单 %d 字节，得到 %+v %v", want, r, err)
+	}
+	p.Options.DryRun = false
+	if _, err := p.Prune(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(code, "train.py")); err != nil {
+		t.Fatalf("分不清时不应删 code/ 里的文件: %v", err)
 	}
 }
 
@@ -428,7 +482,7 @@ func TestPreviewStopsAtDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if _, err := sizeOf(expired, root, "logs", p.Paths.Home, nil); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := sizeOf(expired, root, "logs", p.Paths.Home, nil, newLinks().total); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("目录统计应检查 ctx: %v", err)
 	}
 	if _, err := canonicalOutputs(expired, []string{p.OutputRoot}); !errors.Is(err, context.DeadlineExceeded) {

@@ -22,6 +22,9 @@ type Disk struct {
 	Data           bool     `json:"data"`
 	Warn           bool     `json:"warn"`
 	Error          string   `json:"error,omitempty"`
+	// LastID 是出错的目录上一次查询成功时所在分区的 ID（出错的条目没有 ID）。告警按分区 ID 认：
+	// 没有它就找不到原来那条，一次查询出错就清掉、恢复后余量还低又推送一次
+	LastID string `json:"-"`
 }
 
 func DiskSpace(path string) (total, available uint64, err error) {
@@ -36,6 +39,7 @@ type DiskMonitor = sample.Sampler[[]Disk]
 // warnBytes 每次采样时取一次：低余量提示线可以在面板上随时改。为 nil 或返回 0 时不提示。
 func NewDiskMonitor(dataDir, outputRoot string, recent func() ([]string, error), warnBytes func() uint64) *DiskMonitor {
 	stat := boundedStat(diskStats, statTimeout)
+	var memory diskMemory
 	query := func(context.Context) ([]Disk, error) {
 		paths := []string{dataDir, outputRoot}
 		dirs, err := recent()
@@ -47,7 +51,9 @@ func NewDiskMonitor(dataDir, outputRoot string, recent func() ([]string, error),
 		if warnBytes != nil {
 			warn = warnBytes()
 		}
-		return collectDisks(paths, warn, stat), nil
+		disks := collectDisks(paths, warn, stat)
+		memory.apply(disks, warn)
+		return disks, nil
 	}
 	return &DiskMonitor{Name: "磁盘数据", Every: time.Minute, Stale: 3 * time.Minute, Query: query, Clone: cloneDisks}
 }
@@ -125,6 +131,45 @@ func collectDisks(paths []string, warn uint64, stat diskStatFunc) []Disk {
 			TotalBytes: r.total, AvailableBytes: r.available, Warn: warn > 0 && r.available < warn})
 	}
 	return disks
+}
+
+// diskMemory 记住上一次采样，给下一次用：
+//   - 出错的目录记下上次成功时的分区 ID（Disk.LastID）；
+//   - 低余量提示带回差：提示过的分区要回到提示线以上一段（提示线的 5%，至少 1 GiB）才算恢复，
+//     余量在线附近来回时，不会每次越线都推一条。
+type diskMemory struct {
+	mu     sync.Mutex
+	ids    map[string]string // 目录 → 上次成功时的分区 ID
+	warned map[string]bool   // 分区 ID → 上次是否在提示
+}
+
+func warnHysteresis(warn uint64) uint64 { return max(warn/20, 1<<30) }
+
+func (m *diskMemory) apply(disks []Disk, warn uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := map[string]string{}
+	warned := map[string]bool{}
+	for i := range disks {
+		d := &disks[i]
+		if d.Error != "" {
+			// 查不到就沿用上次的状态
+			if id := m.ids[d.Path]; id != "" {
+				d.LastID = id
+				ids[d.Path] = id
+				warned[id] = warned[id] || m.warned[id]
+			}
+			continue
+		}
+		for _, p := range d.Paths {
+			ids[p] = d.ID
+		}
+		if !d.Warn && warn > 0 && m.warned[d.ID] && d.AvailableBytes < warn+warnHysteresis(warn) {
+			d.Warn = true
+		}
+		warned[d.ID] = warned[d.ID] || d.Warn
+	}
+	m.ids, m.warned = ids, warned
 }
 
 // 首次启动时 output_root 可能尚不存在，沿父目录找到实际会使用的分区。

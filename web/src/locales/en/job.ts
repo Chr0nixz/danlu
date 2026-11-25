@@ -31,6 +31,9 @@ export const job: { [K in keyof typeof zhJob]: Message } = {
   'job.notify_disable': "Disable completion alert",
   'job.notify_enabled': "Completion alert enabled",
   'job.notify_disabled': "Completion alert disabled",
+  'job.notify_push_off_title': '{action} (phone push is not set up on this server, so nothing will be sent)',
+  'job.notify_push_off': "Completion alert is on, but phone push isn't set up on this server, so nothing will arrive.",
+  'job.notify_push_settings': 'Push settings',
 
   // 标星
   'job.star': 'Star',
@@ -133,6 +136,8 @@ export const job: { [K in keyof typeof zhJob]: Message } = {
   'job.row_tracker': 'Experiment tracking',
   'job.row_rerun_of': 'Rerun of',
   'job.job_link': 'Job #{id}',
+  'job.lineage_from': 'Rerun of',
+  'job.lineage_to': 'Rerun as',
   'job.row_code_from': 'Code source',
   'job.code_from_link': 'Snapshot of job #{id}',
   'job.snapshot_note_toggle': 'See how existing files were used',
@@ -155,6 +160,7 @@ export const job: { [K in keyof typeof zhJob]: Message } = {
   'job.log_window_hint': "Only the most recent output is kept; download for the full log",
   'job.log_window_full': 'Position window full',
   'job.log_load_older': 'Load older',
+  'job.log_load_older_failed': "Couldn't load older lines — try again",
   'job.log_wrap_title': 'Line wrap',
   'job.log_wrap': 'Wrap',
   'job.log_download_title': 'Download full log',

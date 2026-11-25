@@ -13,10 +13,12 @@ export const gpus = {
   'gpus.proc_job': 'Job #{id} process',
   'gpus.proc_job_graphics': 'Job #{id} graphics process',
   'gpus.proc_external': 'External process',
+  'gpus.proc_owner_unknown': 'Process of unknown owner (possibly exiting)',
   'gpus.proc_external_graphics': 'External graphics process',
   'gpus.job_proc_count': { one: 'Job #{job}: {n} process', other: 'Job #{job}: {n} processes' },
   'gpus.external_proc_count': { one: '{n} external process', other: '{n} external processes' },
   'gpus.no_procs': 'No processes of this job on the card yet',
+  'gpus.no_procs_short': 'no procs yet',
   'gpus.no_procs_title': 'This card is allocated to the job, but none of its processes are on it yet: it may still be starting, or the program may not use this card',
 
   // Process tooltips: head is the first half (pid list, user, graphics count), reused by the full and reserved-card variants

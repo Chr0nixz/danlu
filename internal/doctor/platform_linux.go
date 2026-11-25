@@ -4,12 +4,17 @@ package doctor
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"danlu/internal/config"
+	"danlu/internal/localsock"
 )
 
 func platformChecks(ctx context.Context, paths config.Paths) []Check {
@@ -86,4 +91,31 @@ func timeSyncCheck(ctx context.Context) Check {
 	default:
 		return Check{"time_sync", "warn", "系统时间同步", "timedatectl 未返回同步状态", "检查 NTP 服务状态"}
 	}
+}
+
+// localSocketCheck 看命令行入口（数据目录里的 danlu.sock，FEATURES 5.1）在不在、权限对不对、连不连得上。
+func localSocketCheck(paths config.Paths) (Check, bool) {
+	const id, title = "cli_socket", "命令行入口"
+	path := localsock.Path(paths.Home)
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist) && len(path) > localsock.MaxPath:
+		return Check{id, "warn", title, fmt.Sprintf("数据目录路径太长：socket 路径 %d 字节，超过 unix socket 的 %d 字节上限", len(path), localsock.MaxPath),
+			"把数据目录（DANLU_HOME）换到路径更短的地方"}, true
+	case errors.Is(err, os.ErrNotExist):
+		return Check{id, "warn", title, "没有 " + path + "：服务没有运行，或者还是不带命令行入口的旧版本",
+			"运行 danlu restart；仍然没有就查 danlu logs 里的「命令行入口」"}, true
+	case err != nil:
+		return Check{id, "warn", title, err.Error(), ""}, true
+	case fi.Mode()&os.ModeSocket == 0:
+		return Check{id, "fail", title, path + " 不是 socket", "删掉它后运行 danlu restart"}, true
+	case fi.Mode().Perm() != 0o600:
+		return Check{id, "fail", title, fmt.Sprintf("%s 的权限是 %o，应为 600", path, fi.Mode().Perm()), "运行 danlu restart 重新创建"}, true
+	}
+	conn, err := net.DialTimeout("unix", path, 2*time.Second)
+	if err != nil {
+		return Check{id, "warn", title, "连不上 " + path + "：" + err.Error(), "运行 danlu restart"}, true
+	}
+	conn.Close()
+	return Check{id, "ok", title, path, ""}, true
 }

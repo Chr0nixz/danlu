@@ -1,5 +1,5 @@
 import { t } from './i18n.ts'
-import type { Job, JobStatus, QueueState } from './types'
+import type { Job, JobStatus, QueueState, QueueWait, QueueWaitBlocker } from './types'
 
 export function duration(sec: number): string {
   sec = Math.max(0, Math.floor(sec))
@@ -13,7 +13,37 @@ export function duration(sec: number): string {
   return t('time.duration_s', { s })
 }
 
-export const now = () => Date.now() / 1000
+/** 服务器时钟比本机快多少秒，见 observeServerDate */
+let clockOffset = 0
+
+/**
+ * 现在的时间（unix 秒），按服务器时钟校正过。任务、预约的时间戳都是服务器给的，直接用本机时钟去减，
+ * 本机时钟差多少，等待时长、倒计时就偏多少（差 15 秒以上时首页一直显示"数据 N 秒没有更新"）
+ */
+export const now = () => Date.now() / 1000 + clockOffset
+
+/** 直接设置时钟差（秒）。桌面客户端连着多台服务器，不设置，保持 0 */
+export function setClockOffset(sec: number) {
+  clockOffset = sec
+}
+
+const clockSamples: number[] = []
+
+/**
+ * 用响应头 Date 估算服务器和本机的时钟差（面板的传输层每个响应调一次）。
+ * sent、received 是本机发出请求和收到响应头的毫秒时间。Date 只精确到秒，每次估计有半秒以上的误差，
+ * 所以取最近 9 次的中位数；差 2 秒以内当作没差，之后变化满 1 秒才更新，时长不会来回跳一秒
+ */
+export function observeServerDate(date: string | null, sent: number, received: number) {
+  const server = date ? Date.parse(date) : NaN
+  if (Number.isNaN(server) || received < sent) return
+  clockSamples.push(server + 500 - (sent + received) / 2)
+  if (clockSamples.length > 9) clockSamples.shift()
+  const sorted = [...clockSamples].sort((a, b) => a - b)
+  const median = sorted[sorted.length >> 1]
+  const next = Math.abs(median) < 2000 ? 0 : median / 1000
+  if (Math.abs(next - clockOffset) >= 1) clockOffset = next
+}
 
 /** 运行中的任务算到现在，结束的任务算到结束时间 */
 export function jobDuration(j: Job): number | null {
@@ -35,6 +65,17 @@ export function timeAgo(ts: number | null | undefined): string {
   if (diff < 3600) return t('time.minutes_ago', { n: Math.floor(diff / 60) })
   if (diff < 86400) return t('time.hours_ago', { n: Math.floor(diff / 3600) })
   if (diff < 7 * 86400) return t('time.days_ago', { n: Math.floor(diff / 86400) })
+  return fmtTime(ts).slice(0, 10)
+}
+
+/** 窄列用的相对时间：英文写 13h ago（"13 hours ago" 在 4.5rem 的列里会折成两行），中文和 timeAgo 一样 */
+export function timeAgoShort(ts: number | null | undefined): string {
+  if (!ts) return '-'
+  const diff = now() - ts
+  if (diff < 60) return t('time.just_now')
+  if (diff < 3600) return t('time.minutes_ago_short', { n: Math.floor(diff / 60) })
+  if (diff < 86400) return t('time.hours_ago_short', { n: Math.floor(diff / 3600) })
+  if (diff < 7 * 86400) return t('time.days_ago_short', { n: Math.floor(diff / 86400) })
   return fmtTime(ts).slice(0, 10)
 }
 
@@ -203,6 +244,46 @@ export function queuePauseText(q: QueueState): string {
     default:
       return q.reason || ''
   }
+}
+
+const waitKeys = {
+  ahead: 'queue.wait_ahead',
+  scheduling: 'queue.wait_scheduling',
+  queue_state: 'queue.wait_queue_state',
+  paused: 'queue.wait_paused',
+  disk_check: 'queue.wait_disk_check',
+  gpu_data: 'queue.wait_gpu_data',
+  strict: 'queue.wait_strict',
+  res_loading: 'queue.wait_res_loading',
+} as const
+
+function blockerText(b: QueueWaitBlocker): string {
+  switch (b.kind) {
+    case 'reserved': return t('queue.block_reserved', { gpu: b.gpu, id: b.reservation_id ?? '?' })
+    case 'unknown_mem': return t('queue.block_unknown_mem', { gpu: b.gpu, mb: b.mem_mb ?? 0 })
+    case 'job_proc': return t('queue.block_job_proc', { gpu: b.gpu, job: b.job_id ?? '?', pid: b.pid ?? '?' })
+    case 'owner_unknown': return t('queue.block_owner_unknown', { gpu: b.gpu, pid: b.pid ?? '?' })
+    default: return t('queue.block_external', { gpu: b.gpu, pid: b.pid ?? '?' })
+  }
+}
+
+function waitKindText(w: QueueWait): string {
+  switch (w.kind) {
+    case 'gpus': return t('queue.wait_gpus', { n: w.need ?? 0, free: w.free ?? 0 })
+    case 'pinned': return t('queue.wait_pinned', { list: (w.pinned ?? []).join(',') })
+    default: return t(waitKeys[w.kind] ?? 'queue.wait_scheduling')
+  }
+}
+
+/**
+ * 排队任务在等什么：新服务器给机器码（wait），按当前语言合成；旧服务器只有中文原文 wait_reason。
+ * 都没有时返回空串，调用方自己写"等待 N 张卡"之类的兜底。
+ */
+export function waitText(j: Pick<Job, 'wait' | 'wait_reason'>): string {
+  const w = j.wait
+  if (!w) return j.wait_reason ?? ''
+  const text = waitKindText(w)
+  return w.blocker ? text + t('queue.wait_sep') + blockerText(w.blocker) : text
 }
 
 /**

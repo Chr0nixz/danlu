@@ -48,7 +48,9 @@ type fakeExec struct {
 	// jobOOM 是包装脚本记下的每个任务的 OOM 计数
 	strictErr  error
 	strictHook func(runner.Spec)
-	jobOOM     map[int64]int64
+	// strictFn 不为空时代替严格启动的结果，调用时持有 f.mu，可以直接改 pidFile、alive、exit 模拟单元的实际情况
+	strictFn func(runner.Spec) (runner.Started, error)
+	jobOOM   map[int64]int64
 }
 
 func newExec() *fakeExec {
@@ -105,6 +107,9 @@ func (f *fakeExec) Start(s runner.Spec, _ []string) (runner.Started, error) {
 	defer f.mu.Unlock()
 	if f.startErr != nil {
 		return runner.Started{}, f.startErr
+	}
+	if s.Strict && f.strictFn != nil {
+		return f.strictFn(s)
 	}
 	if s.Strict && f.strictErr != nil {
 		return runner.Started{}, f.strictErr
@@ -796,6 +801,37 @@ func TestSnapshotFailureStillStarts(t *testing.T) {
 	}
 }
 
+// 快照卡在失联存储的一次系统调用里（不看 ctx）时，到点不再等：按快照失败照常启动，不一直占着卡停在 pid=0
+func TestStuckSnapshotDoesNotHoldLaunch(t *testing.T) {
+	h := newHarness(t, 1)
+	release := make(chan struct{})
+	defer close(release)
+	h.m.snap = func(context.Context, *store.Job, snapshot.Options) (*snapshot.Meta, error) {
+		<-release // 不看 ctx
+		return &snapshot.Meta{}, nil
+	}
+	a := h.add(1)
+	within(t, 5*time.Second, "启动", h.tick)
+	h.expect(a, store.StatusRunning)
+	if j := h.job(a); j.SnapshotOK || !strings.Contains(j.SnapshotNote, "快照超时") || j.PID == 0 {
+		t.Fatalf("快照卡住时应按失败照常启动: %+v", j)
+	}
+}
+
+// 包没打成、但 git 信息已经读到时，任务照样记下 commit、分支和有没有未提交改动
+func TestSnapshotFailureKeepsGitInfo(t *testing.T) {
+	h := newHarness(t, 1)
+	h.m.snap = func(context.Context, *store.Job, snapshot.Options) (*snapshot.Meta, error) {
+		return &snapshot.Meta{Git: &snapshot.GitInfo{Commit: "abc123", Branch: "main", Dirty: true}}, errors.New("磁盘满")
+	}
+	a := h.add(0)
+	h.tick()
+	h.expect(a, store.StatusRunning)
+	if j := h.job(a); j.SnapshotOK || j.GitCommit != "abc123" || j.GitBranch != "main" || !j.GitDirty {
+		t.Fatalf("快照失败时应保留 git 信息: %+v", j)
+	}
+}
+
 // 加载 .bashrc 卡住时，提交、取消和调度循环都不受影响（第 4.1 节）
 func TestSlowLoadEnvDoesNotBlock(t *testing.T) {
 	h := newHarness(t, 2)
@@ -1437,5 +1473,108 @@ func TestCleanupNotesSeparateFromFailure(t *testing.T) {
 			}
 			h.events(a, store.EventJobStarted, store.EventJobFinished)
 		})
+	}
+}
+
+// ---------- 提交幂等（FEATURES 5.1 --key） ----------
+
+// 同一个 key 提交两次只建一个任务；第二次哪怕工作目录已经不在了，也拿回第一次的任务
+func TestSubmitKeyReturnsExisting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Submit 要求以 / 开头的工作目录")
+	}
+	h := newHarness(t, 2)
+	dir := t.TempDir()
+	req := SubmitReq{Workdir: dir, Cmd: "python train.py", GPUs: 1, SubmitKey: "exp-1"}
+	first, existed, err := h.m.SubmitOnce(req)
+	if err != nil || existed {
+		t.Fatalf("第一次提交: existed=%v err=%v", existed, err)
+	}
+	if first.SubmitKey != "exp-1" {
+		t.Fatalf("SubmitKey = %q", first.SubmitKey)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	req.Workdir += "/" // 末尾斜杠、命令前后空白不算不同
+	req.Cmd = "  python train.py\n"
+	again, existed, err := h.m.SubmitOnce(req)
+	if err != nil || !existed || again.ID != first.ID {
+		t.Fatalf("重复提交应返回 #%d: %+v existed=%v err=%v", first.ID, again, existed, err)
+	}
+	if jobs, _ := h.st.JobsByStatus(store.StatusQueued); len(jobs) != 1 {
+		t.Fatalf("应只有 1 个排队任务，实际 %d", len(jobs))
+	}
+}
+
+// 同一个 key 但命令或 GPU 要求不同：冲突，不新建；key 格式不对：校验错误
+func TestSubmitKeyConflictAndFormat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Submit 要求以 / 开头的工作目录")
+	}
+	h := newHarness(t, 2)
+	dir := t.TempDir()
+	if _, err := h.m.Submit(SubmitReq{Workdir: dir, Cmd: "a", PinnedGPUs: []int{1, 0}, SubmitKey: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	// 指定卡号的顺序和重复不算不同
+	if _, existed, err := h.m.SubmitOnce(SubmitReq{Workdir: dir, Cmd: "a", PinnedGPUs: []int{0, 1, 1}, SubmitKey: "k"}); err != nil || !existed {
+		t.Fatalf("同样的卡号应视为同一次提交: existed=%v err=%v", existed, err)
+	}
+	for name, req := range map[string]SubmitReq{
+		"命令不同": {Workdir: dir, Cmd: "b", PinnedGPUs: []int{0, 1}, SubmitKey: "k"},
+		"卡不同":  {Workdir: dir, Cmd: "a", PinnedGPUs: []int{0}, SubmitKey: "k"},
+		"目录不同": {Workdir: t.TempDir(), Cmd: "a", PinnedGPUs: []int{0, 1}, SubmitKey: "k"},
+		// 扫参数时复用了 key：只差一个环境变量也不能当成同一次提交，不然第二组参数悄悄跑不了
+		"环境变量不同":    {Workdir: dir, Cmd: "a", PinnedGPUs: []int{0, 1}, Env: map[string]string{"LR": "1e-4"}, SubmitKey: "k"},
+		"conda 不同":  {Workdir: dir, Cmd: "a", PinnedGPUs: []int{0, 1}, CondaEnv: "torch2", SubmitKey: "k"},
+		"bashrc 不同": {Workdir: dir, Cmd: "a", PinnedGPUs: []int{0, 1}, InheritBashrc: true, SubmitKey: "k"},
+	} {
+		var ve *ValidationError
+		if _, _, err := h.m.SubmitOnce(req); !errors.As(err, &ve) || ve.Code != CodeSubmitKeyConflict || ve.Params["id"] != int64(1) {
+			t.Fatalf("%s: 应返回冲突错误，得到 %v", name, err)
+		}
+	}
+	for _, key := range []string{"有中文", "a b", strings.Repeat("x", 101), "a/b"} {
+		var ve *ValidationError
+		if _, _, err := h.m.SubmitOnce(SubmitReq{Workdir: dir, Cmd: "a", SubmitKey: key}); !errors.As(err, &ve) || ve.Code != "job_submit_key_invalid" {
+			t.Fatalf("key %q 应被拒绝，得到 %v", key, err)
+		}
+	}
+	if jobs, _ := h.st.JobsByStatus(store.StatusQueued); len(jobs) != 1 {
+		t.Fatalf("冲突和格式错误都不应新建任务，实际 %d 个", len(jobs))
+	}
+}
+
+// 并发的同 key 提交：只落一个任务，所有调用拿到同一个 id
+func TestSubmitKeyConcurrent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Submit 要求以 / 开头的工作目录")
+	}
+	h := newHarness(t, 1)
+	dir := t.TempDir()
+	const n = 8
+	ids := make([]int64, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			j, _, err := h.m.SubmitOnce(SubmitReq{Workdir: dir, Cmd: "x", SubmitKey: "same"})
+			if j != nil {
+				ids[i] = j.ID
+			}
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	for i := range n {
+		if errs[i] != nil || ids[i] != ids[0] {
+			t.Fatalf("第 %d 个提交: id=%d err=%v（第一个 id=%d）", i, ids[i], errs[i], ids[0])
+		}
+	}
+	if jobs, _ := h.st.JobsByStatus(store.StatusQueued); len(jobs) != 1 {
+		t.Fatalf("应只有 1 个任务，实际 %d", len(jobs))
 	}
 }

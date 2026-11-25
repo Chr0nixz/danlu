@@ -113,6 +113,8 @@ export const settings = {
   'settings.doctor.service_load': 'systemd service load',
   'settings.doctor.linger': 'linger',
   'settings.doctor.time_sync': 'System time sync',
+  'settings.doctor.cli_socket': 'CLI socket',
+  'settings.doctor.platform': 'systemd and system services',
 
   // Panel preferences: appearance (the five language keys are kept below)
   'settings.prefs.appearance': 'Appearance',

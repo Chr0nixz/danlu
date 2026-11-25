@@ -70,6 +70,7 @@ type Server struct {
 	conda       condaCache
 	comparisons comparisonCache
 	logLines    logLineCache
+	csp         cspPolicy
 }
 
 func (s *Server) Handler() http.Handler {
@@ -139,16 +140,35 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErrC(w, 404, "not_found", "接口不存在", nil) })
 	mux.Handle("/", s.spa())
-	return securityHeaders(s.Auth.Middleware(mux))
+	// 安全响应头放在入口检查里面：没过入口的空 404 不能带着它们，那是一眼认出丹炉的指纹
+	return s.Auth.Middleware(s.securityHeaders(mux))
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+// LocalHandler 是本机 unix socket（命令行）上的入口：只开放 /api，不提供页面；
+// 对端必须是运行 danlu 的同一个用户（auth.Local），典型的例外是 sudo danlu …，root 不受 socket 的 0600 限制。
+func (s *Server) LocalHandler() http.Handler {
+	h := s.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !auth.Local(r) {
+			writeErrC(w, 403, "socket_uid_mismatch", "请用运行 danlu 的用户执行这条命令", nil)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			writeErrC(w, 404, "not_found", "接口不存在", nil)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		// 点 W&B 链接等外链时不带上面板地址
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", s.cspHeader(r))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -254,7 +274,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, doctor.Run(r.Context(), s.effectiveConfig(), s.Paths, s.Version, APIVersion))
+	// GPU 一项读服务自己的采样缓存，不另起 nvidia-smi（驱动卡住时它杀不掉）
+	var gpus doctor.GPUCache
+	if s.GPUs != nil {
+		gpus = s.GPUs
+	}
+	writeJSON(w, http.StatusOK, doctor.RunWith(r.Context(), s.effectiveConfig(), s.Paths, s.Version, APIVersion, gpus))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +328,9 @@ func (s *Server) gpus(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, p := range g.Procs {
 			if own, ok := assigned[p.JobID]; !ok || !slices.Contains(own, g.Index) {
+				if p.OwnerUnknown && v.Job != nil {
+					continue // 卡上任务正在退出的进程（认不出归属）：不当外部进程，客户端也不该为它通知
+				}
 				v.External = append(v.External, p)
 			}
 		}
@@ -504,8 +532,13 @@ type jobView struct {
 	ErrorLine       string `json:"error_line,omitempty"`
 	TracebackOffset *int64 `json:"traceback_offset,omitempty"`
 	QueuePos        int    `json:"queue_pos,omitempty"`
-	WaitReason      string `json:"wait_reason,omitempty"`
-	SilentSince     int64  `json:"silent_since,omitempty"`
+	// WaitReason 是中文原文，给旧客户端；Wait 是机器码，面板按当前语言合成
+	WaitReason  string          `json:"wait_reason,omitempty"`
+	Wait        *scheduler.Wait `json:"wait,omitempty"`
+	SilentSince int64           `json:"silent_since,omitempty"`
+	// 只在单个任务的详情里给：重跑自哪个任务、被重跑成了哪些任务（带状态，详情页标出重跑后有没有成功）
+	RerunParent *store.JobRef  `json:"rerun_parent,omitempty"`
+	Reruns      []store.JobRef `json:"reruns,omitempty"`
 }
 
 func (s *Server) withProfile(j *store.Job) *store.Job {
@@ -521,9 +554,9 @@ func (s *Server) withProfile(j *store.Job) *store.Job {
 
 func (s *Server) views(jobs []*store.Job) []jobView {
 	pos := map[int64]int{}
-	var waitReasons map[int64]string
+	var waits map[int64]scheduler.Wait
 	if s.Mgr != nil {
-		waitReasons = s.Mgr.WaitReasons()
+		waits = s.Mgr.Waits()
 	}
 	if slices.ContainsFunc(jobs, func(j *store.Job) bool { return j.Status == store.StatusQueued }) {
 		queued, _ := s.Store.JobsByStatus(store.StatusQueued)
@@ -533,7 +566,10 @@ func (s *Server) views(jobs []*store.Job) []jobView {
 	}
 	out := make([]jobView, len(jobs))
 	for i, j := range jobs {
-		v := jobView{Job: s.withProfile(j), QueuePos: pos[j.ID], TracebackOffset: j.TracebackOffset, WaitReason: waitReasons[j.ID]}
+		v := jobView{Job: s.withProfile(j), QueuePos: pos[j.ID], TracebackOffset: j.TracebackOffset}
+		if w, ok := waits[j.ID]; ok {
+			v.WaitReason, v.Wait = w.Text(), &w
+		}
 		if s.Mgr != nil && j.Status == store.StatusRunning {
 			v.SilentSince = s.Mgr.RuntimeView(j.ID).SilentSince
 		}
@@ -563,8 +599,10 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		f.FinishedFromEvent, f.FinishedToEvent = from, to
 	}
-	// order=ended：只要已结束的，按结束时间倒序，用 before / before_id 游标翻页
+	// order=ended：只要已结束的，按结束时间倒序，用 before / before_id 游标翻页；
+	// order=asc：按 id 从旧到新，排队任务就是队列顺序
 	f.ByEnded = q.Get("order") == "ended"
+	f.Ascending = q.Get("order") == "asc"
 	f.Before, _ = strconv.ParseInt(q.Get("before"), 10, 64)
 	f.BeforeID, _ = strconv.ParseInt(q.Get("before_id"), 10, 64)
 	size, _ := strconv.Atoi(q.Get("size"))
@@ -606,13 +644,23 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	j, err := s.Mgr.Submit(req)
-	if scheduler.IsValidation(err) {
-		writeErrE(w, 400, err)
+	j, existed, err := s.Mgr.SubmitOnce(req)
+	var ve *scheduler.ValidationError
+	if errors.As(err, &ve) {
+		status := 400
+		if ve.Code == scheduler.CodeSubmitKeyConflict {
+			status = http.StatusConflict
+		}
+		writeErrE(w, status, err)
 		return
 	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
+		return
+	}
+	if existed {
+		// 同一个 submit_key 重复提交：不新建，返回已有的任务（200，新建是 201）
+		writeJSON(w, 200, s.views([]*store.Job{j})[0])
 		return
 	}
 	s.Store.Audit(auth.ClientIP(r), "submit", fmt.Sprintf("#%d %s", j.ID, j.Name))
@@ -624,8 +672,21 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, 200, s.views([]*store.Job{j})[0])
+	v := s.views([]*store.Job{j})[0]
+	// 重跑关系只是辅助信息，读不到就不显示，不让详情页整页报错
+	if j.RerunOf != nil {
+		if p, err := s.Store.GetJob(*j.RerunOf); err == nil {
+			v.RerunParent = &store.JobRef{ID: p.ID, Status: p.Status}
+		}
+	}
+	if reruns, err := s.Store.Reruns(j.ID, maxRerunRefs); err == nil {
+		v.Reruns = reruns
+	}
+	writeJSON(w, 200, v)
 }
+
+// 详情页最多列出的重跑任务数
+const maxRerunRefs = 5
 
 func (s *Server) jobEnv(w http.ResponseWriter, r *http.Request) {
 	j, ok := s.jobFromPath(w, r)

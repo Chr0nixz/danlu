@@ -202,13 +202,17 @@ func pathAncestors(path string) []string {
 	return paths
 }
 
+// manifestJob 从 input 往上找 danlu.json，认出写它的任务。清单指向的任务不在、或者不是同一个任务时，继续往上找。
 func manifestJob(st JobStore, input string) (*store.Job, error) {
 	for current := input; ; current = filepath.Dir(current) {
-		id, ok := readManifestID(filepath.Join(current, "danlu.json"))
+		m, ok := readManifest(filepath.Join(current, "danlu.json"))
 		if ok {
-			job, err := st.GetJob(id)
-			if !errors.Is(err, store.ErrNotFound) {
-				return job, err
+			job, err := st.GetJob(m.ID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, err
+			}
+			if err == nil && m.sameJob(job) {
+				return job, nil
 			}
 		}
 		if filepath.Dir(current) == current {
@@ -217,22 +221,42 @@ func manifestJob(st JobStore, input string) (*store.Job, error) {
 	}
 }
 
-func readManifestID(path string) (int64, bool) {
+// manifest 是 danlu.json 里认任务用的几项（完整格式见 runner.manifestDocument）
+type manifest struct {
+	ID        int64  `json:"id"`
+	Workdir   string `json:"workdir"`
+	Command   string `json:"command"`
+	StartedAt *int64 `json:"started_at"`
+}
+
+// sameJob 核对清单是不是这个任务写的。编号在每个数据目录里都从 1 开始，另一个实例
+// （同一台机器上的测试实例）或重装前留下的输出目录，编号会对上本实例里无关的同号任务。
+// 工作目录必须相同（提交后不会变）；两边都有启动时间时必须相同，这一项分得开两个实例里
+// 同一个目录、同一条命令的同号任务。缺启动时间时退而核对命令。名字能改，不比。
+func (m manifest) sameJob(j *store.Job) bool {
+	if m.Workdir == "" || filepath.Clean(m.Workdir) != filepath.Clean(j.Workdir) {
+		return false
+	}
+	if m.StartedAt != nil && j.StartedAt != nil {
+		return *m.StartedAt == *j.StartedAt
+	}
+	return m.Command == j.Cmd
+}
+
+func readManifest(path string) (manifest, bool) {
 	const maxManifestSize = 1 << 20
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxManifestSize {
-		return 0, false
+		return manifest{}, false
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return 0, false
+		return manifest{}, false
 	}
 	defer file.Close()
-	var manifest struct {
-		ID int64 `json:"id"`
+	var m manifest
+	if err := json.NewDecoder(io.LimitReader(file, maxManifestSize)).Decode(&m); err != nil || m.ID <= 0 {
+		return manifest{}, false
 	}
-	if err := json.NewDecoder(io.LimitReader(file, maxManifestSize)).Decode(&manifest); err != nil || manifest.ID <= 0 {
-		return 0, false
-	}
-	return manifest.ID, true
+	return m, true
 }

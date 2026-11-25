@@ -79,7 +79,7 @@ func ensureCommandPath(home, shell, zdotdir, exe string) error {
 			continue
 		}
 		// 放在 .bashrc 的非交互 return 之前，ssh 主机 danlu ... 才能找到命令。
-		if err := os.WriteFile(path, append([]byte(commandPathBlock), content...), 0o644); err != nil {
+		if err := prependFile(path, []byte(commandPathBlock)); err != nil {
 			return err
 		}
 	}

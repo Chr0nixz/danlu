@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"time"
 
 	"danlu/internal/config"
 	"danlu/internal/retention"
-	"danlu/internal/store"
 )
 
 func cmdPrune(args []string) error {
@@ -17,6 +17,9 @@ func cmdPrune(args []string) error {
 	older := fs.String("older-than", "", "清理结束超过这个时长的任务，例如 72h；0s 表示所有已结束任务")
 	jsonOut := fs.Bool("json", false, "输出 JSON")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return errHelpShown // 用法已经打印，以 0 退出
+		}
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -43,7 +46,7 @@ func cmdPrune(args []string) error {
 		}
 		opt.OlderThan = &d
 	}
-	st, err := store.Open(p.DB)
+	st, err := openStore(p)
 	if err != nil {
 		return err
 	}

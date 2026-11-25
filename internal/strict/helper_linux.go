@@ -84,9 +84,12 @@ func helperStart(ctx context.Context, uid int, in io.Reader, now time.Time) (Sta
 	if err := ownedDir(req.RunRoot, uid); err != nil {
 		return StartResult{}, err
 	}
+	// 资源限制照抄 danlu 自己的，但 danlu_pid 是调用者给的：先读，再确认它是助手的祖先
+	// （danlu → sudo → 助手）。只核对 uid 不够，同一 uid 下还可能有组或限制更宽的进程（容器、sudo -g 起的进程）。
+	// 读完再查祖先链：那时它还是祖先，说明期间没退出，读到的就是它的，不是复用了 pid 号的别的进程
 	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", req.DanluPID))
 	if err != nil {
-		return StartResult{}, fmt.Errorf("读不到 danlu 进程 %d: %w", req.DanluPID, err)
+		return StartResult{}, fmt.Errorf("读不到 danlu 进程 %d 的状态", req.DanluPID)
 	}
 	creds, err := ParseStatus(string(status))
 	if err != nil {
@@ -95,14 +98,34 @@ func helperStart(ctx context.Context, uid int, in io.Reader, now time.Time) (Sta
 	if creds.UID != uid {
 		return StartResult{}, fmt.Errorf("进程 %d 不属于调用者", req.DanluPID)
 	}
-	limits, _ := os.ReadFile(fmt.Sprintf("/proc/%d/limits", req.DanluPID))
+	limitsText, err := os.ReadFile(fmt.Sprintf("/proc/%d/limits", req.DanluPID))
+	if err != nil {
+		return StartResult{}, fmt.Errorf("读不到 danlu 进程 %d 的资源限制", req.DanluPID)
+	}
+	limits := LimitProps(string(limitsText))
+	if len(limits) == 0 {
+		// 读不出就用 systemd 系统服务的默认值，可能比这个用户本来的限制宽
+		return StartResult{}, fmt.Errorf("解析不了 danlu 进程 %d 的资源限制", req.DanluPID)
+	}
+	readStatus := func(pid int) (string, error) {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		return string(b), err
+	}
+	if !IsAncestor(os.Getpid(), req.DanluPID, readStatus) {
+		return StartResult{}, fmt.Errorf("进程 %d 不是调用助手的 danlu", req.DanluPID)
+	}
 	devices, err := DevicePlan(LinuxHost(), req.GPUs)
 	if err != nil {
 		return StartResult{}, err
 	}
-	unit := Unit{Name: UnitName(uid, req.RunRoot, req.JobID, now), Creds: creds, Devices: devices,
-		Limits: LimitProps(string(limits)), JobID: req.JobID, Exec: ExecLine(req)}
+	unit := Unit{Name: UnitName(uid, req.RunRoot, req.JobID, now), UID: uid, Devices: devices,
+		Limits: limits, JobID: req.JobID, Exec: ExecLine(req)}
 	if out, err := runTool(ctx, "systemd-run", unit.Args()...); err != nil {
+		// systemd-run 报错时单元可能已经起来了（等 D-Bus 回答超时之类）：停掉它，免得任务脱管运行。
+		// 单元名带时间戳，只会是这一次的；停一个不存在的单元也无害。ctx 可能已经到期，另给一个
+		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, _ = runTool(stopCtx, "systemctl", "stop", "--no-block", unit.Name)
+		cancel()
 		return StartResult{}, fmt.Errorf("systemd-run 失败: %v %s", err, clip(out))
 	}
 	// Type=exec：systemd-run 返回时 ExecStart 已经 exec 成功。任务立刻结束的话 MainPID 是 0，
@@ -115,15 +138,16 @@ func helperStart(ctx context.Context, uid int, in io.Reader, now time.Time) (Sta
 	return StartResult{Unit: unit.Name, PID: pid}, nil
 }
 
-// ownedDir 确认目录属于调用者：助手只在调用者自己的数据目录下启动任务
+// ownedDir 确认目录属于调用者：助手只在调用者自己的数据目录下启动任务。
+// 出错时不把 stat 的原始错误带回去：调用者能借它探测只有 root 看得到的路径存不存在
 func ownedDir(path string, uid int) error {
 	st, err := os.Stat(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s 不存在或不是调用者的目录", path)
 	}
 	sys, ok := st.Sys().(*syscall.Stat_t)
 	if !st.IsDir() || !ok || int(sys.Uid) != uid {
-		return fmt.Errorf("%s 不是调用者的目录", path)
+		return fmt.Errorf("%s 不存在或不是调用者的目录", path)
 	}
 	return nil
 }

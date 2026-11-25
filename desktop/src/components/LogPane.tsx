@@ -1,4 +1,4 @@
-import { logToHtml, useJobLog, type Api } from '@danlu/core'
+import { apiErrorText, logToHtml, useJobLog, type Api } from '@danlu/core'
 import { t } from '../lib/i18n'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Download, Search, WrapText, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -10,7 +10,7 @@ import { cx, ErrorText } from './ui'
  * Ctrl+F 搜索用 CSS Custom Highlight API 标出命中，不改动日志的 DOM。
  */
 export function LogPane({ api, jobId, onDownload }: { api: Api; jobId: number; onDownload?: () => void }) {
-  const { raw, start, loading, error, ended, loadingOlder, loadOlder } = useJobLog(api, jobId)
+  const { raw, start, loading, error, ended, loadingOlder, olderError, loadOlder } = useJobLog(api, jobId)
   const [follow, setFollow] = useState(true)
   const [wrap, setWrap] = useState(true)
   const box = useRef<HTMLDivElement>(null)
@@ -149,6 +149,11 @@ export function LogPane({ api, jobId, onDownload }: { api: Api; jobId: number; o
           <button type="button" className={tb} title={t('log.search_title', { mod: MOD })} onClick={() => setSearching(true)}>
             <Search />
           </button>
+        )}
+        {start > 0 && !!olderError && !loadingOlder && (
+          <span role="alert" className="truncate px-1 text-[#ff7b72]" title={apiErrorText(olderError)}>
+            {t('log.earlier_failed')}
+          </span>
         )}
         {start > 0 && (
           <button type="button" className={tb} disabled={loadingOlder} onClick={loadOlder}>

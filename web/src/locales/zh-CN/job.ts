@@ -31,6 +31,9 @@ export const job = {
   'job.notify_disable': '关闭结束时推送',
   'job.notify_enabled': '已开启结束提醒',
   'job.notify_disabled': '已关闭结束提醒',
+  'job.notify_push_off_title': '{action}（这台服务器还没开启手机推送，到时不会发出）',
+  'job.notify_push_off': '已设为结束时推送，但这台服务器的手机推送还没开启，到时收不到。',
+  'job.notify_push_settings': '推送设置',
 
   // 标星
   'job.star': '标星',
@@ -133,6 +136,8 @@ export const job = {
   'job.row_tracker': '实验记录',
   'job.row_rerun_of': '重跑自',
   'job.job_link': '任务 #{id}',
+  'job.lineage_from': '重跑自',
+  'job.lineage_to': '已重跑为',
   'job.row_code_from': '代码来源',
   'job.code_from_link': '任务 #{id} 的快照',
   'job.snapshot_note_toggle': '查看使用现有文件的情况',
@@ -155,6 +160,7 @@ export const job = {
   'job.log_window_hint': '只保留了最近的部分，完整日志请下载',
   'job.log_window_full': '定位窗口已读满',
   'job.log_load_older': '加载更早',
+  'job.log_load_older_failed': '更早的日志没读到，可以再试',
   'job.log_wrap_title': '自动换行',
   'job.log_wrap': '换行',
   'job.log_download_title': '下载完整日志',

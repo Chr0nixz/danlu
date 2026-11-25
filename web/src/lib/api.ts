@@ -1,4 +1,4 @@
-import { ApiError, createApi, type Transport } from '@danlu/core'
+import { ApiError, createApi, observeServerDate, type Transport } from '@danlu/core'
 import { t } from './i18n'
 
 // 面板和服务器同源：直接 fetch，靠 gate cookie 和会话 cookie 认证
@@ -7,11 +7,14 @@ const transport: Transport = {
     let res: Response
     let text: string
     try {
+      const sent = Date.now()
       res = await fetch(path, {
         method,
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         body,
       })
+      // 本机时钟不准时，等待时长、倒计时都会偏：按响应头 Date 校正 now()
+      observeServerDate(res.headers.get('Date'), sent, Date.now())
       text = await res.text()
     } catch {
       // 没连上服务器：status 0，和桌面端同一套约定；文案直白，别把浏览器的英文 TypeError 抛给用户

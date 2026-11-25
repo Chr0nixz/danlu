@@ -20,6 +20,8 @@ export interface JobLog {
   /** 任务结束且日志读完了 */
   ended: JobStatus | null
   loadingOlder: boolean
+  /** 上一次"往前多读"失败的原因，下次成功或换任务时清掉。和 error 分开：已有的日志和实时接收都不受影响，可以再点 */
+  olderError: unknown
   /** 往前多读一段，接在开头 */
   loadOlder(): Promise<void>
   /** 初始内容从明确的字节偏移开始，而非从日志中段截取 */
@@ -38,6 +40,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
   const [error, setError] = useState<unknown>(null)
   const [ended, setEnded] = useState<JobStatus | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
+  const [olderError, setOlderError] = useState<unknown>(null)
   const [exactStart, setExactStart] = useState(false)
   const [windowLimited, setWindowLimited] = useState(false)
   const next = useRef(0)
@@ -57,6 +60,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
     put('')
     setStart(0)
     setError(null)
+    setOlderError(null)
     setEnded(null)
     setLoading(true)
     setExactStart(offset !== undefined)
@@ -140,6 +144,7 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
     const room = offset === undefined ? tail : Math.min(tail, maxChars - buffered.current)
     if (room <= 0) return
     setLoadingOlder(true)
+    setOlderError(null)
     try {
       const from = Math.max(0, start - room)
       const r = await api.log(jobId, { offset: from, limit: start - from })
@@ -149,11 +154,11 @@ export function useJobLog(api: Api, jobId: number, { tail = 256 * 1024, maxChars
       setStart(r.start)
       setExactStart(false)
     } catch (e) {
-      setError(e)
+      setOlderError(e)
     } finally {
       setLoadingOlder(false)
     }
   }, [api, jobId, start, tail, offset, maxChars, put])
 
-  return { raw, start, loading, error, ended, loadingOlder, loadOlder, exactStart, windowLimited }
+  return { raw, start, loading, error, ended, loadingOlder, olderError, loadOlder, exactStart, windowLimited }
 }

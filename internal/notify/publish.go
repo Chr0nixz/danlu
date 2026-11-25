@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,38 @@ type Message struct {
 	Body     string `json:"body"`
 	Click    string `json:"click,omitempty"`
 	Priority int    `json:"priority"`
+	// 发送失败后留在发件箱里重试（见 retryLater）：已经重试的次数、下一次的时间、第一次失败的时间（Unix 秒）
+	Retries      int   `json:"retries,omitempty"`
+	RetryAt      int64 `json:"retry_at,omitempty"`
+	FailingSince int64 `json:"failing_since,omitempty"`
+}
+
+// SendError 是一次发送（含几次快速重试）最后的失败。错误文字不带服务端的响应体：里面可能回显 topic 和令牌。
+type SendError struct {
+	msg        string
+	Status     int           // HTTP 状态码；连不上时为 0
+	RetryAfter time.Duration // 429 响应的 Retry-After
+}
+
+func (e *SendError) Error() string { return e.msg }
+
+// Permanent 表示重试也没用：重定向和 4xx（408、429 除外）说明地址、令牌或消息本身有问题。
+func (e *SendError) Permanent() bool {
+	return e.Status >= 300 && e.Status < 500 && e.Status != http.StatusRequestTimeout && e.Status != http.StatusTooManyRequests
+}
+
+// retryAfter 解析 Retry-After：秒数或 HTTP 日期。
+func retryAfter(v string, now time.Time) time.Duration {
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil && t.After(now) {
+		return t.Sub(now)
+	}
+	return 0
 }
 
 type Publisher struct {
@@ -56,7 +89,7 @@ func (p *Publisher) Send(ctx context.Context, message Message) error {
 	if delay == 0 {
 		delay = 500 * time.Millisecond
 	}
-	var last error
+	var last *SendError
 	for attempt := range 4 {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -79,9 +112,9 @@ func (p *Publisher) Send(ctx context.Context, message Message) error {
 		if err != nil {
 			var timeout net.Error
 			if errors.As(err, &timeout) && timeout.Timeout() {
-				last = errors.New("连接 ntfy 超时")
+				last = &SendError{msg: "连接 ntfy 超时"}
 			} else {
-				last = errors.New("连接 ntfy 失败，请检查网络或证书")
+				last = &SendError{msg: "连接 ntfy 失败，请检查网络或证书"}
 			}
 		} else {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8192))
@@ -90,7 +123,11 @@ func (p *Publisher) Send(ctx context.Context, message Message) error {
 				return nil
 			}
 			// 服务端的响应体可能回显 token、topic 等信息，不保存也不转发。
-			last = fmt.Errorf("ntfy 返回 HTTP %d", resp.StatusCode)
+			last = &SendError{msg: fmt.Sprintf("ntfy 返回 HTTP %d", resp.StatusCode), Status: resp.StatusCode,
+				RetryAfter: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
+			if last.Permanent() || resp.StatusCode == http.StatusTooManyRequests {
+				return last // 重试也没用；限流时马上再发只会更久，按 Retry-After 留给发件箱
+			}
 		}
 		if attempt < 3 {
 			timer := time.NewTimer(delay << attempt)

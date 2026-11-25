@@ -19,3 +19,6 @@ func platformChecks(context.Context, config.Paths) []Check {
 		{"time_sync", "warn", "系统时间同步", "当前平台未检查时间同步", "在 Linux GPU 服务器上运行完整体检"},
 	}
 }
+
+// 命令行入口只在 Linux 上提供
+func localSocketCheck(config.Paths) (Check, bool) { return Check{}, false }

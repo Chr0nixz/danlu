@@ -2,13 +2,16 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"danlu/internal/config"
+	"danlu/internal/gpu"
 	"danlu/internal/tlsutil"
 )
 
@@ -121,5 +124,49 @@ func TestRunLocalCA(t *testing.T) {
 	checks = byID(t, Run(context.Background(), c, p, "v0.2.0", 1))
 	if got := checks["cert_ip"]; got.Level != "fail" || !strings.Contains(got.Fix, "cert --regen") {
 		t.Errorf("证书不含 public_ip 时应失败并提示重新生成: %+v", got)
+	}
+}
+
+// 一项检查卡住（nvidia-smi 卡在驱动里、statfs 卡在失联存储上）时，体检照样按时返回，那一项报没有返回
+func TestRunItemsBoundsStuckCheck(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	items := []item{
+		{"gpu", "NVIDIA 驱动与 GPU", "检查驱动", func(context.Context) []Check { <-release; return nil }},
+		{"port", "服务端口", "", func(context.Context) []Check { return []Check{{ID: "port", Level: "ok"}} }},
+		{"strict", "严格限卡助手", "", func(context.Context) []Check { return nil }},
+	}
+	start := time.Now()
+	checks := runItems(context.Background(), items, 100*time.Millisecond)
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("卡住的检查拖住了体检")
+	}
+	if len(checks) != 2 || checks[0].ID != "gpu" || checks[0].Level != "fail" || !strings.Contains(checks[0].Detail, "没有返回") || checks[1].ID != "port" {
+		t.Fatalf("应按原顺序返回，卡住的那项报没有返回: %+v", checks)
+	}
+}
+
+type cacheGPUs struct {
+	at  time.Time
+	err error
+}
+
+func (c cacheGPUs) Latest() ([]gpu.GPU, time.Time, error) {
+	return []gpu.GPU{{Index: 0}, {Index: 1}}, c.at, c.err
+}
+func (c cacheGPUs) MachineLatest() (gpu.MachineInfo, time.Time, error) {
+	return gpu.MachineInfo{DriverVersion: "550.54", CUDAVersion: "12.4"}, c.at, nil
+}
+
+// 网页体检读服务的采样缓存，不另起 nvidia-smi
+func TestGPUCacheCheck(t *testing.T) {
+	if c := gpuCacheCheck(cacheGPUs{at: time.Now()}); c.Level != "ok" || !strings.Contains(c.Detail, "550.54") || !strings.Contains(c.Detail, "2 张 GPU") {
+		t.Fatalf("缓存正常时: %+v", c)
+	}
+	if c := gpuCacheCheck(cacheGPUs{at: time.Now(), err: errors.New("GPU 数据已经 30 秒没有更新")}); c.Level != "fail" || !strings.Contains(c.Detail, "没有更新") {
+		t.Fatalf("缓存过期时: %+v", c)
+	}
+	if c := gpuCacheCheck(cacheGPUs{}); c.Level != "warn" {
+		t.Fatalf("还没采到时: %+v", c)
 	}
 }

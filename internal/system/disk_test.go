@@ -74,3 +74,42 @@ func TestDiskExistingParent(t *testing.T) {
 		t.Fatalf("现有目录 = %q, %v", got, err)
 	}
 }
+
+// 出错的目录记下上次的分区 ID；低余量提示带回差，余量在线附近来回不反复提示
+func TestDiskMemoryKeepsIDAndHysteresis(t *testing.T) {
+	const gb = 1 << 30
+	warn := uint64(100 * gb) // 回差 5 GB
+	avail := uint64(99 * gb)
+	broken := false
+	stat := func(path string) (string, uint64, uint64, error) {
+		if broken {
+			return "", 0, 0, errors.New("查询超时")
+		}
+		return "nfs", 1000 * gb, avail, nil
+	}
+	var m diskMemory
+	sample := func() Disk {
+		disks := collectDisks([]string{"/nfs"}, warn, stat)
+		m.apply(disks, warn)
+		return disks[0]
+	}
+	if d := sample(); !d.Warn {
+		t.Fatalf("低于提示线应提示: %+v", d)
+	}
+	broken = true
+	if d := sample(); d.Error == "" || d.ID != "" || d.LastID != "nfs" {
+		t.Fatalf("出错的条目应带上次的分区 ID: %+v", d)
+	}
+	broken, avail = false, 102*gb
+	if d := sample(); !d.Warn {
+		t.Fatalf("刚回到提示线以上、还在回差内时应继续提示（中间出错也记得）: %+v", d)
+	}
+	avail = 106 * gb
+	if d := sample(); d.Warn {
+		t.Fatalf("超过回差后应恢复: %+v", d)
+	}
+	avail = 102 * gb
+	if d := sample(); d.Warn {
+		t.Fatalf("恢复以后在回差内不提示，跌破提示线才提示: %+v", d)
+	}
+}

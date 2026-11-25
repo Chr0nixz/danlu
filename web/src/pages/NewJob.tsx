@@ -96,7 +96,8 @@ export function NewJob() {
       </div>
     )
   }
-  if (sourceId && source.error) return <ErrorBox error={source.error} />
+  // 窗口重新获得焦点时会重取源任务，失败了也不能把填了一半的表单换成报错
+  if (sourceId && source.error && !source.data) return <ErrorBox error={source.error} />
   return <JobForm key={`${formMode}-${sourceId ?? ''}-${generation}`} source={source.data ?? null} formMode={formMode} prefs={prefs} onReset={() => setGeneration((g) => g + 1)} />
 }
 
@@ -109,7 +110,7 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
   const recent = useQuery({ queryKey: ['recentWorkdirs'], queryFn: api.recentWorkdirs })
   const formRef = useRef<HTMLFormElement>(null)
   const uid = useId()
-  const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, memo: `${uid}-memo`, env: `${uid}-env` }
+  const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, memo: `${uid}-memo`, env: `${uid}-env`, notifyOff: `${uid}-notify-off` }
 
   const rerun = formMode === 'rerun'
   const canRestore = !!source?.snapshot_ok && !source.pruned_at && (source.pid > 0 || source.ended_at !== null)
@@ -137,7 +138,10 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
   const draft: Draft = { name, memo, workdir, condaEnv, cmd, mode, count, pinned, envText, inheritBashrc, useSnapshot }
   const picksGpus = cmdPicksGpus(cmd)
   // 严格限卡开着时程序只看得到分到的卡、从 0 编号，命令里自己选卡的提示要换个说法
-  const strictOn = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 }).data?.strict?.enabled ?? false
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 }).data
+  const strictOn = settings?.strict?.enabled ?? false
+  // 服务器没开手机推送时勾"结束时推送"也收不到，勾上的时候说清楚（旧服务器没有 notify 字段，不提示）
+  const pushOff = settings?.notify ? !settings.notify.enabled : false
   const draftJson = JSON.stringify(draft)
   const pristine = useRef(saved ? null : draftJson)
   const submitted = useRef(false)
@@ -418,9 +422,16 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
 
         <FormRow label={t('newjob.notify')} hint={t('newjob.notify_hint')}>
           <label className="inline-flex min-h-9 items-center gap-2 text-ui max-sm:min-h-11">
-            <input type="checkbox" className="size-4 accent-inv" checked={notifyDone} onChange={(e) => setNotifyDone(e.target.checked)} />
+            <input type="checkbox" className="size-4 accent-inv" checked={notifyDone} onChange={(e) => setNotifyDone(e.target.checked)}
+              aria-describedby={notifyDone && pushOff ? ids.notifyOff : undefined} />
             {t('newjob.notify_done')}
           </label>
+          {notifyDone && pushOff && (
+            <p id={ids.notifyOff} className="text-xs leading-relaxed text-warn">
+              {t('newjob.notify_push_off')}
+              <Link to="/settings/mobile" className="ml-1.5 font-medium text-fg underline decoration-fg/30 underline-offset-2 hover:decoration-fg">{t('newjob.notify_push_settings')}</Link>
+            </p>
+          )}
         </FormRow>
 
         <FormRow label={t('newjob.env')} hint={t('newjob.env_hint')} htmlFor={ids.env}>

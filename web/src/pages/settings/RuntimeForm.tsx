@@ -48,7 +48,7 @@ export function RuntimeForm<K extends string>({
   crossCheck?: (values: Record<K, number>, changed: Record<K, boolean>) => FormErrors<Record<K, ItemField>>
   intercept?: (patch: SettingsPatch<K>, save: () => void) => void
   savedText?: string
-  /** intercept 正在做事（例如预览），保存按钮显示忙 */
+  /** intercept 正在做事（例如预览、等确认）：保存按钮显示忙，输入框锁住，免得改了没预览过的值 */
   busy?: boolean
   /** 各行下方的补充内容，例如预览出错 */
   children?: ReactNode
@@ -84,28 +84,33 @@ export function RuntimeForm<K extends string>({
     for (const k of keys) if (!found[k] && cross[k]) found[k] = cross[k]
     if (!f.check(found, keys) || !f.dirty) return
     if (intercept) {
+      // 确认后保存的是交给 intercept 的这一份，不是确认那一刻的表单
+      const snapshot = f.form
       const patch: SettingsPatch<K> = {}
-      for (const k of keys) if (f.changed[k]) patch[k] = fieldValue(items[k], f.form[k])
-      intercept(patch, () => f.m.mutate())
+      for (const k of keys) if (f.changed[k]) patch[k] = fieldValue(items[k], snapshot[k])
+      intercept(patch, () => f.m.mutate(snapshot))
     } else f.m.mutate()
   }
 
   return (
     <form onSubmit={submit} noValidate>
       <Section title={title} desc={desc} footer={<SaveFooter saved={f.saved} dirty={f.dirty} pending={f.m.isPending || busy} savedText={savedText} />}>
-        <Rows>
-          {keys.map((k) => (
-            <SettingRow key={k} label={meta[k].label} hint={meta[k].hint} item={items[k]} value={f.form[k]} id={f.id(k)} error={f.errors[k]} onChange={(v) => f.edit(k, v)}>
-              {extra?.[k]?.(f.form[k], values)}
-            </SettingRow>
-          ))}
-          {children}
-          {f.m.error && (
-            <div className="px-4 py-3 sm:px-5">
-              <ErrorBox error={f.m.error} />
-            </div>
-          )}
-        </Rows>
+        {/* fieldset 的 disabled 一次锁住里面所有输入框 */}
+        <fieldset disabled={busy} className="m-0 min-w-0 border-0 p-0">
+          <Rows>
+            {keys.map((k) => (
+              <SettingRow key={k} label={meta[k].label} hint={meta[k].hint} item={items[k]} value={f.form[k]} id={f.id(k)} error={f.errors[k]} onChange={(v) => f.edit(k, v)}>
+                {extra?.[k]?.(f.form[k], values)}
+              </SettingRow>
+            ))}
+            {children}
+            {f.m.error && (
+              <div className="px-4 py-3 sm:px-5">
+                <ErrorBox error={f.m.error} />
+              </div>
+            )}
+          </Rows>
+        </fieldset>
       </Section>
     </form>
   )

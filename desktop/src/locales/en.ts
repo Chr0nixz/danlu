@@ -281,6 +281,7 @@ export const en: { [K in keyof typeof zhCN]: Message } = {
   'log.next': 'Next',
   'log.search_title': 'Search ({mod}+F)',
   'log.earlier': 'Earlier',
+  'log.earlier_failed': "Couldn't load earlier lines",
   'log.loading': 'Loading…',
   'log.waiting': 'Waiting for output…',
   'log.back_bottom': 'Back to bottom',

@@ -72,7 +72,7 @@ export function Layout() {
   // 标签页标题带上运行和失败数，和 IDE 并排开着时不用切过来也能看到
   const active = useActiveJobs()
   const failed = useRecentFailures().data ?? 0
-  const running = active.data?.jobs.filter((j) => j.status === 'running').length ?? 0
+  const running = active.data?.runningTotal ?? 0
   useEffect(() => {
     const parts = [running && t('layout.title_running', { n: running }), failed && t('layout.title_failed', { n: failed })].filter(Boolean)
     const base = me.data?.hostname ? t('layout.title_host', { hostname: me.data.hostname }) : t('layout.title')
@@ -89,9 +89,10 @@ export function Layout() {
       </a>
       <header className="sticky top-0 z-30 border-b border-line bg-surface">
         <div className="mx-auto flex h-12 max-w-[1200px] items-center gap-3 px-4 sm:px-6">
-          <Link to="/" className="flex h-full min-w-0 items-center gap-2">
+          {/* 品牌不收缩：主机名长时截断主机名，"丹炉"两个字不会被挤成竖排 */}
+          <Link to="/" className="flex h-full shrink-0 items-center gap-2">
             <Brand />
-            <span className="text-sm font-semibold tracking-tight">{t('layout.brand')}</span>
+            <span className="text-sm font-semibold tracking-tight whitespace-nowrap">{t('layout.brand')}</span>
           </Link>
           {me.data?.hostname && (
             <>
