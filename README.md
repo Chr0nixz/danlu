@@ -12,7 +12,7 @@
 - 公网访问：随机端口 + 安全入口 + 密码 + HTTPS（本地 CA，不需要域名）
 - 界面电脑和手机都能用：首页一屏看清在跑什么、有没有失败、哪张卡空着；跟随系统深浅色；快捷键 `N` 新建任务、`/` 搜索、`Ctrl+Enter` 提交
 
-管理多台服务器用桌面客户端（`desktop/`，目前只有 Windows 版）。它常驻托盘，把各台的空卡和任务汇总在一个窗口里，在任务失败或服务器异常时发系统通知；升级和服务管理也在客户端里做，通过 SSH 执行。服务器之间互不连接，汇总都在客户端完成。用法见下文"桌面客户端"。
+管理多台服务器用桌面客户端（`desktop/`）。它常驻菜单栏或托盘，把各台的空卡和任务汇总在一个窗口里，在任务失败或服务器异常时发系统通知；升级和服务管理也在客户端里做，通过 SSH 执行。只涉及一台服务器的深入操作（快照 diff、任务对比、终端、预约、设置）仍在那台的面板里做。服务器之间互不连接，汇总都在客户端完成。客户端要支持 macOS 和 Windows，macOS 优先；目前只在 Windows 上验证过，macOS 版在 C3 做。用法见下文"桌面客户端"。
 
 设计文档：
 - [docs/ROADMAP.md](docs/ROADMAP.md)：当前的开发规划（先做后端和面板，客户端暂停新功能）；
@@ -326,7 +326,9 @@ bash scripts/dev-wsl.sh  # 启动演示环境（4 张假 GPU，第 3 张模拟�
 
 ### 桌面客户端（`desktop/`）
 
-另外需要 Rust（stable）。Windows 上还需要 WebView2，Windows 11 自带。
+另外需要 Rust（stable）。Windows 上还需要 WebView2，Windows 11 自带；macOS 上需要 Xcode 命令行工具。
+
+客户端目前只在 Windows 上验证过，下面的路径和按键都是 Windows 上的。macOS 版在 C3 做（[docs/CLIENT.md](docs/CLIENT.md) 第 9.3 节），在那之前 macOS 上能编译、能跑单元测试，但还没有作为应用实际用过。
 
 ```bash
 cd desktop && pnpm tauri dev              # 启动客户端（开发模式）

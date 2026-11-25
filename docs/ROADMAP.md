@@ -146,10 +146,13 @@ F1 随 `v0.2.0` 定版。后续功能按 [PLAN.md](PLAN.md) 分批推进。
 
 ## 9. 之后：回到客户端
 
-1. 让客户端跟上定版时的接口。
-2. 在真实服务器上端到端验证 SSH 那一侧：添加服务器、升级、服务管理。同时亲眼确认系统通知弹窗和托盘图标的三种状态。
-3. 做 C3（CLIENT.md 第 11 节）。机器体检和磁盘余量的服务器端已经在这个阶段做好，C3 只需要在客户端里接上。
-4. 通知分工：电脑上的系统通知由客户端发，ntfy 继续负责手机。
+客户端的定位在 2026-11-25 收窄：只做多台汇总、常驻提醒和 SSH 运维，只涉及一台服务器的功能留在面板，客户端跳过来打开；macOS 和 Windows 都支持，macOS 优先（CLIENT.md 第 1 节、第 9.3 节）。所以面板在客户端恢复后仍是单台服务器上的主力界面，本文第 2 节"面板是主力界面"不随这个阶段结束。
+
+1. 先在 macOS 上把客户端跑起来（CLIENT.md 第 9.3 节），CI 加 macOS 的 Rust job；之后在 Windows 上复验。
+2. 让客户端跟上定版时的接口，只接总览、托盘、通知和跨服务器操作用得到的部分。
+3. 在真实服务器上端到端验证 SSH 那一侧：添加服务器、升级、服务管理，先 macOS 后 Windows。同时亲眼确认系统通知弹窗和菜单栏/托盘图标的三种状态。
+4. 做 C3（CLIENT.md 第 11 节），包括"在面板中打开"和它需要的一次性登录票据。机器体检和磁盘余量的服务器端已经在这个阶段做好，C3 只需要在客户端里接上。
+5. 通知分工：电脑上的系统通知由客户端发，ntfy 继续负责手机。
 
 ## 10. 待确认 ❓（括号里是默认做法）
 
@@ -161,6 +164,7 @@ F1 随 `v0.2.0` 定版。后续功能按 [PLAN.md](PLAN.md) 分批推进。
 
 ---
 变更记录
+- v2.25（2026-11-25）：客户端定位收窄（CLIENT.md v0.11）：只做多台汇总、常驻提醒和 SSH 运维，不再和面板功能对齐，面板在客户端恢复后仍是单台服务器上的主力界面；客户端要求 macOS 和 Windows 都支持、macOS 优先。第 9 节改为先做 macOS 版、只接汇总用得到的接口，C3 加上"在面板中打开"。
 - v2.24（2026-11-25）：理想线新增修改排队任务、队列顺序与暂缓（FEATURES 3.1、3.2，PLAN F2）：迁移 20 加 `jobs.queue_order`、`jobs.held`；新增 `POST /api/jobs/{id}/edit`、`/move`、`/hold` 和 `POST /api/jobs/batch`，任务对象加 `held`、详情加 `edited`，等待原因加 `held`（additive，API 版本不变）；事件 `job_edited`、`job_moved`、`job_held` 只记录不推送；只剩暂缓任务时算跑完。Go 单测、Linux vet、三端类型检查、i18n 审计和桌面 clippy 通过；e2e 新增一节待 Linux/CI，面板目视和真机待验。
 - v2.23（2026-11-23）：只有 serve 升级数据库。其他命令改走 `openStore`：只新建库（占着 `serve.lock`），已有的旧库一律拒绝并提示 `danlu restart`；`init --force` 先开库再重新生成 CA，库打不开时什么都不改。11-22 的初版是"拿得到 `serve.lock` 才替它升级"，11-23 审阅指出服务重启的间隙、停着的时候锁也是空的，改成更严的规则。起因是 hsy 上用测试程序执行 `strict status` 把正在运行的旧版服务的库升到了迁移 18，旧服务若重启会因库比它新而起不来。
 - v2.22（2026-11-22）：理想线新增严格限卡（FEATURES 5.4，PLAN F4）：hsy 上用 `scripts/s0/strict-probe.sh` 确认 cgroup 设备控制后 CUDA/NVML/EGL 只看得到放行的卡并从 0 编号；新增 root 助手（`danlu strict install`、sudoers 只放行 start/check）、`danlu job-exec`、迁移 18 `jobs.unit`、`POST /api/settings/strict`（additive，API 版本不变）、告警 `strict_unavailable`。GPU 进程记下启动时的 `CUDA_VISIBLE_DEVICES`（UUID 换成卡号），任务进程跑到没分给它的卡上时告警并推送一次。Go 单测、Linux vet、三端类型检查通过；e2e 新增一节（CI 免密 sudo 下跑）。同日 hsy 测试实例上真机验收通过隔离、编号、取消、重启接管和关开关（CHECKLIST G2/G3 记录），预约配合、LIBERO 和卸载待补。

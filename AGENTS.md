@@ -8,8 +8,8 @@ Danlu (丹炉) is a control panel for GPU training jobs that runs on each GPU se
 
 Direction:
 
-- **Current phase: backend and web panel first.** The web panel is the main interface for now, on desktop and phone alike, so design it as the primary tool, not a fallback. `docs/ROADMAP.md` lists the work items in order and says what counts as done.
-- **Desktop client paused.** Controlling several servers at once is the job of the desktop client: a Tauri app in `desktop/`, built for Windows first with macOS planned. It is designed in `docs/CLIENT.md`. Milestones C1 (skeleton) and C2 (first usable version) are built; C3 waits until the backend and panel reach a stable release. Until then add no client features, but keep `desktop/` compiling and working whenever `/api` changes. Once the client resumes, it becomes the main tool on the desktop and the panel stays as the per-server fallback for phones.
+- **Current phase: backend and web panel first.** The web panel is the main interface for a single server, on desktop and phone alike, and stays so after the client resumes, so design it as the primary tool, not a fallback. `docs/ROADMAP.md` lists the work items in order and says what counts as done.
+- **Desktop client paused.** The desktop client (a Tauri app in `desktop/`, designed in `docs/CLIENT.md`) is the layer across servers, not a second copy of the panel (narrowed 2026-11-25, CLIENT.md §1). It does only what the panel can't: one view of every server's cards and jobs with cross-server submit/cancel/rerun/copy, menu-bar/tray presence with desktop notifications, and operations over SSH (add, deploy, upgrade, service management, health checks). Anything that concerns one server only (snapshot diff, job comparison, web terminal, reservations, strict mode, settings, and future single-server features) stays in the panel; the client links to it ("open in panel", CLIENT.md §5.6) instead of rebuilding it. It must run on both macOS and Windows, macOS first (CLIENT.md §9.3). C1 (skeleton) and C2 (first usable version) are built and were verified on Windows only; C3 waits until the backend and panel reach a stable release and starts with the macOS build. Until then add no client features, but keep `desktop/` compiling and working whenever `/api` changes.
 - **One server per panel.** The panel manages only the server it runs on: no server switcher and no multi-server views. Servers never talk to each other; multi-server aggregation happens in the client. Phone notifications come from the server itself via ntfy (implemented in S2; see `docs/ROADMAP.md` and `docs/PHASES.md`); desktop notifications stay with the client.
 - **Obsolete parts of `docs/DESIGN.md`.** The §4 peer federation (peers, request forwarding, cross-node auto-assignment, the "move to another node" feature) the §5.1 folder-picker submit with snapshot upload, and the §5.7 Let's Encrypt IP certificates are dropped (certificates: `docs/ROADMAP.md` §7.1). Code still reaches the servers through the user's own rsync/scp. The rest of that doc is still a valid backlog; `docs/CLIENT.md` §10 has the mapping.
 - **`/api` is not frozen.** Change it freely, but in the same change update the types and request functions in `packages/core/src` and keep both `web/` and `desktop/` compiling. For an incompatible change, bump `APIVersion` in `internal/api` and `API_VERSION` in `packages/core` together. The client compares it with `/api/me`'s `api_version` to tell which servers need upgrading.
@@ -177,7 +177,7 @@ It has no components and no styles; the two UIs are designed independently. The 
 
 ### Desktop client (`desktop/`)
 
-C1 and C2 are built (`docs/CLIENT.md` §11) and C3 is paused (see Direction): a tray app with a main window (overview, history, servers, settings) and a popover beside the tray. Keep these constraints:
+C1 and C2 are built (`docs/CLIENT.md` §11) and C3 is paused (see Direction): a menu-bar (macOS) / tray (Windows) app with a main window (overview, history, servers, settings) and a popover beside the icon. Keep these constraints:
 
 - **Layout.** `desktop/src` is React + TS + Tailwind + TanStack Query; `desktop/src-tauri` is Rust.
   - Two pages: `index.html` (main window) and `tray.html` (popover, `TrayApp.tsx`).
@@ -195,8 +195,8 @@ C1 and C2 are built (`docs/CLIENT.md` §11) and C3 is paused (see Direction): a 
 - **Talking to servers.** Every HTTP request goes through the Rust commands `api_request` and `api_stream`/`api_stream_close`, which only accept `/api/` paths.
   - In local-ca mode the Rust layer trusts only that server's CA. It re-checks the CA's fingerprint before building a client, using reqwest `tls_certs_only` with rustls and ring.
   - The webview never calls a server directly, and certificate verification is never disabled.
-  - The device token lives in the OS credential store via the `keyring` crate (service `danlu`, account = server name; Windows Credential Manager, Keychain on macOS).
-- **Operations over SSH.** Adding a server, upgrades and service management run the system OpenSSH (`ssh.exe` and `scp.exe` on Windows), so `~/.ssh/config` and ssh-agent apply.
+  - The device token lives in the OS credential store via the `keyring` crate (service `danlu`, account = server name; Keychain on macOS, Windows Credential Manager).
+- **Operations over SSH.** Adding a server, upgrades and service management run the system OpenSSH (`/usr/bin/ssh` and `scp` on macOS, `ssh.exe` and `scp.exe` on Windows), so `~/.ssh/config` and ssh-agent apply.
   - Each operation is one `danlu` subcommand, with `--json` output where the client parses it (`info --json`, `token create --json`, `replace --json`, later `doctor --json`). Service management uses `restart`, `logs`, `entrance --reset`, `port`, `cert --regen` and `passwd --password-stdin`. Add a subcommand on the server instead of scripting shell logic in the client.
   - Secrets go through `ssh::run_danlu_input`, which passes them as a quoted heredoc on stdin, never on a command line.
   - An upgrade scps the binary to `<exe>.new`, then runs `<exe>.new replace --json <exe>`: the new binary renames itself over the old one and restarts the service. The binary comes from the bundle's `bin/` resource dir, or during development from the repo's `dist/`.
@@ -206,12 +206,13 @@ C1 and C2 are built (`docs/CLIENT.md` §11) and C3 is paused (see Direction): a 
   - **Target (C3 release work):** the installer bundles `danlu-linux-amd64` and `danlu-linux-arm64` under `bin/`, and client and server share one version number.
   - **Today:** `tauri.conf.json` bundles no resources, so `ops::find_binary` falls back to the repo's `dist/`, a path compiled in from `CARGO_MANIFEST_DIR`. That fallback only works on the build machine.
   - **Version checks:** the client compares only `api_version`. Server builds are stamped `dev-<timestamp>` unless `VERSION` is set, and the client is still `0.1.0`.
-- **Not Windows-only.** macOS comes later, so keep platform specifics behind small seams: credential store, tray versus menu bar, `Ctrl` versus `⌘` shortcuts, window controls. Don't use Mica, acrylic or vibrancy.
+- **macOS and Windows, macOS first.** Both platforms must work; when C3 resumes, macOS gets running first and Windows is re-verified after. Keep platform specifics behind small seams: credential store, menu bar versus tray, `⌘` versus `Ctrl` (`src/lib/platform.ts`), window controls (system traffic lights on macOS, drawn buttons on Windows), bundle targets and code signing. The known macOS gaps (NSIS-only bundle, `decorations: false` hiding the traffic lights, popover placement, `device_name()`, the `build.ps1` hint, no macOS CI job) are listed in `docs/CLIENT.md` §9.3. Don't use Mica, acrylic or vibrancy.
+- **Don't rebuild the panel.** A feature that concerns one server only goes into `web/`; the client at most gets an "open in panel" entry. When `/api` grows, the client only needs what the overview, tray, notifications and cross-server actions show.
 - **Client-local state.**
   - In Rust `state.json`, because the tray and notifications need it: read failures, prefs and notification watermarks.
   - In `localStorage`, shared by both windows: the project × server → workdir and conda env mapping (`src/lib/local.ts`).
   - A project is the last path component of the workdir. Command history is read from the servers' job records, not stored locally.
-- **Debugging the real app.** Start it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 pnpm tauri dev`. Both pages then show up at `http://127.0.0.1:9222/json` for CDP: evaluate JS, take screenshots, emulate dark mode.
+- **Debugging the real app.** On Windows, start it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 pnpm tauri dev`. Both pages then show up at `http://127.0.0.1:9222/json` for CDP: evaluate JS, take screenshots, emulate dark mode. On macOS the webview is WKWebView, which has no CDP; in a `pnpm tauri dev` build, right-click → Inspect Element opens the Web Inspector.
 
 ## Conventions
 
