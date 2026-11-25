@@ -65,14 +65,6 @@ func (t Target) sudoersUser() string {
 	return "#" + strconv.Itoa(t.UID)
 }
 
-func sudoersRule(t Target) string {
-	return fmt.Sprintf(`# 由 danlu strict install 生成：允许 uid %[1]d 以 root 运行严格限卡助手的 start 和 check。
-# 助手只会把这个用户自己的任务放进只放行分到的卡的 systemd 服务。删除：sudo danlu strict uninstall
-Defaults!%[2]s !requiretty
-%[3]s ALL=(root) NOPASSWD: %[2]s start, %[2]s check
-`, t.UID, HelperPath, t.sudoersUser())
-}
-
 // Install 以 root 安装助手和 sudoers 规则。self 是当前 danlu 程序的路径。
 func Install(t Target, self string, out io.Writer) error {
 	if os.Geteuid() != 0 {
@@ -94,17 +86,21 @@ func Install(t Target, self string, out io.Writer) error {
 
 	dst := sudoersPath(t.UID)
 	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, []byte(sudoersRule(t)), 0o440); err != nil {
-		return err
-	}
 	defer os.Remove(tmp)
-	if err := os.Chmod(tmp, 0o440); err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if b, err := runSbin(ctx, "visudo", "-cf", tmp); err != nil {
-		return fmt.Errorf("sudoers 规则校验失败: %v %s", err, clip(b))
+	// 临时文件名带点，sudo 的 #includedir 不读它：校验通过之前规则不会生效
+	_, err := pickSudoersRule(t.UID, t.sudoersUser(), func(rule string) ([]byte, error) {
+		if err := os.WriteFile(tmp, []byte(rule), 0o440); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(tmp, 0o440); err != nil {
+			return nil, err
+		}
+		return runSbin(ctx, "visudo", "-cf", tmp)
+	})
+	if err != nil {
+		return err
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		return err

@@ -178,14 +178,6 @@ func runPath(ctx context.Context, path string, args ...string) ([]byte, error) {
 	return buf.Bytes(), err
 }
 
-func clip(b []byte) string {
-	s := strings.TrimSpace(string(b))
-	if len(s) > 500 {
-		s = s[:500] + "…"
-	}
-	return s
-}
-
 // LinuxHost 读真实的 /proc、/sys、/dev。
 func LinuxHost() Host {
 	return Host{Proc: "/proc", Sys: "/sys", Dev: "/dev", Major: func(path string) (uint32, bool) {

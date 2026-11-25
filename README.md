@@ -296,7 +296,7 @@ mkdir -p ~/.claude/skills/danlu && cp skills/danlu/SKILL.md ~/.claude/skills/dan
 sudo ~/bin/danlu strict install      # 用跑 danlu 的那个用户执行；换了路径就写完整路径
 ```
 
-它把当前程序复制成 `/usr/local/libexec/danlu-gpu-helper`，并写一条只放行它两个子命令的 `/etc/sudoers.d/danlu-gpu-<uid>`。装好以后在面板「设置 → 调度 → 严格限卡」打开，只影响之后启动的任务：
+它把当前程序复制成 `/usr/local/libexec/danlu-gpu-helper`，并写一条只放行它两个子命令的 `/etc/sudoers.d/danlu-gpu-<uid>`（经典 sudo 下另有一行 `!requiretty`，服务没有终端也能调用；sudo-rs 不认这个设置、也从不要求终端，就不写这一行）。装好以后在面板「设置 → 调度 → 严格限卡」打开，只影响之后启动的任务：
 
 - 每个任务作为 `danlu-job-*.service` 临时服务运行在你自己的 `user-<uid>.slice` 下，身份、资源限制都和平常一样，只是打不开没分给它的 `/dev/nvidiaN`；
 - 程序里看到的卡从 0 编号（分到 GPU 2、3 的任务里 nvidia-smi 显示 GPU 0、1），丹炉注入的 `CUDA_VISIBLE_DEVICES` 也是 `0,1`；面板和日志开头仍写物理卡号；
