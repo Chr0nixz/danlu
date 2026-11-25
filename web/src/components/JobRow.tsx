@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Copy, Star, X } from 'lucide-react'
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { compactProgress, duration, exitCodeOnly, failText, fmtTime, isActive, jobDuration, jobStatusText, progressRemaining, stripProgressTiming, timeAgo, timeAgoShort, useNow, waitText, type Job } from '@danlu/core'
+import { compactProgress, dirtyUnsaved, duration, exitCodeOnly, failText, fmtTime, isActive, jobDuration, jobStatusText, progressRemaining, stripProgressTiming, timeAgo, timeAgoShort, useNow, waitText, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { QueueJobMenu } from './QueueOps'
@@ -186,7 +186,7 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
             </Link>
           )}
           {j.starred && <Star role="img" aria-label={t('jobs.starred_label')} className="size-3 shrink-0 self-center fill-current text-fg-3 lg:hidden" />}
-          <Commit sha={j.git_commit} dirty={j.git_dirty} to={code} className="relative z-10 ml-auto shrink-0 pl-2 lg:hidden" />
+          <Commit sha={j.git_commit} dirty={j.git_dirty} unsaved={dirtyUnsaved(j)} to={code} className="relative z-10 ml-auto shrink-0 pl-2 lg:hidden" />
         </div>
         {/*
           电脑上是一行弹性列。手机上是行内流式排版：卡号、时间这些短标记和说明文字连着排，文字接在标记后面，
@@ -243,7 +243,7 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
             )}
           </span>
           <span className="w-[4.5rem]">
-            <Commit sha={j.git_commit} dirty={j.git_dirty} to={code} className="relative z-10" />
+            <Commit sha={j.git_commit} dirty={j.git_dirty} unsaved={dirtyUnsaved(j)} to={code} className="relative z-10" />
           </span>
         </div>
       </div>

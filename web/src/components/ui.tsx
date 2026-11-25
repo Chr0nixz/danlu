@@ -197,17 +197,21 @@ export function GpuChips({ ids, className }: { ids: number[]; className?: string
  */
 export const hitArea = 'relative before:absolute before:-inset-x-2 before:-inset-y-2.5'
 
-/** commit 短哈希；有未提交改动时后面跟一个琥珀色的点。传 to 时是链接，通常指向任务的代码快照 */
-export function Commit({ sha, dirty, to, className }: { sha: string; dirty?: boolean; to?: string; className?: string }) {
+/**
+ * commit 短哈希；有未提交改动时后面跟一个灰色小点。传 to 时是链接，通常指向任务的代码快照。
+ * unsaved：这些改动没有进快照（dirtyUnsaved），点变琥珀：只凭 commit 找不回当时的代码，这才需要注意
+ */
+export function Commit({ sha, dirty, unsaved, to, className }: { sha: string; dirty?: boolean; unsaved?: boolean; to?: string; className?: string }) {
   if (!sha) return null
-  const title = dirty ? t('ui.commit_dirty', { sha }) : sha
+  const warn = dirty && unsaved
+  const title = warn ? t('ui.commit_dirty_unsaved', { sha }) : dirty ? t('ui.commit_dirty', { sha }) : sha
   const body = (
     <>
       {sha.slice(0, 7)}
       {dirty && (
         <>
-          <span className="size-1.5 shrink-0 rounded-full bg-warn" aria-hidden />
-          <span className="sr-only">{t('ui.commit_dirty_sr')}</span>
+          <span className={cx('size-1.5 shrink-0 rounded-full', warn ? 'bg-warn' : 'bg-fg-3')} aria-hidden />
+          <span className="sr-only">{warn ? t('ui.commit_dirty_unsaved_sr') : t('ui.commit_dirty_sr')}</span>
         </>
       )}
     </>

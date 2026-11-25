@@ -66,7 +66,7 @@ export function CodeBrowser({ jobId }: { jobId: number }) {
               </span>
             )}
             {g.dirty && (
-              <span className={cx(chip, 'border-warn/30 bg-warn/8 font-medium text-warn')}>
+              <span className={chip}>
                 {t('job.snapshot_dirty')}
               </span>
             )}

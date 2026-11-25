@@ -22,13 +22,13 @@ export function HostMetrics() {
 
   return (
     <Card className="overflow-hidden">
-      {/* 手机上标题栏 44px 高，这样右侧的「资源详情」整条都是可点区域；桌面仍是 36px */}
+      {/* 手机上标题栏 44px 高，这样右侧的「资源详情」整条都是可点区域（盖住底边线那 1px，点击区才满 44px）；桌面仍是 36px */}
       <div className="flex h-9 items-center gap-2 border-b border-line bg-subtle px-3 text-ui max-sm:h-11 sm:px-4">
         <h2 className="font-medium">{t('resources.host_title')}</h2>
         <span className={cx('ml-auto min-w-0 truncate text-xs', stale ? 'text-warn' : 'text-fg-3')}>
           {stale ? t('resources.data_stale', { n: Math.round(age) }) : samples.length >= 31 ? t('resources.host_recent') : samples.length ? t('resources.host_sampling', { n: samples.length }) : t('resources.host_every_2s')}
         </span>
-        <Link to="/resources" className="-mr-2 flex h-full min-w-9 shrink-0 items-center justify-center gap-1 px-2 text-xs text-fg-3 hover:text-fg max-sm:min-w-11" title={t('resources.host_details_title')}>
+        <Link to="/resources" className="-mr-2 flex h-full min-w-9 shrink-0 items-center justify-center gap-1 px-2 text-xs text-fg-3 hover:text-fg max-sm:-mb-px max-sm:h-11 max-sm:min-w-11" title={t('resources.host_details_title')}>
           <span className="max-sm:sr-only">{t('resources.host_details')}</span>
           <ArrowRight className="size-3.5" aria-hidden />
         </Link>

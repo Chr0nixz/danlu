@@ -144,17 +144,31 @@ export function ReservationList() {
 type Length = '1' | '3' | '8' | 'custom' | 'none'
 
 /** 首页摘要行里的"预约 GPU"：打开预约对话框 */
-export function ReserveButton({ className }: { className?: string }) {
+/** iconOnly：手机顶栏里和终端、设置并排的图标按钮（44px 点击区），名字在 aria-label 里 */
+export function ReserveButton({ className, iconOnly = false }: { className?: string; iconOnly?: boolean }) {
   const [open, setOpen] = useState(false)
   return (
     <>
-      <Button variant="ghost" size="sm" className={cx('text-xs text-fg-3', className)} onClick={() => setOpen(true)}>
-        <Lock aria-hidden />
-        {t('reservations.reserve_gpu')}
-      </Button>
+      {iconOnly ? (
+        <Button variant="ghost" size="icon" className={className} onClick={() => setOpen(true)} aria-label={t('reservations.reserve_gpu')} title={t('reservations.reserve_gpu')}>
+          <Lock className="size-5" aria-hidden />
+        </Button>
+      ) : (
+        <Button variant="ghost" size="sm" className={cx('text-xs text-fg-3', className)} onClick={() => setOpen(true)}>
+          <Lock aria-hidden />
+          {t('reservations.reserve_gpu')}
+        </Button>
+      )}
       {open && <ReserveDialog onClose={() => setOpen(false)} />}
     </>
   )
+}
+
+/** 手机顶栏的预约按钮：只在总览出现（摘要行在手机上放不下它），有 GPU 时才显示，和总览共用一份 GPU 缓存 */
+export function PhoneReserve() {
+  const gpus = useGpus()
+  if (!gpus.data?.gpus.length) return null
+  return <ReserveButton iconOnly />
 }
 
 function ReserveDialog({ onClose }: { onClose: () => void }) {

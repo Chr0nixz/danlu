@@ -524,6 +524,20 @@ func (s *Service) failureReason(kind, detail string, exit *int) string {
 			return s.msg("fail.host_oom", nil)
 		}
 	}
+	if kind == "command" {
+		switch detail {
+		case logs.DetailCmdNotFound:
+			return s.msg("fail.command_not_found", nil)
+		case logs.DetailCmdNotExecutable:
+			return s.msg("fail.command_not_executable", nil)
+		case logs.DetailCmdConda:
+			return s.msg("fail.command_conda", nil)
+		case logs.DetailCmdWorkdir:
+			return s.msg("fail.command_workdir", nil)
+		default:
+			return s.msg("fail.command", nil)
+		}
+	}
 	if key := map[string]string{"cuda_oom": "fail.cuda_oom", "nccl": "fail.nccl", "exception": "fail.exception",
 		"reboot": "fail.reboot", "killed": "fail.killed", "start": "fail.start", "signal": "fail.signal"}[kind]; key != "" {
 		return s.msg(key, nil)

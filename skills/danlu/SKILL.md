@@ -118,7 +118,7 @@ danlu tail 42 -n 100                   # 日志最后 100 行
 | `queue_pos`, `wait_reason` | 排在第几位，为什么还没开始 |
 | `held` | 只在为 `true` 时出现：排队任务被暂缓了，留在原位但不会开始 |
 | `gpus_assigned` | 分到的物理卡号 |
-| `exit_code`, `fail_kind`, `fail_reason` | 失败的分类和说明，见下一节 |
+| `exit_code`, `fail_kind`, `fail_detail`, `fail_reason` | 失败的分类、细分和说明，见下一节 |
 | `error_line` | 日志里识别出的报错行 |
 | `last_line` | 最后一行训练输出 |
 | `git_commit`, `git_dirty`, `snapshot_ok` | 实际跑的代码版本，在开始运行时记录 |
@@ -146,12 +146,13 @@ danlu tail 42 -n 100                   # 日志最后 100 行
 | `cuda_oom` | CUDA 显存不足 | 减小 batch size、开梯度累积或激活检查点，或者多要几张卡 |
 | `host_oom` | 主机内存不足 | 减少 dataloader worker 数，避免把整个数据集读进内存 |
 | `exception` | Python 异常 | 从 traceback 定位，修好代码后提交新任务 |
+| `command` | 命令这一层出错，没进到 Python。`fail_detail` 细分：`not_found` 命令没找到（退出码 127），`not_executable` 不能执行（126），`conda` 找不到 conda 或 `conda activate` 失败，`workdir` 进不了工作目录，空串是 bash 或 python 报文件不存在、没有权限 | 多半是 `-e` 的环境不对、没选环境或路径写错，看 `error_line`；改好环境、命令或路径后提交新任务，原样 `rerun` 还会失败 |
 | `nccl` | NCCL 通信超时或出错 | 往前翻日志，找第一个出错的 rank。常常与代码无关，可以 `rerun` |
 | `reboot` | 服务器重启，任务中断 | 与代码无关，直接 `rerun` |
 | `killed` | 进程被外部终止，没留下退出码 | 可能是有人手动杀了进程，先问用户再重跑 |
 | `signal` | 进程被信号终止 | 同上 |
 | `start` | 任务没能启动 | 加载 `.bashrc` 出错、恢复代码快照失败、产物目录写不进去等，看 `fail_reason` |
-| `exit` | 退出码非 0，没有更具体的分类 | 看日志。日志里 `[danlu]` 开头的行是丹炉写的：`conda activate 失败`（退出码 127）说明 `-e` 的环境名不对，`无法进入工作目录` 说明目录不存在 |
+| `exit` | 退出码非 0，没有更具体的分类 | 看日志末尾和 `error_line`，按程序自己的输出判断 |
 
 ## 重跑
 

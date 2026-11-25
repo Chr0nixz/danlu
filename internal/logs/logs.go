@@ -126,11 +126,61 @@ func ErrorLine(path string) string {
 	return ErrorLineIn(string(data))
 }
 
+// 包装脚本（runner.runScript）在进入用户命令之前失败时打印的行，必须和那里 echo 的文字一致（runner 有测试核对）。
+// 找不到 conda、conda activate 失败时退出码是 127，和"命令没找到"相同，归类时要先认出它们。
+const (
+	WrapperNoWorkdir    = "[danlu] 无法进入工作目录"
+	WrapperCondaMissing = "[danlu] 找不到 conda"
+	WrapperCondaFailed  = "[danlu] conda activate 失败"
+)
+
+// 命令这一层的报错：包装脚本进不了工作目录、激活不了 conda，bash 执行任务命令（cmd.sh）时自己打印的错误
+// （命令没找到、文件不存在、没有权限等），任何脚本里的"命令没找到"，以及 python 打不开要运行的文件。
+// 这类失败常见于 conda 环境没选对，日志里没有 Python 异常，按 errLineRe 找不到报错行。
+// cmd.sh 前缀的行只认这几种报错：进程被信号杀掉时 bash 也会打印 "cmd.sh: line 1: 4242 Killed  python …"，那是信号，不是命令错。
+var shellErrLineRe = regexp.MustCompile(`^(?:` + regexp.QuoteMeta(WrapperNoWorkdir) + `|` + regexp.QuoteMeta(WrapperCondaMissing) + `|` +
+	regexp.QuoteMeta(WrapperCondaFailed) + `)|/run/\d+/cmd\.sh: line \d+: .*(?:command not found|No such file or directory|Permission denied|cannot execute|syntax error|unbound variable|bad substitution|ambiguous redirect|Is a directory|Not a directory)|: command not found$|^python[\d.]*: can't open file `)
+
+// cmdShPrefixRe 是 bash 报错时带的任务命令脚本路径前缀，形如 "<数据目录>/run/8/cmd.sh: line 1: "。
+// 这个绝对路径对用户没有意义，还会把真正的原因挤出列表行，显示时去掉；多行命令保留 "line N: "。
+// 只认从行首开始的绝对路径：任务被信号杀掉时，bash 的 "Terminated" 常常接在最后一个没换行的 tqdm 进度后面，
+// 那时整行留着，"跑到哪了"比 bash 那句更有用
+var cmdShPrefixRe = regexp.MustCompile(`^/.*?/run/\d+/cmd\.sh: (line (\d+): )`)
+
+// trimCmdShPrefix 去掉 bash 报错里任务命令脚本的路径："…/run/8/cmd.sh: line 1: torchrun: command not found"
+// → "torchrun: command not found"；第 2 行以后的报错保留 "line N: "，多行命令靠它定位。
+func trimCmdShPrefix(l string) string {
+	m := cmdShPrefixRe.FindStringSubmatchIndex(l)
+	if m == nil {
+		return l
+	}
+	if l[m[4]:m[5]] == "1" {
+		return l[m[1]:]
+	}
+	return l[m[2]:]
+}
+
 // ErrorLineIn 从日志片段中找最后一条像报错的可见行。
 func ErrorLineIn(data string) string {
-	return lastMatchText(data, func(l string) bool {
-		return !strings.Contains(l, "ChildFailedError") && errLineRe.MatchString(l)
+	line, _ := errorLineIn(data)
+	return line
+}
+
+// errorLineIn 同 ErrorLineIn，另外说明这行是不是命令这一层（bash、python 启动）的报错。
+func errorLineIn(data string) (string, bool) {
+	shell := false
+	line := lastMatchText(data, func(l string) bool {
+		if strings.Contains(l, "ChildFailedError") {
+			return false
+		}
+		if errLineRe.MatchString(l) {
+			shell = false
+			return true
+		}
+		shell = shellErrLineRe.MatchString(l)
+		return shell
 	})
+	return line, line != "" && shell
 }
 
 // lastMatch 从日志末尾 tail 字节里倒着找第一条满足 ok 的可见行（处理 \r 进度条和 ANSI 颜色），截到 200 字。
@@ -151,6 +201,7 @@ func lastMatchText(data string, ok func(string) bool) string {
 		}
 		l = strings.TrimSpace(StripANSI(l))
 		if l != "" && ok(l) {
+			l = trimCmdShPrefix(l)
 			if r := []rune(l); len(r) > 200 {
 				l = string(r[:200]) + "…"
 			}
@@ -184,6 +235,14 @@ const (
 	DetailOOMWorker    = "worker"    // 运行期间本机 OOM kill 杀了 dataloader worker
 	DetailOOMConfirmed = "confirmed" // oom_kill 计数增加且退出码吻合
 	DetailOOMGuess137  = "guess137"  // 读不到计数，只能凭退出码 137 推测
+)
+
+// 命令这一层失败（fail_kind = command）的细分码；空串表示日志里有 bash / python 启动报错，但退出码不是 126/127。
+const (
+	DetailCmdNotFound      = "not_found"      // 退出码 127：命令没找到（多半是 conda 环境没选对，或不在 PATH 里）
+	DetailCmdNotExecutable = "not_executable" // 退出码 126：找到了文件但不能执行
+	DetailCmdConda         = "conda"          // 包装脚本找不到 conda 或 conda activate 失败（退出码 127）
+	DetailCmdWorkdir       = "workdir"        // 包装脚本进不了工作目录
 )
 
 // 主机内存相关原因文字；推送按失败类别生成文案，不转发其他原因文字。
@@ -224,7 +283,22 @@ func ClassifyFailure(in FailureInput) Failure {
 		strings.Contains(text, "nccl error"),
 		(strings.Contains(text, "processgroupnccl") && strings.Contains(text, "timeout")):
 		return Failure{Kind: "nccl", Reason: "NCCL 通信超时或出错"}
-	case ErrorLineIn(in.LogTail) != "":
+	// 包装脚本在用户命令之前就失败了：日志里只有它自己的一行，先认出来，conda 失败的 127 不能算成"命令没找到"
+	case strings.Contains(in.LogTail, WrapperCondaMissing), strings.Contains(in.LogTail, WrapperCondaFailed):
+		return Failure{Kind: "command", Reason: "conda 环境激活失败", Detail: DetailCmdConda}
+	case strings.Contains(in.LogTail, WrapperNoWorkdir):
+		return Failure{Kind: "command", Reason: "无法进入工作目录", Detail: DetailCmdWorkdir}
+	// 126/127 是 shell 自己的退出码，训练程序不会主动用；排在 Python 异常前面，
+	// 免得日志早先打印过的异常盖过"命令没找到"
+	case in.ExitCode != nil && *in.ExitCode == 127:
+		return Failure{Kind: "command", Reason: "命令没找到", Detail: DetailCmdNotFound}
+	case in.ExitCode != nil && *in.ExitCode == 126:
+		return Failure{Kind: "command", Reason: "命令无法执行", Detail: DetailCmdNotExecutable}
+	}
+	if line, shell := errorLineIn(in.LogTail); line != "" {
+		if shell {
+			return Failure{Kind: "command", Reason: "命令或路径出错"}
+		}
 		return Failure{Kind: "exception", Reason: "Python 异常"}
 	}
 

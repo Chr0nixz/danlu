@@ -51,7 +51,7 @@ export interface Job {
   fail_reason: string
   /** 失败原因分类；旧版服务器没有这个字段 */
   fail_kind?: string
-  /** 失败细分码（host_oom 三态、信号名）；start 类是不带前缀的原始启动错误。旧版服务器没有这个字段 */
+  /** 失败细分码（host_oom 三态、信号名、command 的 not_found / not_executable / conda / workdir）；start 类是不带前缀的原始启动错误。旧版服务器没有这个字段 */
   fail_detail?: string
   /** 运行备注（如残留进程清理）；旧版服务器没有这个字段 */
   notes?: string

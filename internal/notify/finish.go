@@ -260,7 +260,7 @@ func (s *Service) drain(next *state, e store.Event) {
 // 发送时的本地化合成走 Service.failureReason。
 func failureReasonZH(kind string, exit *int) string {
 	if reason := map[string]string{"cuda_oom": "CUDA 显存不足", "host_oom": "主机内存不足", "nccl": "NCCL 通信超时或出错",
-		"exception": "Python 异常", "reboot": "服务器重启，任务中断", "killed": "进程被外部终止", "start": "任务启动失败", "signal": "进程被信号终止"}[kind]; reason != "" {
+		"exception": "Python 异常", "command": "命令或路径出错", "reboot": "服务器重启，任务中断", "killed": "进程被外部终止", "start": "任务启动失败", "signal": "进程被信号终止"}[kind]; reason != "" {
 		return reason
 	}
 	if exit != nil {

@@ -9,8 +9,8 @@ import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
 import { ProfileSummary } from '../components/ResourceProfile'
 import { StarButton, StarError, StarMenuItem } from '../components/StarButton'
-import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, Input, Menu, menuItemClass, RefreshError, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
-import { ApiError, compactProgress, duration, failReasonText, fmtTime, isActive, jobDuration, sameCodeFailKinds, stripProgressTiming, useNow, waitText, type Job, type JobStatus } from '@danlu/core'
+import { Alert, announce, Button, buttonClass, Card, Commit, cx, Empty, ErrorBox, FieldError, GpuChips, Input, Menu, menuItemClass, Meter, RefreshError, Skeleton, StatusIcon, StatusLabel, tabPanelProps, Tabs, Textarea } from '../components/ui'
+import { ApiError, compactProgress, dirtyUnsaved, duration, failReasonText, fmtTime, isActive, jobDuration, progressRemaining, sameCodeFailKinds, stripProgressTiming, useNow, waitText, type Job, type JobStatus } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useCopy } from '../lib/useCopy'
@@ -554,8 +554,20 @@ function BackLink() {
 
 /** 按失败分类给的下一步：只是建议，不替用户断定原因；退出码这类没法归类的不给。
  *  写成函数在渲染时取词：模块级常量字符串表会把语言冻结在加载那一刻 */
-function failHint(kind: string): string | undefined {
-  switch (kind) {
+function failHint(j: Job): string | undefined {
+  switch (j.fail_kind ?? '') {
+    case 'command':
+      // 命令没找到多半是环境的问题：直接说出这次用的是哪个 conda 环境，不用再去状态栏里对照
+      switch (j.fail_detail) {
+        case 'not_found':
+          return j.conda_env
+            ? t('job.fail_hint_command_not_found_env', { env: j.conda_env })
+            : t('job.fail_hint_command_not_found_no_conda')
+        case 'not_executable': return t('job.fail_hint_command_not_executable')
+        case 'conda': return t('job.fail_hint_command_conda')
+        case 'workdir': return t('job.fail_hint_command_workdir')
+        default: return t('job.fail_hint_command')
+      }
     case 'cuda_oom': return t('job.fail_hint_cuda_oom')
     case 'host_oom': return t('job.fail_hint_host_oom')
     case 'nccl': return t('job.fail_hint_nccl')
@@ -573,7 +585,8 @@ function failHint(kind: string): string | undefined {
  * 而不是状态栏里已经有的退出码；退出码以外的原因（被外部终止、启动失败）单独写一行，
  * 然后是按分类给的下一步，重跑按钮就在页面顶部。
  * 和代码无关的失败（服务器重启、被外部终止、收到信号）反过来：原因本身就是答案，写在第一行；
- * 日志里本来就没有报错行，最后一行输出只说明任务跑到了哪里，放在后面，不写"没有找到报错行"。
+ * 日志里本来就没有报错行，最后一行输出只说明任务跑到了哪里，放在后面。
+ * 找不到报错行时只标"最后一行输出"，不写"没有找到报错行"：那一行常常就是原因，不该先否认它。
  */
 function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => void }) {
   // 没有报错行时用最后一行输出；它是 tqdm 进度条的话，已用时间和速率对失败的任务没有用，去掉
@@ -582,7 +595,7 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
   const extra = j.fail_kind
     ? (j.fail_kind !== 'exit' ? failReasonText(j) : '')
     : (j.fail_reason && !/^退出码 -?\d+$/.test(j.fail_reason) ? j.fail_reason : '')
-  const hint = failHint(j.fail_kind ?? '')
+  const hint = failHint(j)
   const reasonFirst = !!extra && !j.error_line && sameCodeFailKinds.includes(j.fail_kind ?? '')
   const mono = 'font-mono text-[12.5px] leading-relaxed [overflow-wrap:anywhere]'
   return (
@@ -599,7 +612,7 @@ function FailBox({ j, onShowLog }: { j: Job; onShowLog: (offset?: number) => voi
         </>
       ) : line ? (
         <>
-          {!j.error_line && <div className="text-xs">{t('job.fail_no_error_line')}</div>}
+          {!j.error_line && <div className="text-xs">{t('job.fail_last_output')}</div>}
           <div className={mono}>{line}</div>
           {extra && <div className="mt-0.5">{extra}</div>}
         </>
@@ -631,7 +644,8 @@ function Lineage({ j }: { j: Job }) {
   const reruns = j.reruns ?? []
   if (!parent && !reruns.length) return null
   const ref = (r: { id: number; status: JobStatus | null }) => (
-    <Link key={r.id} to={`/jobs/${r.id}`} className="inline-flex items-center gap-1 font-medium text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg">
+    // 点击区向四周撑出（左右各 4px，正好接上相邻链接间 8px 的空隙；上下各 12px，到 44px 高），不改变排版
+    <Link key={r.id} to={`/jobs/${r.id}`} className="relative inline-flex items-center gap-1 font-medium text-fg underline decoration-fg/25 underline-offset-2 before:absolute before:-inset-x-1 before:-inset-y-3 hover:decoration-fg">
       #{r.id}
       {r.status && <StatusIcon status={r.status} className="size-3.5" />}
     </Link>
@@ -716,15 +730,16 @@ function MetaStrip({ j }: { j: Job }) {
       </Meta>
       <Meta
         label={
-          // 手机上一列只有 100px 上下，写全了会折成两行，把日志框往下挤；写短，琥珀字仍然说明圆点的意思
+          // 手机上一列只有 100px 上下，写全了会折成两行，把日志框往下挤；写短，触屏上看不到悬停提示也能知道圆点的意思。
+          // 改动进了快照是常态，和标签同色；没进快照才用琥珀字写明
           <>
             <span className="sm:hidden">{t('job.meta_code_short')}</span>
             <span className="max-sm:hidden">{t('job.meta_code')}</span>
             {j.git_dirty && (
-              <span className="text-warn">
+              <span className={cx(dirtyUnsaved(j) && 'text-warn')}>
                 {' · '}
-                <span className="sm:hidden">{t('job.dirty_short')}</span>
-                <span className="max-sm:hidden">{t('job.dirty')}</span>
+                <span className="sm:hidden">{dirtyUnsaved(j) ? t('job.dirty_unsaved_short') : t('job.dirty_short')}</span>
+                <span className="max-sm:hidden">{dirtyUnsaved(j) ? t('job.dirty_unsaved') : t('job.dirty')}</span>
               </span>
             )}
           </>
@@ -732,7 +747,7 @@ function MetaStrip({ j }: { j: Job }) {
       >
         {j.git_commit ? (
           <>
-            <Commit sha={j.git_commit} dirty={j.git_dirty} to="?tab=code" className="text-ui text-fg" />
+            <Commit sha={j.git_commit} dirty={j.git_dirty} unsaved={dirtyUnsaved(j)} to="?tab=code" className="text-ui text-fg" />
             {j.git_branch && <span className="truncate text-fg-3">{j.git_branch}</span>}
           </>
         ) : (
@@ -742,7 +757,39 @@ function MetaStrip({ j }: { j: Job }) {
       <Meta label={j.ended_at ? t('job.meta_ended') : j.started_at ? t('job.meta_started') : t('job.meta_submitted')}>
         <span className="truncate">{fmtTime(j.ended_at ?? j.started_at ?? j.created_at).slice(5, 16)}</span>
       </Meta>
+      {j.status === 'running' && <ProgressLine line={j.last_line} />}
     </Card>
+  )
+}
+
+/**
+ * 在跑的任务的进度：和任务列表那一行同一套写法（细条 → 剩余时间 → 压缩过的 tqdm 行），
+ * 列表里看到的"跑到哪了"点进来还在。占满一整行，不挤手机上三列两行的格子；
+ * 最后一行不是进度条（没有百分比也没有剩余时间）时不显示，日志就在下面。
+ */
+function ProgressLine({ line }: { line?: string }) {
+  if (!line) return null
+  const p = compactProgress(line)
+  const remaining = progressRemaining(line)
+  if (p.pct === null && !remaining) return null
+  const text = remaining ? stripProgressTiming(p.short) : p.short
+  return (
+    <div className="col-span-full flex min-w-0 items-center gap-2 text-xs">
+      <span className="shrink-0 text-fg-3">{t('job.meta_progress')}</span>
+      {p.pct !== null && (
+        <span className="w-10 shrink-0 sm:w-24" title={`${p.pct}%`}>
+          <Meter value={p.pct} className="bg-run" />
+        </span>
+      )}
+      {remaining && (
+        <span className="shrink-0 whitespace-nowrap text-fg-2" title={t('jobs.remaining_title')}>
+          {t('jobs.remaining', { remaining })}
+        </span>
+      )}
+      <span className="min-w-0 truncate font-mono text-fg-2" title={text}>
+        {text}
+      </span>
+    </div>
   )
 }
 
@@ -873,7 +920,10 @@ function Overview({ j }: { j: Job }) {
             <span className="font-mono text-[12.5px]">
               {j.git_branch && `${j.git_branch} @ `}
               {j.git_commit.slice(0, 12)}
-              {j.git_dirty && <span className="ml-2 font-sans text-warn">{t('job.dirty_saved')}</span>}
+              {/* 只有快照真的拍成了才说"已保存"；没拍成时琥珀字说明这些改动找不回来 */}
+              {j.git_dirty && (dirtyUnsaved(j)
+                ? <span className="ml-2 font-sans text-warn">{t('job.dirty_not_saved')}</span>
+                : j.snapshot_ok && <span className="ml-2 font-sans text-fg-3">{t('job.dirty_saved')}</span>)}
             </span>
           ) : j.snapshot_ok ? (
             t('job.not_git_saved')

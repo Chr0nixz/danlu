@@ -61,6 +61,16 @@ function cmdPicksGpus(cmd: string): string | null {
   return ds ? `deepspeed ${ds[1]}` : null
 }
 
+/**
+ * 命令第一行开头的 Python 类启动器（python、torchrun、accelerate、deepspeed、pip），跳过前面的 FOO=bar 赋值。
+ * 不选 conda 环境时它们只在系统 PATH 里找：找不到就是退出码 127，找到了也常是系统自带的 Python。
+ */
+function cmdLauncher(cmd: string): string | null {
+  const first = cmd.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? ''
+  const m = /^(?:[A-Za-z_]\w*=\S*\s+)*(python[\d.]*|torchrun|accelerate|deepspeed|pip[\d.]*)(?=\s|$)/.exec(first)
+  return m ? m[1] : null
+}
+
 function readDraft(key: string): Partial<Draft> | null {
   try {
     const raw = sessionStorage.getItem(key)
@@ -146,6 +156,8 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
   // 草稿：和刚打开时不一样才存。默认的 conda 环境是列表到了之后才选上的，不算用户改过
   const draft: Draft = { name, memo, workdir, condaEnv, cmd, mode, count, pinned, envText, inheritBashrc, useSnapshot }
   const picksGpus = cmdPicksGpus(cmd)
+  // 有可选的 conda 环境却选了"不使用"，命令又是 python 这一类：提醒一句，不拦提交（.bashrc 里可能激活了别的环境）
+  const launcher = !condaEnv && !inheritBashrc && conda.data?.envs.length ? cmdLauncher(cmd) : null
   // 严格限卡开着时程序只看得到分到的卡、从 0 编号，命令里自己选卡的提示要换个说法
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, staleTime: 60_000 }).data
   const strictOn = settings?.strict?.enabled ?? false
@@ -374,7 +386,7 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
         </FormRow>
 
         <FormRow label={t('newjob.conda')} hint={condaHint} htmlFor={ids.conda}>
-          <Select id={ids.conda} aria-describedby={`${ids.conda}-hint`} value={condaEnv} onChange={(e) => setCondaEnv(e.target.value)} disabled={conda.isLoading}>
+          <Select id={ids.conda} aria-describedby={cx(`${ids.conda}-hint`, launcher && `${ids.conda}-warn`)} value={condaEnv} onChange={(e) => setCondaEnv(e.target.value)} disabled={conda.isLoading}>
             <option value="">{t('newjob.conda_none')}</option>
             {conda.data?.envs.map((e) => (
               <option key={e.path} value={e.name}>
@@ -383,6 +395,11 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
             ))}
             {condaEnv && !conda.data?.envs.some((e) => e.name === condaEnv) && <option value={condaEnv}>{condaEnv}</option>}
           </Select>
+          {launcher && (
+            <p id={`${ids.conda}-warn`} className="mt-1.5 text-xs leading-relaxed text-warn">
+              {t('newjob.conda_none_warning', { cmd: launcher })}
+            </p>
+          )}
         </FormRow>
 
         <FormRow label="GPU" hint={t('newjob.gpu_hint', { total, free: freeCount, n: total })} describedBy={errors.gpu && `${ids.gpu}-err`}>
@@ -513,7 +530,7 @@ function CodeSourcePicker({ name, source, workdir, canRestore, snapshot, onChang
     <>
       {branch && `${branch} @ `}
       <span className="font-mono">{commit?.slice(0, 7)}</span>
-      {dirty && <span className="text-warn">{t('newjob.dirty_mark')}</span>}
+      {dirty && <span className="text-fg-3">{t('newjob.dirty_mark')}</span>}
     </>
   )
   const current = !workdir ? t('newjob.code_fill_workdir') : head.isLoading ? t('newjob.code_reading') : head.data?.is_git && head.data.commit ? version(head.data.branch, head.data.commit, head.data.dirty) : t('newjob.code_not_git')

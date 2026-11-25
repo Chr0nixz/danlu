@@ -6,6 +6,7 @@ import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
 import { PageBoundary } from './ErrorBoundary'
+import { PhoneReserve } from './Reservations'
 import { ShortcutDialog } from './Shortcuts'
 import { Announcer, buttonClass, cx, Kbd } from './ui'
 
@@ -71,7 +72,7 @@ export function Layout() {
 
   // 标签页标题带上运行和失败数，和 IDE 并排开着时不用切过来也能看到
   const active = useActiveJobs()
-  const failed = useRecentFailures().data ?? 0
+  const failed = useRecentFailures().data?.total ?? 0
   const running = active.data?.runningTotal ?? 0
   useEffect(() => {
     const parts = [running && t('layout.title_running', { n: running }), failed && t('layout.title_failed', { n: failed })].filter(Boolean)
@@ -126,22 +127,26 @@ export function Layout() {
             {t('layout.new_job')}
             <Kbd>N</Kbd>
           </Link>
-          {showTerminal && (
+          {/* 手机顶栏右侧：总览上的预约 GPU、终端、设置 */}
+          <div className="-mr-2 ml-auto flex items-center sm:hidden">
+            {pathname === '/' && <PhoneReserve />}
+            {showTerminal && (
+              <NavLink
+                to="/terminal"
+                aria-label={t('layout.terminal_aria')}
+                className={({ isActive }) => cx(buttonClass('ghost', 'icon'), isActive && 'bg-hover text-fg')}
+              >
+                <TerminalIcon className="size-5" />
+              </NavLink>
+            )}
             <NavLink
-              to="/terminal"
-              aria-label={t('layout.terminal_aria')}
-              className={({ isActive }) => cx(buttonClass('ghost', 'icon'), 'ml-auto sm:hidden', isActive && 'bg-hover text-fg')}
+              to="/settings"
+              aria-label={t('layout.nav_settings')}
+              className={({ isActive }) => cx(buttonClass('ghost', 'icon'), isActive && 'bg-hover text-fg')}
             >
-              <TerminalIcon className="size-5" />
+              <Settings className="size-5" />
             </NavLink>
-          )}
-          <NavLink
-            to="/settings"
-            aria-label={t('layout.nav_settings')}
-            className={({ isActive }) => cx(buttonClass('ghost', 'icon'), '-mr-2 sm:hidden', !showTerminal && 'ml-auto', isActive && 'bg-hover text-fg')}
-          >
-            <Settings className="size-5" />
-          </NavLink>
+          </div>
         </div>
       </header>
 

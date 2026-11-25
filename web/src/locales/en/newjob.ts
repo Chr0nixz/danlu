@@ -69,6 +69,7 @@ export const newjob = {
   // conda environment
   'newjob.conda': 'conda environment',
   'newjob.conda_hint': 'Activated automatically before the job starts.',
+  'newjob.conda_none_warning': 'No conda env selected: {cmd} is looked up on the system PATH only, so it may not be found (exit code 127) or may run the system Python.',
   'newjob.conda_none': 'No conda',
 
   // GPU selection and held-card warnings

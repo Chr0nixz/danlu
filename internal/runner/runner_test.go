@@ -13,8 +13,18 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"danlu/internal/logs"
 	"danlu/internal/store"
 )
+
+// 失败归类按包装脚本打印的这几行认出 conda 和工作目录的问题，文字改了两边要一起改
+func TestRunScriptWrapperFailureLines(t *testing.T) {
+	for _, line := range []string{logs.WrapperNoWorkdir, logs.WrapperCondaMissing, logs.WrapperCondaFailed, logs.BannerPrefix} {
+		if !strings.Contains(runScript, `echo "`+line) {
+			t.Errorf("runScript 里没有 echo %q", line)
+		}
+	}
+}
 
 func TestLaunched(t *testing.T) {
 	r := &Runner{RunRoot: t.TempDir()}

@@ -72,6 +72,7 @@ export const newjob = {
   'newjob.conda': 'conda 环境',
   'newjob.conda_hint': '任务启动前自动激活。',
   'newjob.conda_none': '不使用 conda',
+  'newjob.conda_none_warning': '没选 conda 环境：{cmd} 只会在系统 PATH 里找，可能找不到（退出码 127），或用上系统自带的 Python。',
 
   // GPU 选择与占卡提示
   'newjob.gpu_hint': '共 {total} 张，现在空闲 {free} 张。整卡独占。',

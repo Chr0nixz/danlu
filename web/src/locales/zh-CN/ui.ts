@@ -5,6 +5,8 @@ export const ui = {
   // Commit 短哈希
   'ui.commit_dirty': '{sha}（有未提交的改动）',
   'ui.commit_dirty_sr': '，有未提交的改动',
+  'ui.commit_dirty_unsaved': '{sha}（有未提交的改动，没有进快照）',
+  'ui.commit_dirty_unsaved_sr': '，有未提交的改动，没有进快照',
   'ui.commit_view_code': '{title}，查看这次运行的代码',
   // 读屏播报：同一轮里多条之间的分隔
   'ui.announce_separator': '；',

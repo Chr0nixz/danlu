@@ -4,6 +4,8 @@ import type { Catalog } from '@danlu/core'
 export const ui = {
   'ui.commit_dirty': '{sha} (uncommitted changes)',
   'ui.commit_dirty_sr': ', uncommitted changes',
+  'ui.commit_dirty_unsaved': '{sha} (uncommitted changes, not in the snapshot)',
+  'ui.commit_dirty_unsaved_sr': ', uncommitted changes, not in the snapshot',
   'ui.commit_view_code': '{title} — view code for this run',
   'ui.announce_separator': '; ',
   'ui.error_chunk_title': 'Page failed to load',

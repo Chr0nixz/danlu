@@ -10,6 +10,7 @@ export const home = {
   'home.queued': '排队',
   'home.failed_title': '最近 24 小时内失败的任务',
   'home.within_24h': '24 小时内',
+  'home.latest_failure': '最近失败',
   'home.free_short': '空闲',
   'home.free_cards': '张卡空闲',
   'home.gpu_updated_title': 'GPU 数据的更新时间',

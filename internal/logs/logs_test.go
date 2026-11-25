@@ -60,6 +60,20 @@ func TestLastLine(t *testing.T) {
 	}
 }
 
+// 信号状态行接在没换行的 tqdm 进度后面时，整行留着，不从中间截掉进度
+func TestLastLineKeepsProgressGluedToBashStatus(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "l.log")
+	line := "epoch 89/300:  59%|###  | 59/100 [loss=0.0279]/h/run/7/cmd.sh: line 1: 47971 Terminated              python3 train.py"
+	os.WriteFile(p, []byte("epoch 89/300:  58%|###  | 58/100\r"+line+"\n"+BannerPrefix+"结束于 x，退出码 143\n"), 0o644)
+	if got := LastLine(p); got != line {
+		t.Fatalf("LastLine = %q", got)
+	}
+	os.WriteFile(p, []byte("/h/run/7/cmd.sh: line 1: foo: command not found\n"), 0o644)
+	if got := LastLine(p); got != "foo: command not found" {
+		t.Fatalf("LastLine = %q", got)
+	}
+}
+
 func TestErrorLine(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "l.log")
 	cases := map[string]string{
@@ -72,6 +86,16 @@ func TestErrorLine(t *testing.T) {
 		"step 100 loss=0.3\nKilled\n":        "Killed",
 		"epoch 3 done\nval_acc=0.81\n":       "",
 		"loss: 0.5\nlr: 3e-4\nError: boom\n": "Error: boom",
+		// bash 执行任务命令时的报错：去掉 cmd.sh 的绝对路径，第 1 行不写行号
+		"/home/u/.danlu/run/8/cmd.sh: line 1: torchrun: command not found\n" + BannerPrefix + "结束于 x，退出码 127\n": "torchrun: command not found",
+		// 数据目录带空格也能去掉；多行命令保留行号
+		"/data/my dir/run/12/cmd.sh: line 3: cd: /nope: No such file or directory\n":   "line 3: cd: /nope: No such file or directory",
+		"python: can't open file '/w/trian.py': [Errno 2] No such file or directory\n": "python: can't open file '/w/trian.py': [Errno 2] No such file or directory",
+		"./train.sh: line 4: accelerate: command not found\n":                          "./train.sh: line 4: accelerate: command not found",
+		// 程序自己打印的"文件不存在"不算报错行
+		"warn: cache.json: No such file or directory\nepoch 1 done\n": "",
+		// 信号的状态行不是报错行
+		"epoch 3\n/h/run/7/cmd.sh: line 1: 12345 Terminated              python3 train.py\n": "",
 	}
 	for in, want := range cases {
 		os.WriteFile(p, []byte(in), 0o644)
@@ -82,7 +106,7 @@ func TestErrorLine(t *testing.T) {
 }
 
 func TestClassifyFailure(t *testing.T) {
-	one, two, one37, one39 := 1, 2, 137, 139
+	one, two, one26, one27, one37, one39, one43 := 1, 2, 126, 127, 137, 139, 143
 	cases := []struct {
 		name   string
 		in     FailureInput
@@ -106,6 +130,18 @@ func TestClassifyFailure(t *testing.T) {
 		{"signal", FailureInput{ExitCode: &one39}, "signal", "被信号终止（SIGSEGV）"},
 		{"killed", FailureInput{}, "killed", "进程被外部终止（没有留下退出码）"},
 		{"exit", FailureInput{ExitCode: &two}, "exit", "退出码 2"},
+		{"command not found", FailureInput{ExitCode: &one27, LogTail: "/h/run/8/cmd.sh: line 1: torchrun: command not found"}, "command", "命令没找到"},
+		{"exit 127 beats earlier exception", FailureInput{ExitCode: &one27, LogTail: "ValueError: old\n/h/run/8/cmd.sh: line 2: foo: command not found"}, "command", "命令没找到"},
+		{"not executable", FailureInput{ExitCode: &one26, LogTail: "/h/run/8/cmd.sh: line 1: ./run.sh: Permission denied"}, "command", "命令无法执行"},
+		{"shell path error", FailureInput{ExitCode: &one, LogTail: "/h/run/8/cmd.sh: line 1: cd: /nope: No such file or directory"}, "command", "命令或路径出错"},
+		{"python cannot open file", FailureInput{ExitCode: &two, LogTail: "python: can't open file '/w/trian.py': [Errno 2] No such file or directory"}, "command", "命令或路径出错"},
+		// 进程被信号杀掉时 bash 打印的状态行带 cmd.sh 前缀，仍按信号归类
+		{"bash status line for SIGTERM", FailureInput{ExitCode: &one43, LogTail: "epoch 3: 40%\n/h/run/7/cmd.sh: line 1: 12345 Terminated              python3 train.py 300\n"}, "signal", "被信号终止（SIGTERM）"},
+		{"bash status line for SIGKILL", FailureInput{ExitCode: &one37, OOMKnown: true, LogTail: "/h/run/7/cmd.sh: line 1:  4242 Killed                  python train.py\n"}, "signal", "被信号终止（SIGKILL）"},
+		{"conda activate failed is not command-not-found", FailureInput{ExitCode: &one27, LogTail: WrapperCondaFailed + ": vit\n"}, "command", "conda 环境激活失败"},
+		{"conda missing", FailureInput{ExitCode: &one27, LogTail: WrapperCondaMissing + ": /opt/conda/etc/profile.d/conda.sh\n"}, "command", "conda 环境激活失败"},
+		{"no workdir", FailureInput{ExitCode: &one, LogTail: WrapperNoWorkdir + ": /w/gone\n"}, "command", "无法进入工作目录"},
+		{"exception after shell line", FailureInput{ExitCode: &one, LogTail: "x.sh: line 1: foo: command not found\nKeyError: 'lr'"}, "exception", "Python 异常"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,6 +150,12 @@ func TestClassifyFailure(t *testing.T) {
 				t.Fatalf("ClassifyFailure = %+v，期望 kind=%q reason=%q", got, tc.kind, tc.reason)
 			}
 		})
+	}
+	if got := ClassifyFailure(FailureInput{ExitCode: &one27}); got.Detail != DetailCmdNotFound {
+		t.Fatalf("127 的细分码 = %q", got.Detail)
+	}
+	if got := ClassifyFailure(FailureInput{ExitCode: &one26}); got.Detail != DetailCmdNotExecutable {
+		t.Fatalf("126 的细分码 = %q", got.Detail)
 	}
 }
 

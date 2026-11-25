@@ -200,6 +200,14 @@ export function failReasonText(j: Job): string {
       }
     case 'nccl': return t('fail.nccl')
     case 'exception': return t('fail.exception')
+    case 'command':
+      switch (j.fail_detail) {
+        case 'not_found': return t('fail.command_not_found')
+        case 'not_executable': return t('fail.command_not_executable')
+        case 'conda': return t('fail.command_conda')
+        case 'workdir': return t('fail.command_workdir')
+        default: return t('fail.command')
+      }
     case 'reboot': return t('fail.reboot')
     case 'killed': return t('fail.killed')
     case 'signal': {
@@ -293,6 +301,15 @@ export function waitText(j: Pick<Job, 'wait' | 'wait_reason'>): string {
  * 这类失败默认用原任务的快照原样重跑，界面上的重跑按钮也写"原样重跑"。
  */
 export const sameCodeFailKinds = ['reboot', 'killed', 'signal', 'nccl']
+
+/**
+ * 未提交的改动没有进快照：commit 后面有改动、任务已经开始，快照却没拍成（太大、超时或出错）。
+ * 这时只凭 commit 找不回当时跑的代码，这才是要标琥珀的"有改动"；拍进了快照的改动是常态
+ * （代码用 rsync 同步过来，工作区几乎总有改动），只用灰点标出来。
+ */
+export function dirtyUnsaved(j: Job): boolean {
+  return j.git_dirty && !!j.started_at && !j.snapshot_ok
+}
 
 /** 项目名就是工作目录的最后一级：~/code/vit → vit */
 export function projectOf(workdir: string): string {

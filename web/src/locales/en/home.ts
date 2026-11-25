@@ -8,6 +8,7 @@ export const home = {
   'home.queued': 'Queued',
   'home.failed_title': 'Jobs failed in the last 24 hours',
   'home.within_24h': "in the last 24h",
+  'home.latest_failure': 'Latest failure',
   'home.free_short': 'free',
   'home.free_cards': 'GPUs free',
   'home.gpu_updated_title': 'GPU data update time',
