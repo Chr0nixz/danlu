@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
+import { shortcutsEnabled, useShortcutsEnabled } from '../lib/localPrefs'
 import { useActiveJobs, useRecentFailures } from '../lib/queries'
 import { PageBoundary } from './ErrorBoundary'
 import { PhoneReserve } from './Reservations'
@@ -43,11 +44,12 @@ export function Layout() {
   const showTerminal = settings.data?.terminal_enabled === true
 
   // 快捷键：N 新建任务；/ 搜索任务（任务页自己处理，其他页面先跳过去）；J / K 在任务行之间移动，
-  // 焦点落在行的链接上，Enter 打开；? 打开快捷键一览。确认框开着时都不响应
+  // 焦点落在行的链接上，Enter 打开；? 打开快捷键一览。确认框开着时、在面板偏好里关掉单键快捷键时都不响应
   const [help, setHelp] = useState(false)
+  const shortcuts = useShortcutsEnabled()
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target) || document.querySelector('dialog[open]')) return
+      if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target) || document.querySelector('dialog[open]') || !shortcutsEnabled()) return
       const key = e.key.toLowerCase()
       if (key === 'n') {
         e.preventDefault()
@@ -122,10 +124,10 @@ export function Layout() {
               </NavLink>
             ))}
           </nav>
-          <Link to="/new" className={cx(buttonClass('primary', 'sm'), 'ml-auto max-sm:hidden')} title={t('layout.new_job_title')}>
+          <Link to="/new" className={cx(buttonClass('primary', 'sm'), 'ml-auto max-sm:hidden')} title={shortcuts ? t('layout.new_job_title') : undefined}>
             <Plus />
             {t('layout.new_job')}
-            <Kbd>N</Kbd>
+            {shortcuts && <Kbd>N</Kbd>}
           </Link>
           {/* 手机顶栏右侧：总览上的预约 GPU、终端、设置 */}
           <div className="-mr-2 ml-auto flex items-center sm:hidden">

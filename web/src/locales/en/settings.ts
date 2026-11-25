@@ -134,7 +134,9 @@ export const settings = {
   'settings.prefs.term_font': 'Web terminal font size',
   'settings.prefs.term_font_hint': 'The − / + buttons on the terminal toolbar change this too.',
   'settings.prefs.shortcuts': 'Keyboard shortcuts',
-  'settings.prefs.shortcuts_desc': 'Active when not in an input. Press ? anytime to open this list.',
+  'settings.prefs.shortcuts_desc': 'Active when not in an input. The switch is stored only in this browser and applies immediately.',
+  'settings.prefs.shortcuts_single': 'Single-key shortcuts',
+  'settings.prefs.shortcuts_single_hint': 'N, /, J, K and ?, which take no modifier key. Turn them off if you use voice input or press them by accident; {mod} + Enter to submit and Esc keep working.',
   // Panel preferences: defaults
   'settings.prefs.defaults': 'Defaults',
   'settings.prefs.defaults_desc': 'Stored on the server, shared by phone and desktop. Only affects pages opened and jobs created from now on.',

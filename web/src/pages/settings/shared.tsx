@@ -173,7 +173,8 @@ export function SettingRow({
     <FormRow label={label} hint={hint} describedBy={error ? errId : undefined}>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-ui text-fg-2">
         {item.zero_off && (
-          <label className="flex items-center gap-2 text-fg">
+          // 和旁边的输入框一样高（手机 44px）：点"开启"的整块都能切换，不用对准 16px 的勾选框
+          <label className="flex min-h-9 items-center gap-2 text-fg max-sm:min-h-11">
             <input type="checkbox" className="size-4 accent-inv" checked={value.on} onChange={(e) => set({ on: e.target.checked })} />
             {t('settings.row_on')}
           </label>

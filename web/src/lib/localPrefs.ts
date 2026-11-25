@@ -1,4 +1,6 @@
-// 只存在当前浏览器里的显示偏好：跟屏幕大小、视力有关，手机和电脑各设各的。
+import { useSyncExternalStore } from 'react'
+
+// 只存在当前浏览器里的偏好：跟屏幕大小、视力、输入方式有关，手机和电脑各设各的。
 // 浏览器禁用了站点存储（隐私模式、屏蔽 Cookie）时读写会抛错，用默认值，不能让页面打不开。
 
 function read(key: string): string | null {
@@ -54,4 +56,35 @@ export function setLogFontSize(size: number) {
     write(logKey, String(size))
     style.setProperty('--log-font-size', `${size}px`)
   }
+}
+
+// ---------- 单键快捷键 ----------
+
+// N、/、J、K、? 不带修饰键，语音输入会把说出的字母当成按键（WCAG 2.1.4 要求能关掉）。
+// 只关这几个：Ctrl/⌘ + Enter 提交和 Esc 不受影响。按键时现读，别的标签页改了也立即生效
+const shortcutsKey = 'danlu.shortcuts'
+const shortcutListeners = new Set<() => void>()
+
+export function shortcutsEnabled() {
+  return read(shortcutsKey) !== 'off'
+}
+
+export function setShortcutsEnabled(on: boolean) {
+  write(shortcutsKey, on ? null : 'off')
+  shortcutListeners.forEach((f) => f())
+}
+
+function subscribeShortcuts(onChange: () => void) {
+  shortcutListeners.add(onChange)
+  const onStorage = (e: StorageEvent) => (e.key === shortcutsKey || e.key === null) && onChange()
+  window.addEventListener('storage', onStorage)
+  return () => {
+    shortcutListeners.delete(onChange)
+    window.removeEventListener('storage', onStorage)
+  }
+}
+
+/** 单键快捷键开没开；关掉时界面上也不显示 N、/ 这类提示 */
+export function useShortcutsEnabled() {
+  return useSyncExternalStore(subscribeShortcuts, shortcutsEnabled)
 }

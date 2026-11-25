@@ -1,10 +1,10 @@
 import { Monitor, Moon, RotateCcw, Sun } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import type { Prefs, PrefsPatch, Settings } from '@danlu/core'
-import { ShortcutList } from '../../components/Shortcuts'
+import { modKey, ShortcutList } from '../../components/Shortcuts'
 import { announce, Button, ErrorBox, FieldError, FormRow, Input, Segmented, Select } from '../../components/ui'
 import { api } from '../../lib/api'
-import { LOG_FONT_DEFAULT, LOG_FONT_SIZES, setLogFontSize, storedLogFontSize, storedTerminalFontSize, saveTerminalFontSize, TERMINAL_FONT } from '../../lib/localPrefs'
+import { LOG_FONT_DEFAULT, LOG_FONT_SIZES, setLogFontSize, setShortcutsEnabled, storedLogFontSize, storedTerminalFontSize, saveTerminalFontSize, TERMINAL_FONT, useShortcutsEnabled } from '../../lib/localPrefs'
 import { setLang, storedLang, t, type LangPref } from '../../lib/i18n'
 import { PREF_DEFAULTS } from '../../lib/prefs'
 import { getTheme, setTheme, type Theme } from '../../lib/theme'
@@ -22,12 +22,7 @@ export function Preferences({ st }: { st: Settings }) {
           <ThresholdsSection prefs={prefs} />
         </>
       )}
-      {/* 有鼠标或触控板的设备才显示（多半也有键盘） */}
-      <div className="hidden pointer-fine:block">
-        <Section title={t('settings.prefs.shortcuts')} desc={t('settings.prefs.shortcuts_desc')}>
-          <ShortcutList />
-        </Section>
-      </div>
+      <ShortcutsSection />
     </>
   )
 }
@@ -183,6 +178,28 @@ function Footer({ saved, dirty, pending, isDefault, restore }: { saved: boolean;
         {t('settings.prefs.restore_defaults')}
       </Button>
     </SaveFooter>
+  )
+}
+
+/**
+ * 单键快捷键的开关所有设备都显示：平板、手机接上键盘也会触发，用语音输入的人要能关掉。
+ * 按键一览只在有鼠标或触控板的设备上显示（多半也有键盘）
+ */
+function ShortcutsSection() {
+  const on = useShortcutsEnabled()
+  return (
+    <Section title={t('settings.prefs.shortcuts')} desc={t('settings.prefs.shortcuts_desc')}>
+      <Rows>
+        <FormRow label={t('settings.prefs.shortcuts_single')} hint={t('settings.prefs.shortcuts_single_hint', { mod: modKey })}>
+          <Check checked={on} onChange={setShortcutsEnabled}>
+            {t('settings.row_on')}
+          </Check>
+        </FormRow>
+        <div className="hidden px-4 py-4 sm:px-5 pointer-fine:block">
+          <ShortcutList />
+        </div>
+      </Rows>
+    </Section>
   )
 }
 

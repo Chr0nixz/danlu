@@ -348,8 +348,9 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
         )}
         <FormRow label={lockedWorkdir ? t('newjob.workdir_source') : t('newjob.workdir')} hint={lockedWorkdir ? t('newjob.workdir_hint_snapshot') : t('newjob.workdir_hint')} htmlFor={ids.workdir}>
           {lockedWorkdir ? (
-            // 只读：衬底色、浅一级的强边线、次要文字色，悬停和聚焦时边线不变，看起来不像可以编辑的输入框
-            <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="cursor-default border-line-strong! bg-subtle! font-mono text-[12.5px] text-fg-2! hover:border-line-strong! focus:border-line-strong! focus:ring-0!" />
+            // 只读：衬底色、浅一级的强边线、次要文字色，悬停和聚焦时边线不变，看起来不像可以编辑的输入框。
+            // 它仍在 Tab 顺序里（可以选中复制），键盘焦点用和按钮一样的 2px 外框（全局 :focus-visible 的样式）
+            <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="cursor-default border-line-strong! bg-subtle! font-mono text-[12.5px] text-fg-2! hover:border-line-strong! focus:border-line-strong! focus:ring-0! focus-visible:outline-solid!" />
           ) : <WorkdirInput
             id={ids.workdir}
             describedBy={describe('workdir')}

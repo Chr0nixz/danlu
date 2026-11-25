@@ -134,7 +134,9 @@ export const settings = {
   'settings.prefs.term_font': '网页终端字号',
   'settings.prefs.term_font_hint': '终端页工具栏上的 − / + 改的也是它。',
   'settings.prefs.shortcuts': '快捷键',
-  'settings.prefs.shortcuts_desc': '不在输入框里时生效。随时按 ? 也能打开这份一览。',
+  'settings.prefs.shortcuts_desc': '不在输入框里时生效。开关只保存在当前浏览器，改了立即生效。',
+  'settings.prefs.shortcuts_single': '单键快捷键',
+  'settings.prefs.shortcuts_single_hint': 'N、/、J、K、? 这几个不带修饰键的快捷键。用语音输入或常常误触时关掉；{mod} + Enter 提交和 Esc 不受影响。',
   // 面板偏好：默认值
   'settings.prefs.defaults': '默认值',
   'settings.prefs.defaults_desc': '存在服务器上，手机和电脑共用。只影响以后新打开的页面和新建的任务。',

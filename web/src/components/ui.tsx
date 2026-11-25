@@ -57,9 +57,10 @@ export function Card({ className, children }: { className?: string; children: Re
   return <div className={cx('rounded-lg border border-line bg-surface', className)}>{children}</div>
 }
 
-// 边线用 field-line（和背景 3:1 以上）；悬停和聚焦都再深一级，聚焦另有运行蓝光晕
+// 边线用 field-line（和背景 3:1 以上），悬停深一级。聚焦时边线换成焦点色再描 1px，合起来是 2px 的焦点色边：
+// 和其他控件的焦点框同一个颜色、同样粗，但贴着边框画，不像外框那样离开输入框 2px。出错的字段聚焦时是 2px 失败红
 const field =
-  'w-full min-w-0 rounded-md border border-field-line bg-surface px-3 text-sm text-fg outline-none transition-[border-color,box-shadow] duration-150 hover:border-fg-3 focus:border-fg-3 focus:ring-3 focus:ring-run/15 focus-visible:outline-none disabled:opacity-50 aria-invalid:border-fail/60 aria-invalid:focus:ring-fail/15'
+  'w-full min-w-0 rounded-md border border-field-line bg-surface px-3 text-sm text-fg outline-none transition-[border-color,box-shadow] duration-150 hover:border-fg-3 focus:border-focus focus:ring-1 focus:ring-focus focus-visible:outline-none disabled:opacity-50 aria-invalid:border-fail/60 aria-invalid:focus:border-fail aria-invalid:focus:ring-fail'
 
 export function Input({ className, ...rest }: ComponentProps<'input'>) {
   return <input className={cx(field, 'h-9 max-sm:h-11', className)} {...rest} />

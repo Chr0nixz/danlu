@@ -10,6 +10,7 @@ import { Button, buttonClass, Card, ErrorBox, Input, Kbd, Segmented, SkeletonRow
 import { now, type BatchAction, type Job, type JobStatus } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
+import { shortcutsEnabled, useShortcutsEnabled } from '../lib/localPrefs'
 import { usePrefs } from '../lib/prefs'
 import { RECENT_SEC } from '../lib/queries'
 
@@ -90,11 +91,12 @@ export function Jobs() {
     return () => clearTimeout(timer)
   })
 
-  // 快捷键：/ 聚焦搜索框
+  // 快捷键：/ 聚焦搜索框（面板偏好里关掉单键快捷键时不响应）
+  const shortcuts = useShortcutsEnabled()
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement
-      if (e.key !== '/' || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return
+      if (e.key !== '/' || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || !shortcutsEnabled()) return
       e.preventDefault()
       searchRef.current?.focus()
     }
@@ -200,11 +202,11 @@ export function Jobs() {
             >
               <X className="size-4" aria-hidden />
             </button>
-          ) : (
+          ) : shortcuts ? (
             <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-fg-3">
               <Kbd>/</Kbd>
             </span>
-          )}
+          ) : null}
         </div>
       </div>
 

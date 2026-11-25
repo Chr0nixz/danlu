@@ -170,12 +170,15 @@ function JobDetailPage() {
             }}
           />
         ) : (
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-            <div className="flex min-w-0 flex-1 items-start gap-1">
+          // 电脑上标题和操作栏排一行；窗口半宽（和 IDE 并排、放大显示）放不下时操作栏整体换到标题下面，靠右。
+          // 标题按 16rem 起算：按 0 起算的话操作栏不肯收缩，标题会被挤成一个字一行
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
+            <div className="flex min-w-0 flex-[1_1_16rem] items-start gap-1">
               <div className="min-w-0">
                 <h1 className="flex min-w-0 items-start gap-2 text-xl font-semibold tracking-tight">
                   <StatusIcon status={j.status} cancelling={j.cancel_requested} className="mt-1.5 size-5" />
-                  <span className="min-w-0 break-all">
+                  {/* 长名字优先在 - 处断开，没有断点时才在字符之间断 */}
+                  <span className="min-w-0 [overflow-wrap:anywhere]">
                     {j.name}
                     <span className="ml-2 font-normal whitespace-nowrap text-fg-3">#{j.id}</span>
                     {j.starred && <Star role="img" aria-label={t('job.starred')} className="ml-2 inline size-4 -translate-y-px fill-current text-fg-3 sm:hidden" />}
@@ -198,7 +201,7 @@ function JobDetailPage() {
             </div>
 
             {/* 电脑：操作都露在外面，次要的是幽灵按钮，实验记录和主操作带边框，主操作放最右 */}
-            <div className="hidden flex-wrap justify-end gap-1 sm:flex">
+            <div className="ml-auto hidden flex-wrap justify-end gap-1 sm:flex">
               <StarButton job={j} label />
               {queued && (
                 <>
