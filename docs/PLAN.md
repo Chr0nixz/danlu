@@ -42,7 +42,7 @@
   4. 表 `gpu_reservations`（F4 5.2，2026-11-21 已在 main 上追加为迁移 16；不进 `release/0.2`）
   5. `jobs.fail_detail`（双语化，迁移 17）、`jobs.unit`（F4 5.4 严格限卡，迁移 18；都在 main 上，不进 `release/0.2`）
   6. `jobs.submit_key` 及其部分唯一索引（F4 5.1 命令行提交，迁移 19；在 main 上，不进 `release/0.2`）
-  7. `jobs.queue_order`（迁移时设为 id）、`jobs.held`（F2 3.2）
+  7. `jobs.queue_order`（迁移时设为 id）、`jobs.held`（F2 3.2，2026-11-25 追加为迁移 20；在 main 上，不进 `release/0.2`）
   8. 表 `job_groups`，`jobs.group_id`、`jobs.params_json`（F2 3.4）
 - **接口只做加法，`APIVersion` 保持 1**（FEATURES 第 7 节）。每个改动里同步 `packages/core` 的类型和请求函数，`desktop` 保持能编译。
 - **哪些能并行。** 几乎每项功能都要改下面这些文件，所以主线一次只做一项：`internal/store/store.go`（迁移和列清单）、`internal/scheduler/`、`internal/notify/notify.go`、`web/src/pages/JobDetail.tsx`、`NewJob.tsx`、`Jobs.tsx`。可以单独开 worktree 和主线同时做的只有三块：2.4 日志搜索（`internal/logs`、日志接口、`LogViewer`）、3.3 的 shell 分词器（只在 `packages/core`）、4.1 的后端（新文件 `internal/api/files.go`）。
@@ -119,6 +119,8 @@
 | 3 | 队列顺序与暂缓 | 3.2 | `queue_order`、`held` | 3.1 的批量操作加上 `hold`、`release`、`top` |
 | 4 | 参数扫描与任务组 | 3.4 | `job_groups`、`group_id`、`params_json` | 依赖 3.3 的参数行和 3.1 的批量取消 |
 
+**进度（2026-11-25）**：3.1、3.2 已实现（迁移 20），比 3.3 先做。manager_test 覆盖 FEATURES 列出的验收，Go 单测、Linux vet、三端类型检查和 i18n 审计通过；e2e 新增一节（快速失败 → 批量替换 → 继续，加上置顶、暂缓、修改和命令行的 `hold`/`release`）待 Linux/CI，面板目视和真机随使用补验。
+
 **补充和修正**
 
 - **3.3 先做。** 它只改前端和 core，不碰调度器，风险最低；3.4 的"扫描"按钮就长在它的参数行上。core 的单元测试接进现有的测试（CI 已经在跑 core 的 5 项测试）。
@@ -161,7 +163,7 @@
 1. 已定试用版为 `v0.2.0-rc.1`，通过后打 `v0.2.0`。
 2. 定版后的顺序（先做 F2，再回客户端，F3 穿插）。确认后同步 ROADMAP。
 3. 已定 F1 纳入定版，候选版验收后开始两周试用。
-4. 只剩暂缓任务时是否发跑完汇总（发）。
+4. 已定只剩暂缓任务时算跑完、发汇总（2026-11-25 按默认做法实现）；这时快速失败也不暂停队列。
 
 FEATURES.md 第 8 节沿用，标上最晚要在哪一步之前定：
 

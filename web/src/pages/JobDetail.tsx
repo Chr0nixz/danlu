@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUpRight, Bell, BellOff, ChevronLeft, Copy, GitCompareArrows, NotebookPen, Pencil, RotateCw, Star, Terminal as TerminalIcon, X } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Bell, BellOff, ChevronLeft, Copy, GitCompareArrows, NotebookPen, Pause, Pencil, Play, RotateCw, SquarePen, Star, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { useGpus } from '../components/GpuGrid'
 import { CancelDialog } from '../components/JobRow'
+import { QueueOpError, useQueueOp } from '../components/QueueOps'
 import { CodeBrowser } from '../components/CodeBrowser'
 import { LogViewer } from '../components/LogViewer'
 import { ProfileSummary } from '../components/ResourceProfile'
@@ -66,6 +67,7 @@ function JobDetailPage() {
   const [confirming, setConfirming] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [memoEditing, setMemoEditing] = useState(false)
+  const queueOp = useQueueOp()
   const renameButton = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
 
@@ -129,6 +131,10 @@ function JobDetailPage() {
   const rerunTitle = sameCode ? t('job.rerun_same_title') : t('job.rerun_title')
   // 次要操作用幽灵按钮：一排里只有实验记录链接和主操作带边框，一眼分得出主次
   const minor = buttonClass('ghost', 'sm')
+  // 排队中的任务可以原地修改（编号和位置不变）、暂缓或恢复（FEATURES 3.1、3.2）；挪位置在列表行的菜单里
+  const queued = j.status === 'queued'
+  const toggleHold = () => queueOp.mutate({ id: j.id, held: !j.held })
+  const HoldIcon = j.held ? Play : Pause
   const tracker = (cls: string) =>
     j.tracker_url && (
       <a href={j.tracker_url} target="_blank" rel="noreferrer" className={cls}>
@@ -176,6 +182,8 @@ function JobDetailPage() {
                   </span>
                 </h1>
                 <Lineage j={j} />
+                {/* 实际跑的是什么仍以任务上的命令和快照为准；改前的内容记在服务器的事件里 */}
+                {j.edited && <p className="mt-1 pl-7 text-ui text-fg-3">{t('job.edited')}</p>}
               </div>
               <button
                 ref={renameButton}
@@ -192,6 +200,18 @@ function JobDetailPage() {
             {/* 电脑：操作都露在外面，次要的是幽灵按钮，实验记录和主操作带边框，主操作放最右 */}
             <div className="hidden flex-wrap justify-end gap-1 sm:flex">
               <StarButton job={j} label />
+              {queued && (
+                <>
+                  <Link to={`/new?edit=${j.id}`} className={minor} title={t('job.edit_queued_title')}>
+                    <SquarePen aria-hidden />
+                    {t('job.edit_queued')}
+                  </Link>
+                  <Button size="sm" variant="ghost" loading={queueOp.isPending} title={j.held ? undefined : t('job.hold_title')} onClick={toggleHold}>
+                    <HoldIcon aria-hidden />
+                    {j.held ? t('job.release') : t('job.hold')}
+                  </Button>
+                </>
+              )}
               {isActive(j) && (
                 <Button size="icon-sm" variant="ghost" loading={notifyToggle.isPending} aria-label={t('job.notify_aria')} aria-pressed={!!j.notify_done}
                   title={notifyTitle} onClick={toggleNotify}>
@@ -227,6 +247,18 @@ function JobDetailPage() {
               {primary('px-3.5 text-sm')}
               {tracker(cx(buttonClass('secondary', 'sm'), 'px-3.5 text-sm'))}
               <Menu label={t('job.more_actions')} className="ml-auto">
+                {queued && (
+                  <>
+                    <Link role="menuitem" to={`/new?edit=${j.id}`} className={menuItemClass}>
+                      <SquarePen aria-hidden />
+                      {t('job.edit_queued')}
+                    </Link>
+                    <button type="button" role="menuitem" className={menuItemClass} disabled={queueOp.isPending} onClick={toggleHold}>
+                      <HoldIcon aria-hidden />
+                      {j.held ? t('job.release') : <>{t('job.hold')}<span className="text-xs text-fg-3">{t('job.hold_hint')}</span></>}
+                    </button>
+                  </>
+                )}
                 <StarMenuItem job={j} />
                 {/* 没写过备注时，手机上"写备注"收在这里，不占日志上方的一行 */}
                 {!j.memo && (
@@ -274,6 +306,7 @@ function JobDetailPage() {
       <JobMemo key={j.id} job={j} editing={memoEditing} onEditing={setMemoEditing} />
       <MetaStrip j={j} />
       <StarError />
+      <QueueOpError />
       {notifyToggle.variables?.id === j.id && <ErrorBox error={notifyToggle.error} />}
 
       {j.status === 'failed' && <FailBox j={j} onShowLog={showLog} />}

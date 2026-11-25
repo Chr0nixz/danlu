@@ -241,6 +241,8 @@ ssh gpu1 "danlu tail $id -n 80"
 | `danlu tail <id> [-n 80] [-f]` | 日志尾部；`-f` 跟到任务结束 |
 | `danlu wait <id>… [--timeout 6h]` | 等这些任务都结束 |
 | `danlu cancel <id>…` | 取消 |
+| `danlu hold <id>…`、`danlu release <id>…` | 暂缓或恢复排队任务：暂缓的留在原位、调度时跳过，不挡后面的任务；几个编号要么都改要么都不改 |
+| `danlu move <id> top\|up\|down\|bottom` | 调整排队顺序 |
 | `danlu rerun <id>` | 按原参数重跑；`--snapshot` 用原任务的代码快照，`--current-code` 用工作目录现在的代码 |
 | `danlu gpus` | 每张卡被谁占着（任务、外部进程、预约），以及队首在等什么 |
 | `danlu api GET /api/…` | 直接调用面板接口，原样打印响应 |

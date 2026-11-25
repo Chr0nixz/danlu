@@ -16,6 +16,10 @@ const (
 	EventQueuePaused  = "queue_paused"
 	EventQueueResumed = "queue_resumed"
 	EventQueueDrained = "queue_drained"
+	// 排队任务的修改（FEATURES 3.1、3.2）：只做记录，不推送。job_edited 的数据是改前的字段
+	EventJobEdited    = "job_edited"
+	EventJobMoved     = "job_moved"
+	EventJobHeld      = "job_held"
 	EventAlertRaised  = "alert_raised"
 	EventAlertCleared = "alert_cleared"
 )
@@ -70,8 +74,9 @@ func (s *Store) transition(j *Job, key, value string, events ...*Event) error {
 				return fmt.Errorf("任务 #%d 的队列排空事件不合法", j.ID)
 			}
 			// 仍有待重试的收尾时，库里还有活动任务，等最后一次收尾成功再记排空。
+			// 只剩暂缓的排队任务也算跑完（PLAN 第 5 节）：它们是你主动按住的，别的跑完了正好告诉你去处理
 			var active bool
-			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued','running'))`).Scan(&active); err != nil {
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM jobs WHERE status='running' OR (status='queued' AND held=0))`).Scan(&active); err != nil {
 				return err
 			}
 			if active {

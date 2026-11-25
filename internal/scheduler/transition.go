@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -83,8 +84,9 @@ func jobEvent(j *store.Job, kind string, data any) *store.Event {
 	b, _ := json.Marshal(data)
 	id := j.ID
 	e := &store.Event{TS: time.Now().Unix(), Kind: kind, JobID: &id, Data: b}
-	if kind != store.EventJobRequeued {
+	if kind == store.EventJobStarted || kind == store.EventJobFinished {
 		// 一个任务最多启动一次、结束一次；即使退出后补记，也沿用同一个键。
+		// 放回队列、修改、挪动、暂缓可以有很多次，各用随机键
 		e.DedupeKey = fmt.Sprintf("%s:%d", kind, j.ID)
 	}
 	return e
@@ -153,6 +155,7 @@ func (m *Manager) persist(j *store.Job, transition bool, events ...*store.Event)
 }
 
 // jobsByStatus 以 pending 为准，覆盖库里的旧状态，包括尚未保存的取消和重新排队。
+// 排队任务按队列顺序（store.CompareQueue），其他按 id。
 func (m *Manager) jobsByStatus(status string) ([]*store.Job, error) {
 	jobs, err := m.st.JobsByStatus(status)
 	if err != nil {
@@ -173,15 +176,10 @@ func (m *Manager) jobsByStatus(status string) ([]*store.Job, error) {
 	for _, j := range byID {
 		jobs = append(jobs, j)
 	}
-	slices.SortFunc(jobs, func(a, b *store.Job) int {
-		switch {
-		case a.ID < b.ID:
-			return -1
-		case a.ID > b.ID:
-			return 1
-		default:
-			return 0
-		}
-	})
+	if status == store.StatusQueued {
+		slices.SortFunc(jobs, store.CompareQueue)
+	} else {
+		slices.SortFunc(jobs, func(a, b *store.Job) int { return cmp.Compare(a.ID, b.ID) })
+	}
 	return jobs, nil
 }

@@ -9,6 +9,11 @@ export const newjob = {
   'newjob.subtitle_new': 'Submitted jobs queue in order and start automatically once enough cards are free.',
   'newjob.subtitle_rerun': 'Settings copied from "{name}"; adjust parameters before submitting.',
   'newjob.subtitle_copy': 'Settings copied from "{name}"; edit and submit as a separate new job.',
+  'newjob.title_edit': 'Edit queued job #{id}',
+  'newjob.subtitle_edit': '"{name}" is still queued. Saving updates it in place; its id and queue position stay the same.',
+  'newjob.save_edit': 'Save changes',
+  'newjob.edit_closed': "Job #{id} is no longer queued and can't be edited.",
+  'newjob.edit_view_job': 'View job',
   'newjob.source_failed': 'Source job failed: ',
 
   // Draft restore

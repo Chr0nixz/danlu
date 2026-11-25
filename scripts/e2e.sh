@@ -440,6 +440,43 @@ check "自动暂停重启后仍不启动后续任务" [ "$(job "$FN" "d['status'
 check "自动暂停可通过面板接口手动恢复" [ "$(api -X POST "$BASE/api/queue/resume" -d '{}' | json "d['paused']")" = False ]
 check "手动继续后后续任务成功" wait_status "$FN" succeeded 10
 
+echo "== 修改排队任务、批量替换、顺序与暂缓（FEATURES 3.1、3.2）=="
+# 每个任务要 3 张卡（GPU 3 被外部占着），一次只跑一个，顺序看得清楚
+QF=$(submit "{\"name\":\"q-fail\",\"workdir\":\"$W\",\"cmd\":\"while [ ! -f $T/finish-q ]; do sleep 0.1; done; exit 3\",\"gpus\":3}")
+check "快速失败任务已启动" wait_started "$QF" 10
+Q1=$(submit "{\"name\":\"q1\",\"workdir\":\"$W\",\"cmd\":\"echo lr=BAD\",\"gpus\":3}")
+Q2=$(submit "{\"name\":\"q2\",\"workdir\":\"$W\",\"cmd\":\"echo lr=BAD; echo q2\",\"gpus\":3}")
+Q3=$(submit "{\"name\":\"q3\",\"workdir\":\"$W\",\"cmd\":\"echo q3\",\"gpus\":3}")
+check "置顶后 Q3 排第 1 位" [ "$(api -X POST "$BASE/api/jobs/$Q3/move" -d '{"to":"top"}' | json "d['queue_pos']")" = 1 ]
+check "排队任务按队列顺序列出" [ "$(api "$BASE/api/jobs?status=queued&order=asc" | json "[j['id'] for j in d['jobs']]")" = "[$Q3, $Q1, $Q2]" ]
+check "暂缓 Q1" [ "$(api -X POST "$BASE/api/jobs/$Q1/hold" -d '{"held":true}' | json "d['held']")" = True ]
+q1_held_in_place() { [ "$(job "$Q1" "(d['held'], d['queue_pos'], d['wait']['kind'])")" = "(True, 2, 'held')" ]; }
+check "暂缓的任务留在原位，等待原因是 held" wait_until 5 q1_held_in_place
+touch "$T/finish-q"
+check "快速失败任务记录为失败" wait_status "$QF" failed 10
+check "后面还有没暂缓的任务，队列自动暂停" [ "$(api "$BASE/api/queue" | json "d['paused'] and d['kind']=='fail_fast' and d['job_id']==$QF")" = True ]
+PREVIEW=$(api -X POST "$BASE/api/jobs/batch" -d "{\"ids\":[$Q1,$Q2,$Q3],\"action\":\"replace\",\"find\":\"lr=BAD\",\"replace\":\"lr=GOOD\",\"dry_run\":true}")
+check "批量替换预览逐个给出改前改后，不含这段文字的不改" [ "$(echo "$PREVIEW" | json "[(i['id'], i['changed']) for i in d['items']]")" = "[($Q1, True), ($Q2, True), ($Q3, False)]" ]
+check "预览不落库" [ "$(job "$Q1" "d['cmd']")" = "echo lr=BAD" ]
+check "有任务已经结束时整批 409，指出是哪个" [ "$(api -X POST "$BASE/api/jobs/batch" -d "{\"ids\":[$Q1,$QF],\"action\":\"replace\",\"find\":\"lr=BAD\",\"replace\":\"lr=GOOD\"}" | json "(d['code'], d['params']['id'])")" = "('job_not_queued', $QF)" ]
+check "整批放弃时 Q1 没有被改" [ "$(job "$Q1" "d['cmd']")" = "echo lr=BAD" ]
+check "批量替换" [ "$(api -X POST "$BASE/api/jobs/batch" -d "{\"ids\":[$Q1,$Q2,$Q3],\"action\":\"replace\",\"find\":\"lr=BAD\",\"replace\":\"lr=GOOD\"}" | json "sum(i['changed'] for i in d['items'])")" = 2 ]
+check "命令已替换，详情标出排队期间修改过" [ "$(job "$Q2" "(d['cmd'], d['edited'])")" = "('echo lr=GOOD; echo q2', True)" ]
+check "修改单个排队任务：编号和位置不变" [ "$(api -X POST "$BASE/api/jobs/$Q3/edit" -d "{\"workdir\":\"$W\",\"cmd\":\"echo q3-edited\",\"gpus\":3}" | json "(d['id'], d['queue_pos'], d['name'], d['cmd'])")" = "($Q3, 1, 'q3', 'echo q3-edited')" ]
+check "已经结束的任务不能修改（409）" [ "$(code -X POST -H 'Content-Type: application/json' -d "{\"workdir\":\"$W\",\"cmd\":\"x\"}" "$BASE/api/jobs/$QF/edit")" = 409 ]
+check "继续队列" [ "$(api -X POST "$BASE/api/queue/resume" -d '{}' | json "d['paused']")" = False ]
+check "置顶的 Q3 先跑，用的是修改后的命令" wait_status "$Q3" succeeded 15
+check "Q3 的日志是修改后的命令" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$Q3/log?tail=10000' | grep -q 'q3-edited'"
+check "暂缓的 Q1 不挡后面的 Q2" wait_status "$Q2" succeeded 15
+check "Q2 用替换后的命令启动" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$Q2/log?tail=10000' | grep -q 'lr=GOOD'"
+check "Q2 结束后暂缓的 Q1 仍在排队" [ "$(job "$Q1" "d['status']")" = queued ]
+check "命令行恢复 Q1" bash -c "'$BIN' release $Q1 | grep -qx '已恢复 #$Q1'"
+check "恢复后 Q1 用替换后的命令跑完" wait_status "$Q1" succeeded 15
+check "Q1 的日志是替换后的命令" bash -c "curl -s -b '$JAR' '$BASE/api/jobs/$Q1/log?tail=10000' | grep -q 'lr=GOOD'"
+check "暂缓、修改、恢复都记成事件" [ "$(event_kinds "$Q1")" = "job_held job_edited job_held job_started job_finished" ]
+check "挪动和修改记成事件" [ "$(event_kinds "$Q3")" = "job_moved job_edited job_started job_finished" ]
+check "修改、挪动、暂缓和批量操作记入审计日志" [ "$(api "$BASE/api/audit" | json "sorted({e['action'] for e in d['entries']} & {'job_edit','job_move','job_hold','job_batch'})")" = "['job_batch', 'job_edit', 'job_hold', 'job_move']" ]
+
 echo "== 关闭快速失败自动暂停（面板上改，不重启）=="
 check "面板上关闭快速失败暂停" [ "$(api -X POST "$BASE/api/settings/runtime" -d '{"fail_fast":0}' | json "d['runtime']['fail_fast']['value']==0 and d['runtime']['fail_fast']['custom']")" = True ]
 F0=$(submit "{\"name\":\"fail-fast-disabled\",\"workdir\":\"$W\",\"cmd\":\"while [ ! -f $T/finish-disabled ]; do sleep 0.1; done; exit 8\",\"gpus\":3}")

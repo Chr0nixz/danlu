@@ -5,6 +5,7 @@ import { Link } from 'react-router'
 import { compactProgress, duration, exitCodeOnly, failText, fmtTime, isActive, jobDuration, jobStatusText, progressRemaining, stripProgressTiming, timeAgo, timeAgoShort, useNow, waitText, type Job } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
+import { QueueJobMenu } from './QueueOps'
 import { StarButton } from './StarButton'
 import { announce, Button, buttonClass, Commit, cx, Dialog, Empty, ErrorBox, GpuChips, Meter, StatusIcon } from './ui'
 
@@ -136,11 +137,14 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
   const time = j.status === 'queued' ? t('jobs.waited', { duration: span }) : span
   const timeLabel = j.status === 'queued' ? t('jobs.time_waited') : j.status === 'running' ? t('jobs.time_running') : t('jobs.duration')
   const canCancel = isActive(j) && !j.cancel_requested
+  // 排队任务行尾是调整队列的 ⋯ 菜单（取消也在里面），占在跑任务取消按钮的那一格
+  const queueMenu = j.status === 'queued' && !select
   const code = select ? undefined : `/jobs/${j.id}?tab=code`
   const name = (
     <>
       <span className="shrink-0 text-ui text-fg-3">#{j.id}</span>
-      <span className="text-sm font-medium text-fg max-lg:line-clamp-2 max-lg:[overflow-wrap:anywhere] lg:truncate">{j.name}</span>
+      {/* 暂缓的任务留在原位，名字退成灰色 */}
+      <span className={cx('text-sm font-medium max-lg:line-clamp-2 max-lg:[overflow-wrap:anywhere] lg:truncate', j.status === 'queued' && j.held ? 'text-fg-3' : 'text-fg')}>{j.name}</span>
     </>
   )
 
@@ -262,7 +266,14 @@ export function JobRow({ job: j, showCopy = false, select }: { job: Job; showCop
             // 对比选择模式下只留位置，不让人点到复制把已选的任务丢掉
             <span className="hidden size-8 shrink-0 lg:block" />
           ))}
-        {canCancel ? (
+        {queueMenu ? (
+          <QueueJobMenu
+            job={j}
+            onCancel={() => setConfirming(true)}
+            // 电脑上和取消按钮一样悬停才出现；菜单展开时一直显示
+            buttonClassName="lg:pointer-fine:opacity-0 lg:group-hover:opacity-100 lg:focus-visible:opacity-100 aria-expanded:opacity-100"
+          />
+        ) : canCancel ? (
           <Button
             size="icon-sm"
             variant="ghost"

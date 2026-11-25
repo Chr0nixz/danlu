@@ -107,6 +107,7 @@ export function statusLabel(s: JobStatus): string {
 
 export function jobStatusText(j: Job): string {
   if (j.status === 'running' && j.cancel_requested) return t('status.cancelling')
+  if (j.status === 'queued' && j.held) return t('status.held')
   return statusLabel(j.status)
 }
 
@@ -248,6 +249,7 @@ export function queuePauseText(q: QueueState): string {
 
 const waitKeys = {
   ahead: 'queue.wait_ahead',
+  held: 'queue.wait_held',
   scheduling: 'queue.wait_scheduling',
   queue_state: 'queue.wait_queue_state',
   paused: 'queue.wait_paused',

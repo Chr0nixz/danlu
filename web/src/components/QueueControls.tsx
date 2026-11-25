@@ -1,10 +1,11 @@
 import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query'
-import { Pause, Play } from 'lucide-react'
+import { Pause, Play, Replace } from 'lucide-react'
+import { Link } from 'react-router'
 import { apiErrorText, queuePauseText } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useQueueState } from '../lib/queries'
-import { Alert, Button, ErrorBox } from './ui'
+import { Alert, Button, buttonClass, ErrorBox } from './ui'
 
 const pauseMutationKey = ['queue', 'pause'] as const
 
@@ -27,6 +28,13 @@ export function QueueBanner() {
       <Alert tone={queue.data.kind === 'manual' ? 'info' : 'warn'} role="status">
         <div className="flex flex-wrap items-center gap-3">
           <span className="min-w-0 flex-1">{t('jobs.queue_paused', { reason: reason || t('jobs.queue_paused_fallback') })}</span>
+          {/* 快速失败暂停：后面的任务多半带着同一个错，先改了再继续（FEATURES 3.1）。进任务页选中全部排队任务、打开替换 */}
+          {queue.data.kind === 'fail_fast' && (
+            <Link to="/jobs?status=queued&replace=1" className={buttonClass('ghost', 'sm')}>
+              <Replace aria-hidden />
+              {t('jobs.edit_queued_jobs')}
+            </Link>
+          )}
           <Button size="sm" loading={resume.isPending} onClick={() => resume.mutate()}>
             <Play aria-hidden />
             {t('jobs.resume_queue')}

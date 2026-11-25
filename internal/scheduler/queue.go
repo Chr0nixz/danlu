@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -159,8 +160,12 @@ func (m *Manager) failFastPauseLocked(j *store.Job) (*QueueState, *store.Event, 
 		return nil, nil, err
 	}
 	queued, err := m.jobsByStatus(store.StatusQueued)
-	if err != nil || len(queued) == 0 {
+	if err != nil {
 		return nil, nil, err
+	}
+	// 只剩暂缓的任务时不暂停：它们不会自己启动，恢复哪个是你自己决定的（和"只剩暂缓任务算跑完"一致）
+	if !slices.ContainsFunc(queued, func(q *store.Job) bool { return !q.Held }) {
+		return nil, nil, nil
 	}
 	id := j.ID
 	secs := *j.EndedAt - *j.StartedAt

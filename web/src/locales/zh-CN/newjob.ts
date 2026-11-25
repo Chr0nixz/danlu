@@ -11,6 +11,11 @@ export const newjob = {
   'newjob.subtitle_new': '提交后按顺序排队，有足够的空卡就自动开始。',
   'newjob.subtitle_rerun': '设置已从「{name}」复制过来，可以先改参数再提交。',
   'newjob.subtitle_copy': '设置已从「{name}」复制过来，修改后提交为独立的新任务。',
+  'newjob.title_edit': '修改排队任务 #{id}',
+  'newjob.subtitle_edit': '「{name}」还在排队。保存后原地更新，编号和排队位置都不变。',
+  'newjob.save_edit': '保存修改',
+  'newjob.edit_closed': '任务 #{id} 已经不在排队中，不能再修改。',
+  'newjob.edit_view_job': '查看任务',
   'newjob.source_failed': '原任务失败：',
 
   // 草稿恢复

@@ -2,6 +2,8 @@ import { translate } from './i18n.ts'
 import type {
   HostMetricsResponse,
   AuditEntry,
+  BatchReq,
+  BatchResult,
   DeviceToken,
   DoctorReport,
   GPU,
@@ -17,6 +19,7 @@ import type {
   Reservation,
   ReservationReq,
   Me,
+  QueueMove,
   QueueState,
   ResourceHistory,
   ResourceRange,
@@ -174,6 +177,14 @@ export function createApi(t: Transport, opt: ApiOptions) {
     job: (id: number) => get<Job>(`/api/jobs/${id}`),
     envPackages: (id: number) => getText(`/api/jobs/${id}/env`),
     submit: (r: SubmitReq) => post<Job>('/api/jobs', r),
+    /** 修改排队中的任务，body 和提交相同；rerun_of、code_from 不变。已经开始时 409 */
+    editJob: (id: number, r: SubmitReq) => post<Job>(`/api/jobs/${id}/edit`, r),
+    /** 调整排队任务的位置 */
+    moveJob: (id: number, to: QueueMove) => post<Job>(`/api/jobs/${id}/move`, { to }),
+    /** 暂缓或恢复排队任务 */
+    holdJob: (id: number, held: boolean) => post<Job>(`/api/jobs/${id}/hold`, { held }),
+    /** 批量操作排队任务；有任务已经开始或结束时 409，整批不改 */
+    batchJobs: (r: BatchReq) => post<BatchResult>('/api/jobs/batch', r),
     cancel: (id: number) => post<Job>(`/api/jobs/${id}/cancel`),
     star: (id: number, starred: boolean) => post<Job>(`/api/jobs/${id}/star`, { starred }),
     rename: (id: number, name: string) => post<Job>(`/api/jobs/${id}/rename`, { name }),

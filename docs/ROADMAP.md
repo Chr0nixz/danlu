@@ -68,7 +68,8 @@ F1 随 `v0.2.0` 定版。后续功能按 [PLAN.md](PLAN.md) 分批推进。
 - **GPU 预约（代码已实现，真机待验）**：给丹炉外的任务提前占卡。按张数或指定卡号，此刻空闲的卡马上收下，之后丹炉任务释放的卡先给预约、再给排队任务，凑齐后开始计时；可定时自动释放、延长、手动释放，就绪和到期前 10 分钟推送到手机。设计和边界见 [FEATURES.md](FEATURES.md) 第 5.2 节。
 - **严格限卡（代码已实现，真机待验）**：可选。服务器上 sudo 装一次 root 助手、面板上打开后，每个任务在只放行分到的卡的 systemd 临时服务里运行，程序改写 `CUDA_VISIBLE_DEVICES` 或用 EGL 渲染也碰不到别的卡；程序里看到的卡从 0 编号。设计和边界见 [FEATURES.md](FEATURES.md) 第 5.4 节。
 
-- **队列**：优先级或"允许插队"开关、hold/release、拖动排序、修改排队中的任务、依赖（`--after`）；自动重试，只用于 NCCL 超时这类偶发错误（DESIGN.md 第 5.3 节）。
+- **修改排队任务、队列顺序与暂缓（代码已实现，真机待验）**：排队中的任务可以原地修改（编号和位置不变）、批量取消和批量替换命令里的文字（先预览，整批全成或全不成），快速失败暂停的提示里直接进入替换；排队任务可以置顶、上移、下移、移到末尾和暂缓，暂缓的留在原位、不挡后面的任务。命令行有 `hold`、`release`、`move`。设计和边界见 [FEATURES.md](FEATURES.md) 第 3.1、3.2 节。
+- **队列**：拖动排序、依赖（`--after`）；自动重试，只用于 NCCL 超时这类偶发错误（DESIGN.md 第 5.3 节）。优先级数字和"允许插队"按 FEATURES 3.2 不做。
 - **参数扫描**：一个命令模板加几组取值，生成一批任务，在列表里归成一组。
 - **预计开始时间**：根据运行中任务的剩余时间，估计排队的任务什么时候能开始。
 - **输出文件**：浏览任务的输出目录，预览图片、文本、JSON 和 CSV，生成的样例和评测结果在手机上也能看。
@@ -160,6 +161,7 @@ F1 随 `v0.2.0` 定版。后续功能按 [PLAN.md](PLAN.md) 分批推进。
 
 ---
 变更记录
+- v2.24（2026-11-25）：理想线新增修改排队任务、队列顺序与暂缓（FEATURES 3.1、3.2，PLAN F2）：迁移 20 加 `jobs.queue_order`、`jobs.held`；新增 `POST /api/jobs/{id}/edit`、`/move`、`/hold` 和 `POST /api/jobs/batch`，任务对象加 `held`、详情加 `edited`，等待原因加 `held`（additive，API 版本不变）；事件 `job_edited`、`job_moved`、`job_held` 只记录不推送；只剩暂缓任务时算跑完。Go 单测、Linux vet、三端类型检查、i18n 审计和桌面 clippy 通过；e2e 新增一节待 Linux/CI，面板目视和真机待验。
 - v2.23（2026-11-23）：只有 serve 升级数据库。其他命令改走 `openStore`：只新建库（占着 `serve.lock`），已有的旧库一律拒绝并提示 `danlu restart`；`init --force` 先开库再重新生成 CA，库打不开时什么都不改。11-22 的初版是"拿得到 `serve.lock` 才替它升级"，11-23 审阅指出服务重启的间隙、停着的时候锁也是空的，改成更严的规则。起因是 hsy 上用测试程序执行 `strict status` 把正在运行的旧版服务的库升到了迁移 18，旧服务若重启会因库比它新而起不来。
 - v2.22（2026-11-22）：理想线新增严格限卡（FEATURES 5.4，PLAN F4）：hsy 上用 `scripts/s0/strict-probe.sh` 确认 cgroup 设备控制后 CUDA/NVML/EGL 只看得到放行的卡并从 0 编号；新增 root 助手（`danlu strict install`、sudoers 只放行 start/check）、`danlu job-exec`、迁移 18 `jobs.unit`、`POST /api/settings/strict`（additive，API 版本不变）、告警 `strict_unavailable`。GPU 进程记下启动时的 `CUDA_VISIBLE_DEVICES`（UUID 换成卡号），任务进程跑到没分给它的卡上时告警并推送一次。Go 单测、Linux vet、三端类型检查通过；e2e 新增一节（CI 免密 sudo 下跑）。同日 hsy 测试实例上真机验收通过隔离、编号、取消、重启接管和关开关（CHECKLIST G2/G3 记录），预约配合、LIBERO 和卸载待补。
 - v2.21（2026-11-21）：理想线新增 GPU 预约（FEATURES 5.2，PLAN F4）：迁移 16 加表 `gpu_reservations`，新增 `/api/reservations` 系列接口，`/api/gpus` 每张卡加 `reservation`（additive，API 版本不变）；预约先于排队任务收卡，已收的卡不分配、其上的外部进程不触发队首阻塞告警；就绪和到期前 10 分钟推送。Go 单测、Linux vet、三端类型检查、面板构建和桌面 clippy 通过，面板在 macOS 假 GPU 环境下目视检查过手机和电脑两种宽度；e2e 新增检查待 Linux/CI 执行，真机待验。

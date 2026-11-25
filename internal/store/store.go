@@ -2,6 +2,7 @@
 package store
 
 import (
+	"cmp"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -157,6 +158,11 @@ var migrations = []string{
 	// 提交幂等（命令行 --key）：同一个 key 只建一个任务。只在插入时写，以后不改
 	`ALTER TABLE jobs ADD COLUMN submit_key TEXT;
 	CREATE UNIQUE INDEX jobs_submit_key ON jobs(submit_key) WHERE submit_key IS NOT NULL;`,
+	// 队列顺序与暂缓（FEATURES 3.2）：排队任务按 queue_order, id 出队，迁移时和新插入时都等于 id；
+	// held=1 的排队任务调度时跳过，留在原来的位置。两列只由专门的语句写，SaveJob 不写
+	`ALTER TABLE jobs ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0;
+	UPDATE jobs SET queue_order = id;
+	ALTER TABLE jobs ADD COLUMN held INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // keepBackups 是升级前备份最多保留的份数。
@@ -458,6 +464,21 @@ type Job struct {
 	EndedAt         *int64           `json:"ended_at"`
 	// SubmitKey 是提交时带的幂等键，没有就是空串。只在 InsertJob 写，SaveJob 不写
 	SubmitKey string `json:"submit_key,omitempty"`
+	// QueueOrder 决定排队任务的先后（小的在前，相同时按 id），插入时等于 id，只由 SetQueueOrder 改。
+	// 放回队列不碰它，所以停服时放回队列的任务回到原来的位置
+	QueueOrder int64 `json:"-"`
+	// Held 是暂缓：排队任务留在原位，调度时跳过。只由 SetHeld 写
+	Held bool `json:"held,omitempty"`
+}
+
+// CompareQueue 是排队任务的顺序：queue_order 小的在前，相同时 id 小的在前。
+func CompareQueue(a, b *Job) int {
+	switch {
+	case a.QueueOrder != b.QueueOrder:
+		return cmp.Compare(a.QueueOrder, b.QueueOrder)
+	default:
+		return cmp.Compare(a.ID, b.ID)
+	}
 }
 
 type Recipe struct {
@@ -488,7 +509,7 @@ func (j *Job) Finished() bool {
 const jobCols = `id, name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned, gpus_assigned,
 	status, master_port, pid, pid_starttime, exit_code, fail_reason, cancel_requested, tracker_url,
 	git_commit, git_branch, git_dirty, snapshot_ok, snapshot_note, rerun_of, created_at, started_at, ended_at,
-	inherit_bashrc, boot_id, notes, fail_kind, fail_detail, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, memo, profile_json, notify_done, unit, submit_key`
+	inherit_bashrc, boot_id, notes, fail_kind, fail_detail, ext_seen, oom_base, traceback_offset, recipe_json, output_dir, starred, pruned_at, pruning, code_from, memo, profile_json, notify_done, unit, submit_key, queue_order, held`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -506,7 +527,7 @@ func scanJob(r scanner) (*Job, error) {
 	err := r.Scan(&j.ID, &j.Name, &j.Workdir, &j.CondaEnv, &j.Cmd, &envJSON, &j.GPUsReq, &pinned, &asgn,
 		&j.Status, &j.MasterPort, &j.PID, &pidStart, &exit, &j.FailReason, &j.CancelRequested, &j.TrackerURL,
 		&j.GitCommit, &j.GitBranch, &j.GitDirty, &j.SnapshotOK, &j.SnapshotNote, &rerun, &j.CreatedAt, &started, &ended,
-		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.FailDetail, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom, &j.Memo, &profileJSON, &j.NotifyDone, &j.Unit, &submitKey)
+		&j.InheritBashrc, &j.BootID, &j.Notes, &j.FailKind, &j.FailDetail, &j.ExtSeen, &j.OOMBase, &traceback, &recipeJSON, &outputDir, &j.Starred, &pruned, &j.Pruning, &codeFrom, &j.Memo, &profileJSON, &j.NotifyDone, &j.Unit, &submitKey, &j.QueueOrder, &j.Held)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -572,8 +593,13 @@ func (s *Store) InsertJob(j *Job) error {
 	if j.SubmitKey != "" {
 		submitKey = j.SubmitKey
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	// 在同一条写语句里核对源快照和登记引用，与清理器的认领互斥。
-	res, err := s.db.Exec(`INSERT INTO jobs (name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned,
+	res, err := tx.Exec(`INSERT INTO jobs (name, workdir, conda_env, cmd, env_json, gpus_req, gpus_pinned,
 		status, rerun_of, created_at, inherit_bashrc, code_from, memo, notify_done, submit_key)
 		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR EXISTS (
 			SELECT 1 FROM jobs WHERE id=? AND snapshot_ok=1 AND pruned_at IS NULL AND pruning=0
@@ -592,8 +618,20 @@ func (s *Store) InsertJob(j *Job) error {
 	} else if n == 0 {
 		return ErrSnapshotUnavailable
 	}
-	j.ID, err = res.LastInsertId()
-	return err
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	// 新任务排在队尾：queue_order 等于 id。挪动只在排队任务已有的 queue_order 之间互换（见调度器的 reorder），
+	// 所以它们都不大于已分配的最大 id，之后提交的任务总在它们后面
+	if _, err := tx.Exec("UPDATE jobs SET queue_order=id WHERE id=?", id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	j.ID, j.QueueOrder = id, id
+	return nil
 }
 
 // SaveJob 写回运行期会变化的字段。
@@ -681,9 +719,13 @@ func (s *Store) JobBySubmitKey(key string) (*Job, error) {
 	return scanJob(s.db.QueryRow("SELECT "+jobCols+" FROM jobs WHERE submit_key=?", key))
 }
 
-// JobsByStatus 按 id 升序返回，排队任务的顺序就是提交顺序。
+// JobsByStatus 排队任务按队列顺序（CompareQueue）返回，其他状态按 id 升序。
 func (s *Store) JobsByStatus(status string) ([]*Job, error) {
-	return s.queryJobs("SELECT "+jobCols+" FROM jobs WHERE status=? ORDER BY id", status)
+	order := "id"
+	if status == StatusQueued {
+		order = "queue_order, id"
+	}
+	return s.queryJobs("SELECT "+jobCols+" FROM jobs WHERE status=? ORDER BY "+order, status)
 }
 
 // JobsByWorkdirs 返回工作目录等于 paths 中任一路径的任务。
@@ -741,7 +783,7 @@ type JobFilter struct {
 	// 结束时间只精确到秒，同一秒结束的任务再按 id 区分。BeforeID 为 0 时取这一秒之前的。
 	Before   int64
 	BeforeID int64
-	// Ascending 按 id 从旧到新排（ByEnded 时不生效）。排队任务按 id 出队，这就是队列顺序：
+	// Ascending 按 id 从旧到新排（ByEnded 时不生效）；只筛排队任务时按队列顺序（queue_order, id）：
 	// 排队任务多于一页时，面板和命令行取的是队首那一页，不是最新提交的那一页
 	Ascending bool
 	Limit     int
@@ -780,6 +822,9 @@ func (s *Store) ListJobs(f JobFilter) ([]*Job, int, error) {
 	order := " ORDER BY id DESC"
 	if f.Ascending {
 		order = " ORDER BY id"
+		if len(f.Statuses) == 1 && f.Statuses[0] == StatusQueued {
+			order = " ORDER BY queue_order, id"
+		}
 	}
 	if f.ByEnded {
 		where = append(where, "ended_at IS NOT NULL")

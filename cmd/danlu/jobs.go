@@ -829,6 +829,86 @@ func cmdCancel(args []string) error {
 	return nil
 }
 
+// ---------- hold / release / move（FEATURES 3.2）----------
+
+// cmdHold 暂缓（held=true）或恢复排队任务。走批量接口：几个任务要么都改，要么一个也不改。
+func cmdHold(args []string, held bool) error {
+	name, action, verb, already := "hold", scheduler.BatchHold, "已暂缓", "已经是暂缓的"
+	help := "danlu hold <id>… [--json]\n  暂缓排队中的任务：留在队列里原来的位置，调度时跳过，也不挡后面的任务。\n  有任务已经开始或结束时一个也不改。danlu release 恢复。"
+	if !held {
+		name, action, verb, already = "release", scheduler.BatchRelease, "已恢复", "本来就没有暂缓"
+		help = "danlu release <id>… [--json]\n  恢复暂缓的排队任务，按原来的位置参与调度。有任务已经开始或结束时一个也不改。"
+	}
+	fs := newFlags(name, help)
+	asJSON := fs.Bool("json", false, `以 JSON 输出 {"action","dry_run","items":[{"id","name","changed"}…]}`)
+	pos, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	ids, err := parseJobIDs(pos)
+	if err != nil {
+		return err
+	}
+	var raw json.RawMessage
+	if _, err := newAPIClient().do(context.Background(), http.MethodPost, "/api/jobs/batch",
+		scheduler.BatchReq{IDs: ids, Action: action}, &raw); err != nil {
+		return err
+	}
+	if *asJSON {
+		return printRawJSON(raw)
+	}
+	var res scheduler.BatchResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return fmt.Errorf("服务端响应不是批量操作结果: %w", err)
+	}
+	for _, item := range res.Items {
+		if item.Changed {
+			fmt.Printf("%s #%d\n", verb, item.ID)
+		} else {
+			fmt.Printf("#%d %s\n", item.ID, already)
+		}
+	}
+	return nil
+}
+
+func cmdMove(args []string) error {
+	fs := newFlags("move", "danlu move <id> top|up|down|bottom [--json]\n"+
+		"  调整排队任务的位置：置顶、上移一位、下移一位、移到末尾。暂缓的任务也占着位置。\n"+
+		"  队首放不下时后面的任务仍然不插队；想让它先跑就置顶。")
+	asJSON := fs.Bool("json", false, "以 JSON 输出移动后的任务对象")
+	pos, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return usageErr("用法: danlu move <id> top|up|down|bottom")
+	}
+	id, err := oneJobID(pos[:1])
+	if err != nil {
+		return err
+	}
+	to := pos[1]
+	switch to {
+	case scheduler.MoveTop, scheduler.MoveUp, scheduler.MoveDown, scheduler.MoveBottom:
+	default:
+		return usageErr("位置 %q 无效，只能是 top、up、down 或 bottom", to)
+	}
+	var raw json.RawMessage
+	if _, err := newAPIClient().do(context.Background(), http.MethodPost, fmt.Sprintf("/api/jobs/%d/move", id),
+		map[string]string{"to": to}, &raw); err != nil {
+		return err
+	}
+	if *asJSON {
+		return printRawJSON(raw)
+	}
+	var j jobInfo
+	if err := json.Unmarshal(raw, &j); err != nil {
+		return fmt.Errorf("服务端响应不是任务对象: %w", err)
+	}
+	fmt.Printf("#%d 现在排第 %d 位\n", j.ID, j.QueuePos)
+	return nil
+}
+
 // ---------- tail ----------
 
 func cmdTail(args []string) error {
@@ -1046,8 +1126,8 @@ func cmdGpus(args []string) error {
 	if err != nil {
 		return err
 	}
-	// 只要队首：按队列顺序取第一条，排队任务再多也取得到；total 是排队总数
-	queuedRaw, err := c.getJSON(ctx, "/api/jobs?status=queued&order=asc&size=1")
+	// 只要队首：按队列顺序取前面一页，第一个没有暂缓的就是队首；total 是排队总数（含暂缓的）
+	queuedRaw, err := c.getJSON(ctx, "/api/jobs?status=queued&order=asc&size=200")
 	if err != nil {
 		return err
 	}
@@ -1060,9 +1140,15 @@ func cmdGpus(args []string) error {
 	}
 	var head *jobInfo
 	var headRaw json.RawMessage
+	held := 0
 	for _, r := range queued.Jobs {
 		var j jobInfo
-		if json.Unmarshal(r, &j) == nil && j.QueuePos == 1 {
+		if json.Unmarshal(r, &j) != nil {
+			continue
+		}
+		if j.Held {
+			held++
+		} else if head == nil {
 			head, headRaw = &j, r
 		}
 	}
@@ -1137,6 +1223,9 @@ func cmdGpus(args []string) error {
 		fmt.Println("队列已暂停：" + q.Reason)
 	}
 	line := fmt.Sprintf("排队 %d 个", queued.Total)
+	if held > 0 {
+		line += fmt.Sprintf("（暂缓 %d 个）", held)
+	}
 	if head != nil {
 		line += fmt.Sprintf("；队首 #%d（%s）", head.ID, gpuText(head))
 		if head.WaitReason != "" {

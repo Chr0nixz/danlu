@@ -78,6 +78,10 @@ export interface Job {
   code_from?: number
   /** 提交幂等键（命令行 danlu submit --key）；没有时不出现 */
   submit_key?: string
+  /** 暂缓：排队任务留在原位，调度时跳过，也不挡后面的任务；没有暂缓时不出现。旧版服务器没有这个字段 */
+  held?: boolean
+  /** 只在单个任务详情里有：排队期间修改过 */
+  edited?: boolean
   created_at: number
   started_at: number | null
   ended_at: number | null
@@ -103,7 +107,7 @@ export interface JobRef {
 
 /** 排队任务在等什么（internal/scheduler/wait.go） */
 export interface QueueWait {
-  kind: 'ahead' | 'scheduling' | 'queue_state' | 'paused' | 'disk_check' | 'gpu_data' | 'strict' | 'res_loading' | 'gpus' | 'pinned'
+  kind: 'ahead' | 'held' | 'scheduling' | 'queue_state' | 'paused' | 'disk_check' | 'gpu_data' | 'strict' | 'res_loading' | 'gpus' | 'pinned'
   need?: number
   free?: number
   pinned?: number[]
@@ -682,6 +686,38 @@ export interface SubmitReq {
   submit_key?: string
 }
 
+/** 排队任务的位置调整：置顶、上移、下移、移到末尾 */
+export type QueueMove = 'top' | 'up' | 'down' | 'bottom'
+
+/** 对一批排队任务的同一个操作。整批全成或全不成 */
+export type BatchAction = 'cancel' | 'replace' | 'hold' | 'release' | 'top'
+
+export interface BatchReq {
+  ids: number[]
+  action: BatchAction
+  /** replace 用：命令里的 find 全部换成 replace */
+  find?: string
+  replace?: string
+  /** 只返回预览，不改任何东西 */
+  dry_run?: boolean
+}
+
+/** 一个任务在批量操作里的结果。changed 为 false 表示不受影响（命令里没有要找的文字、已经是暂缓的等） */
+export interface BatchItem {
+  id: number
+  name: string
+  changed: boolean
+  /** replace：改前、改后的命令 */
+  before?: string
+  after?: string
+}
+
+export interface BatchResult {
+  action: BatchAction
+  dry_run: boolean
+  items: BatchItem[]
+}
+
 export interface JobsQuery {
   workdir?: string
   starred?: boolean
@@ -695,7 +731,7 @@ export interface JobsQuery {
   finished_to_event?: number
   /**
    * 'ended'：只要已结束的，按结束时间倒序，配合 before / before_id 翻页；
-   * 'asc'：按 id 从旧到新，排队任务就是队列顺序。不传时按 id 从新到旧
+   * 'asc'：按 id 从旧到新；只筛排队任务时按队列顺序（置顶、上移后的顺序）。不传时按 id 从新到旧
    */
   order?: 'ended' | 'asc'
   /** 上一页最后一条的结束时间和 id */

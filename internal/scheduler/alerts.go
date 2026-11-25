@@ -62,8 +62,17 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 	waitReasons := map[int64]Wait{}
 	// 填完再发布，读取方拿到的 map 不会再被修改。
 	defer m.waitReasons.Store(&waitReasons)
+	// 队首是第一个没有暂缓的任务；暂缓的任务不挡后面，也不为它告警
+	var head *store.Job
 	for _, j := range queued {
-		waitReasons[j.ID] = Wait{Kind: WaitAhead}
+		switch {
+		case j.Held:
+			waitReasons[j.ID] = Wait{Kind: WaitHeld}
+		case head == nil:
+			head = j
+		default:
+			waitReasons[j.ID] = Wait{Kind: WaitAhead}
+		}
 	}
 	if !m.alertsReady {
 		m.alerts, err = m.st.LatestAlerts()
@@ -199,8 +208,7 @@ func (m *Manager) updateAlertsLocked(now time.Time) error {
 		}
 	}
 	headBlocked := false
-	if len(queued) > 0 {
-		head := queued[0]
+	if head != nil {
 		reason := Wait{Kind: WaitScheduling}
 		switch {
 		case queueErr != nil:

@@ -6,6 +6,7 @@ import "fmt"
 // Text() 是中文原文，给旧客户端的 wait_reason 和单测用。
 const (
 	WaitAhead      = "ahead"       // 前面还有任务
+	WaitHeld       = "held"        // 暂缓，等恢复
 	WaitScheduling = "scheduling"  // 卡够了，等下一轮调度
 	WaitQueueState = "queue_state" // 读不到队列状态
 	WaitPaused     = "paused"      // 队列暂停（原因见队列横幅）
@@ -51,6 +52,8 @@ func (w Wait) Text() string {
 	switch w.Kind {
 	case WaitAhead:
 		s = "等待前面的任务"
+	case WaitHeld:
+		s = "已暂缓"
 	case WaitQueueState:
 		s = "等待队列状态恢复"
 	case WaitPaused:

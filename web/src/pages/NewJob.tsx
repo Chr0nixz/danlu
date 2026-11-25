@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, FolderOpen, History, Minus, Plus } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
@@ -6,12 +6,13 @@ import { gpuBusy, useGpus } from '../components/GpuGrid'
 import { GpuPicker } from '../components/GpuPicker'
 import { modKey } from '../components/Shortcuts'
 import { Alert, Button, Card, cx, ErrorBox, FieldError, FormRow, Input, Kbd, Segmented, Select, Skeleton, Textarea } from '../components/ui'
-import { apiErrorText, failText, sameCodeFailKinds, type Job, type Prefs } from '@danlu/core'
+import { apiErrorText, failText, sameCodeFailKinds, type Job, type Prefs, type SubmitReq } from '@danlu/core'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { usePrefs } from '../lib/prefs'
 
-type JobFormMode = 'new' | 'copy' | 'rerun'
+// edit：修改排队中的任务（/new?edit=<id>），保存后原地更新，编号和排队位置都不变（FEATURES 3.1）
+type JobFormMode = 'new' | 'copy' | 'rerun' | 'edit'
 
 function rerunName(name: string) {
   const m = name.match(/^(.*)-r(\d+)$/)
@@ -82,9 +83,10 @@ function writeDraft(key: string, draft: Draft | null) {
 export function NewJob() {
   const [params] = useSearchParams()
   const [generation, setGeneration] = useState(0)
+  const editId = Number(params.get('edit')) || null
   const copyId = Number(params.get('copy')) || null
-  const sourceId = copyId ?? (Number(params.get('from')) || null)
-  const formMode: JobFormMode = copyId ? 'copy' : sourceId ? 'rerun' : 'new'
+  const sourceId = editId ?? copyId ?? (Number(params.get('from')) || null)
+  const formMode: JobFormMode = editId ? 'edit' : copyId ? 'copy' : sourceId ? 'rerun' : 'new'
   const source = useQuery({ queryKey: ['job', sourceId], queryFn: () => api.job(sourceId!), enabled: !!sourceId })
   // 表单的初始值来自面板偏好：等它到了再挂载，草稿才能和"刚打开时"正确比较
   const { prefs, ready } = usePrefs()
@@ -105,6 +107,7 @@ type Field = 'workdir' | 'cmd' | 'gpu' | 'memo' | 'env'
 
 function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; formMode: JobFormMode; prefs: Prefs; onReset(): void }) {
   const nav = useNavigate()
+  const qc = useQueryClient()
   const gpus = useGpus()
   const conda = useQuery({ queryKey: ['conda'], queryFn: api.condaEnvs, staleTime: 60_000 })
   const recent = useQuery({ queryKey: ['recentWorkdirs'], queryFn: api.recentWorkdirs })
@@ -113,18 +116,24 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
   const ids = { workdir: `${uid}-workdir`, cmd: `${uid}-cmd`, conda: `${uid}-conda`, gpu: `${uid}-gpu`, name: `${uid}-name`, memo: `${uid}-memo`, env: `${uid}-env`, notifyOff: `${uid}-notify-off` }
 
   const rerun = formMode === 'rerun'
+  const editing = formMode === 'edit' && !!source
+  // 修改排队任务时已经开始或结束了：表单照样显示，但不能保存
+  const editClosed = editing && source.status !== 'queued'
   const canRestore = !!source?.snapshot_ok && !source.pruned_at && (source.pid > 0 || source.ended_at !== null)
   const draftKey = `danlu.draft.${formMode}.${source?.id ?? ''}`
   const [saved] = useState(() => readDraft(draftKey))
   // 被重启、外部终止这类和代码无关的失败，默认用原任务的快照原样重跑；其余默认用工作目录现在的代码（多半刚改过）
   const [useSnapshot, setUseSnapshot] = useState(() => saved?.useSnapshot ?? (rerun && canRestore && sameCodeFailKinds.includes(source?.fail_kind ?? '')))
   const snapshotSelected = rerun && useSnapshot
+  // 快照重跑出来的排队任务：代码来自源任务，工作目录必须和它一致，修改时不能改
+  const lockedWorkdir = snapshotSelected || (editing && source.code_from != null)
   const [name, setName] = useState(saved?.name ?? (source && rerun ? rerunName(source.name) : source?.name ?? ''))
-  const [memo, setMemo] = useState(saved?.memo ?? '')
+  // 备注和结束提醒说的是那一次运行：重跑和复制不带过去，修改时保留
+  const [memo, setMemo] = useState(saved?.memo ?? (editing ? source.memo ?? '' : ''))
   // 默认值在「设置 → 面板偏好」里改，手机和电脑共用
-  const [notifyDone, setNotifyDone] = useState(prefs.new_job_notify_done)
+  const [notifyDone, setNotifyDone] = useState(editing ? !!source.notify_done : prefs.new_job_notify_done)
   const [workdir, setWorkdir] = useState(saved?.workdir ?? source?.workdir ?? '')
-  const activeWorkdir = snapshotSelected ? source!.workdir : workdir
+  const activeWorkdir = lockedWorkdir ? source!.workdir : workdir
   const [condaEnv, setCondaEnv] = useState(saved?.condaEnv ?? source?.conda_env ?? '')
   const [cmd, setCmd] = useState(saved?.cmd ?? source?.cmd ?? '')
   const [mode, setMode] = useState<'count' | 'pinned'>(saved?.mode ?? (source?.gpus_pinned.length ? 'pinned' : 'count'))
@@ -192,10 +201,14 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
   }, [])
 
   const submit = useMutation({
-    mutationFn: api.submit,
+    mutationFn: (r: SubmitReq) => (editing ? api.editJob(source.id, r) : api.submit(r)),
     onSuccess: (j) => {
       submitted.current = true
       writeDraft(draftKey, null)
+      if (editing) {
+        qc.setQueryData(['job', j.id], j)
+        void qc.invalidateQueries({ queryKey: ['jobs'] })
+      }
       nav(`/jobs/${j.id}`)
     },
   })
@@ -206,7 +219,7 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
-    if (submit.isPending || (snapshotSelected && !canRestore)) return
+    if (submit.isPending || (snapshotSelected && !canRestore) || editClosed) return
     const errs: Partial<Record<Field, string>> = {}
     if (!activeWorkdir.trim()) errs.workdir = t('newjob.workdir_required')
     if (!cmd.trim()) errs.cmd = t('newjob.cmd_required')
@@ -236,8 +249,9 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
       inherit_bashrc: inheritBashrc,
       gpus: mode === 'count' ? count : pinned.length,
       pinned_gpus: mode === 'pinned' ? pinned : [],
-      rerun_of: rerun ? source?.id ?? null : null,
-      code_from: snapshotSelected ? source!.id : undefined,
+      // 修改时这两项服务器不改，原样带上
+      rerun_of: editing ? source.rerun_of : rerun ? source?.id ?? null : null,
+      code_from: editing ? source.code_from : snapshotSelected ? source!.id : undefined,
     })
   }
 
@@ -266,10 +280,10 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
       className="mx-auto max-w-3xl space-y-4"
     >
       <div>
-        <h1 className="text-lg font-semibold">{source ? t(rerun ? 'newjob.title_rerun' : 'newjob.title_copy', { id: source.id }) : t('newjob.title_new')}</h1>
+        <h1 className="text-lg font-semibold">{source ? t(editing ? 'newjob.title_edit' : rerun ? 'newjob.title_rerun' : 'newjob.title_copy', { id: source.id }) : t('newjob.title_new')}</h1>
         <p className="mt-0.5 text-ui text-fg-3">
           {source
-            ? t(rerun ? 'newjob.subtitle_rerun' : 'newjob.subtitle_copy', { name: source.name })
+            ? t(editing ? 'newjob.subtitle_edit' : rerun ? 'newjob.subtitle_rerun' : 'newjob.subtitle_copy', { name: source.name })
             : t('newjob.subtitle_new')}
         </p>
         {rerun && source?.status === 'failed' && (
@@ -278,6 +292,16 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
           </p>
         )}
       </div>
+      {editClosed && (
+        <Alert tone="warn">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span className="min-w-0 flex-1">{t('newjob.edit_closed', { id: source.id })}</span>
+            <Link to={`/jobs/${source.id}`} className="relative shrink-0 font-medium text-fg underline decoration-fg/30 underline-offset-2 before:absolute before:-inset-x-2 before:-inset-y-3 hover:decoration-fg">
+              {t('newjob.edit_view_job')}
+            </Link>
+          </div>
+        </Alert>
+      )}
       {saved && (
         <Alert>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -310,8 +334,8 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
             <CodeSourcePicker name={`${uid}-code`} source={source} workdir={workdir} canRestore={canRestore} snapshot={snapshotSelected} onChange={setUseSnapshot} />
           </FormRow>
         )}
-        <FormRow label={snapshotSelected ? t('newjob.workdir_source') : t('newjob.workdir')} hint={snapshotSelected ? t('newjob.workdir_hint_snapshot') : t('newjob.workdir_hint')} htmlFor={ids.workdir}>
-          {snapshotSelected ? (
+        <FormRow label={lockedWorkdir ? t('newjob.workdir_source') : t('newjob.workdir')} hint={lockedWorkdir ? t('newjob.workdir_hint_snapshot') : t('newjob.workdir_hint')} htmlFor={ids.workdir}>
+          {lockedWorkdir ? (
             // 只读：衬底色、浅一级的强边线、次要文字色，悬停和聚焦时边线不变，看起来不像可以编辑的输入框
             <Input id={ids.workdir} aria-describedby={`${ids.workdir}-hint`} value={activeWorkdir} readOnly className="cursor-default border-line-strong! bg-subtle! font-mono text-[12.5px] text-fg-2! hover:border-line-strong! focus:border-line-strong! focus:ring-0!" />
           ) : <WorkdirInput
@@ -325,7 +349,7 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
           <FieldError id={`${ids.workdir}-err`}>{errors.workdir}</FieldError>
         </FormRow>
 
-        <FormRow label={t('newjob.cmd')} hint={snapshotSelected
+        <FormRow label={t('newjob.cmd')} hint={lockedWorkdir
           ? t('newjob.cmd_hint_snapshot')
           : t('newjob.cmd_hint')} htmlFor={ids.cmd}>
           <Textarea
@@ -468,8 +492,8 @@ function JobForm({ source, formMode, prefs, onReset }: { source: Job | null; for
           <ErrorBox error={submit.error} className="sm:mr-auto" />
           <div className="flex gap-2 sm:ml-auto">
             <Button onClick={() => nav(-1)}>{t('newjob.back')}</Button>
-            <Button type="submit" variant="primary" loading={submit.isPending} disabled={submit.isPending || (snapshotSelected && !canRestore)} className="flex-1 sm:flex-none">
-              {t('newjob.submit')}
+            <Button type="submit" variant="primary" loading={submit.isPending} disabled={submit.isPending || (snapshotSelected && !canRestore) || editClosed} className="flex-1 sm:flex-none">
+              {editing ? t('newjob.save_edit') : t('newjob.submit')}
               <Kbd>{modKey} ↵</Kbd>
             </Button>
           </div>

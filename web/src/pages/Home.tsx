@@ -6,6 +6,7 @@ import { GpuGrid, gpuBusy, shortName, useGpus } from '../components/GpuGrid'
 import { HostMetrics } from '../components/HostMetrics'
 import { JobList } from '../components/JobRow'
 import { QueueBanner, QueuePauseButton, QueuePauseError } from '../components/QueueControls'
+import { QueueOpError } from '../components/QueueOps'
 import { ReservationList, ReserveButton } from '../components/Reservations'
 import { StarError } from '../components/StarButton'
 import { Card, cx, ErrorBox, SkeletonRows, StatusIcon } from '../components/ui'
@@ -126,6 +127,7 @@ export function Home() {
       <h1 className="sr-only">{t('home.title')}</h1>
       <QueueBanner />
       <StarError />
+      <QueueOpError />
       <Summary running={runningTotal} queued={queuedTotal} />
       <GpuGrid />
       <ReservationList />

@@ -100,7 +100,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/trace", s.tracePath)
 	mux.HandleFunc("GET /api/compare", s.compareJobs)
 	mux.HandleFunc("POST /api/jobs", s.submitJob)
+	mux.HandleFunc("POST /api/jobs/batch", s.batchJobs)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
+	mux.HandleFunc("POST /api/jobs/{id}/edit", s.editJob)
+	mux.HandleFunc("POST /api/jobs/{id}/move", s.moveJob)
+	mux.HandleFunc("POST /api/jobs/{id}/hold", s.holdJob)
 	mux.HandleFunc("GET /api/jobs/{id}/env", s.jobEnv)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/star", s.starJob)
@@ -539,6 +543,8 @@ type jobView struct {
 	// 只在单个任务的详情里给：重跑自哪个任务、被重跑成了哪些任务（带状态，详情页标出重跑后有没有成功）
 	RerunParent *store.JobRef  `json:"rerun_parent,omitempty"`
 	Reruns      []store.JobRef `json:"reruns,omitempty"`
+	// Edited 只在单个任务的详情里给：排队期间修改过（有 job_edited 事件）
+	Edited bool `json:"edited,omitempty"`
 }
 
 func (s *Server) withProfile(j *store.Job) *store.Job {
@@ -682,7 +688,113 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	if reruns, err := s.Store.Reruns(j.ID, maxRerunRefs); err == nil {
 		v.Reruns = reruns
 	}
+	v.Edited, _ = s.Store.HasJobEvent(j.ID, store.EventJobEdited)
 	writeJSON(w, 200, v)
+}
+
+// writeQueueErr 是修改排队任务出错时的响应：请求本身有问题 400，任务已经不在排队等状态冲突 409。
+func writeQueueErr(w http.ResponseWriter, err error) {
+	switch {
+	case scheduler.IsNotFound(err):
+		writeErrE(w, 404, err)
+	case scheduler.IsConflict(err):
+		writeErrE(w, http.StatusConflict, err)
+	case scheduler.IsValidation(err):
+		writeErrE(w, 400, err)
+	default:
+		writeErr(w, 500, err.Error())
+	}
+}
+
+// editJob 修改排队中的任务（FEATURES 3.1），body 和提交相同；rerun_of、code_from、submit_key 不变。
+func (s *Server) editJob(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	var req scheduler.SubmitReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+	updated, err := s.Mgr.Edit(j.ID, req)
+	if err != nil {
+		writeQueueErr(w, err)
+		return
+	}
+	s.Store.Audit(auth.ClientIP(r), "job_edit", fmt.Sprintf("#%d %s", updated.ID, updated.Name))
+	writeJSON(w, 200, s.views([]*store.Job{updated})[0])
+}
+
+// moveJob 调整排队任务的位置：body 为 {to}，取 top、up、down、bottom（FEATURES 3.2）。
+func (s *Server) moveJob(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		To string `json:"to"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	updated, err := s.Mgr.Move(j.ID, body.To)
+	if err != nil {
+		writeQueueErr(w, err)
+		return
+	}
+	s.Store.Audit(auth.ClientIP(r), "job_move", fmt.Sprintf("#%d %s", j.ID, body.To))
+	writeJSON(w, 200, s.views([]*store.Job{updated})[0])
+}
+
+// holdJob 暂缓或恢复排队任务：body 为 {held}（FEATURES 3.2）。
+func (s *Server) holdJob(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Held *bool `json:"held"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.Held == nil {
+		writeErrC(w, 400, "hold_flag_required", "请提供暂缓开关", nil)
+		return
+	}
+	updated, err := s.Mgr.Hold(j.ID, *body.Held)
+	if err != nil {
+		writeQueueErr(w, err)
+		return
+	}
+	s.Store.Audit(auth.ClientIP(r), "job_hold", fmt.Sprintf("#%d held=%t", j.ID, *body.Held))
+	writeJSON(w, 200, s.views([]*store.Job{updated})[0])
+}
+
+// batchJobs 对一批排队任务做同一个操作：cancel、replace、hold、release、top。整批全成或全不成；
+// dry_run 只返回预览。
+func (s *Server) batchJobs(w http.ResponseWriter, r *http.Request) {
+	var req scheduler.BatchReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+	result, err := s.Mgr.Batch(req)
+	if err != nil {
+		writeQueueErr(w, err)
+		return
+	}
+	if !req.DryRun {
+		var ids []string
+		for _, item := range result.Items {
+			if item.Changed {
+				ids = append(ids, fmt.Sprintf("#%d", item.ID))
+			}
+		}
+		if len(ids) > 0 {
+			s.Store.Audit(auth.ClientIP(r), "job_batch", req.Action+" "+strings.Join(ids, ","))
+		}
+	}
+	writeJSON(w, 200, result)
 }
 
 // 详情页最多列出的重跑任务数

@@ -283,7 +283,7 @@ GET  /api/workdirs/recent              最近用过的工作目录
 GET  /api/jobs?status=&q=&page=&ended_after=  任务列表（ended_after 是 unix 秒，只要之后结束的；失败任务带 fail_kind、error_line 和 traceback_offset）
 GET  /api/jobs?finished_from_event=&finished_to_event=  按结束事件范围筛选原批次，包含两端
 GET  /api/jobs?order=ended&before=&before_id=  只要已结束的任务，按结束时间倒序；before / before_id 是上一页最后一条的结束时间和 id（游标翻页，多台服务器的历史按时间合并时用）
-GET  /api/jobs?order=asc               按 id 从旧到新（默认从新到旧）；排队任务就是队列顺序，排队多于一页时取到的是队首
+GET  /api/jobs?order=asc               按 id 从旧到新（默认从新到旧）；只筛排队任务（status=queued）时按队列顺序（queue_order, id），排队多于一页时取到的是队首
 GET  /api/trace?path=                  从绝对路径反查任务，返回匹配来源（output_dir、run_code（快照重跑的 run/<id>/code/）、danlu_json、guess）
 GET  /api/compare?a=&b=                两次任务的命令词、环境变量差异、快照文件差异、包版本及配方
 POST /api/jobs                         提交任务；带 submit_key（1–100 个 [A-Za-z0-9._:-]）时同一个 key 只建一个任务：
@@ -292,6 +292,13 @@ POST /api/jobs                         提交任务；带 submit_key（1–100 �
 GET  /api/jobs/{id}                    任务详情
 GET  /api/jobs/{id}/env                任务记录的环境包列表原文
 POST /api/jobs/{id}/cancel             取消任务
+POST /api/jobs/{id}/edit               修改排队中的任务（body 和提交相同；rerun_of、code_from、submit_key 不变，名字留空保留原名；
+                                       编号和排队位置不变；已经开始或结束 409 job_already_started / job_not_queued）
+POST /api/jobs/{id}/move               调整排队位置（JSON {"to":"top|up|down|bottom"}；已在那个位置时不变）
+POST /api/jobs/{id}/hold               暂缓或恢复（JSON {"held":true|false}）：暂缓的留在原位，调度时跳过，不挡后面的任务
+POST /api/jobs/batch                   批量操作排队任务（JSON {"ids":[…],"action":"cancel|replace|hold|release|top","find","replace","dry_run"}；
+                                       replace 把命令里的 find 全部换成 replace；dry_run 只返回预览 {"items":[{id,name,changed,before,after}]}；
+                                       整批全成或全不成，有任务已经开始或结束时 409 并在 params.id 写明是哪个）
 POST /api/jobs/{id}/star               标星或取消标星（JSON {"starred":true|false}）
 POST /api/jobs/{id}/rename             改任务名（JSON {"name":"…"}，去掉首尾空白后 1–100 个字；任何状态都能改，已启动的任务输出目录和 DANLU_JOB_NAME 不变）
 POST /api/jobs/{id}/memo               保存备注（JSON {"memo":"…"}，可换行，最多 500 字，空串清除）

@@ -1,5 +1,5 @@
 import { CircleAlert, CircleCheck, CircleDashed, CircleSlash, CircleX, Ellipsis, Info, LoaderCircle, TriangleAlert } from 'lucide-react'
-import { useEffect, useId, useRef, useState, type AriaRole, type ButtonHTMLAttributes, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type AriaRole, type ButtonHTMLAttributes, type ComponentProps, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router'
 import { apiErrorText, jobStatusText, statusLabel, type Job, type JobStatus } from '@danlu/core'
@@ -336,36 +336,90 @@ export function Dialog({ title, children, footer, onClose, className, wide = fal
  * 更多操作：一个按钮展开一列操作，放一行放不下、又不常用的那些。Enter、空格或 ↓ 打开并聚焦第一项，
  * ↑ ↓ Home End 在项之间移动，Esc 或点外面关闭（Esc 把焦点还给按钮），Tab 离开时关闭，点了某一项也关闭。
  * 子元素是 role="menuitem" 的链接或按钮，样式用 menuItemClass。
+ * floating：菜单挂到 body 下、按按钮位置固定定位，下面放不下就朝上展开。列表行里用它，
+ * 免得被面板的 overflow-hidden 裁掉；页面滚动或窗口改变大小时关闭。
  */
-export function Menu({ label, children, className, buttonClassName }: { label: string; children: ReactNode; className?: string; buttonClassName?: string }) {
+export function Menu({ label, children, className, buttonClassName, variant = 'secondary', size = 'icon', floating = false }: {
+  label: string
+  children: ReactNode
+  className?: string
+  buttonClassName?: string
+  variant?: Variant
+  size?: Size
+  floating?: boolean
+}) {
   const [open, setOpen] = useState(false)
+  const [place, setPlace] = useState<CSSProperties>()
   const root = useRef<HTMLDivElement>(null)
+  const list = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
   const id = useId()
-  const items = () => [...(root.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+  const items = () => [...(list.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+  useLayoutEffect(() => {
+    if (!open || !floating) return
+    const b = button.current!.getBoundingClientRect()
+    const h = list.current?.offsetHeight ?? 0
+    const right = Math.max(8, innerWidth - b.right)
+    // 下面放不下、上面放得下时朝上
+    setPlace(b.bottom + 4 + h > innerHeight - 8 && b.top - 4 - h >= 8 ? { right, bottom: innerHeight - b.top + 4 } : { right, top: b.bottom + 4 })
+  }, [open, floating])
   useEffect(() => {
     if (!open) return
-    items()[0]?.focus()
-    const outside = (e: PointerEvent) => !root.current?.contains(e.target as Node) && setOpen(false)
+    items()[0]?.focus({ preventScroll: true })
+    const outside = (e: PointerEvent) => !root.current?.contains(e.target as Node) && !list.current?.contains(e.target as Node) && setOpen(false)
+    const close = () => setOpen(false)
     document.addEventListener('pointerdown', outside)
-    return () => document.removeEventListener('pointerdown', outside)
-  }, [open])
+    if (floating) {
+      addEventListener('scroll', close, true)
+      addEventListener('resize', close)
+    }
+    return () => {
+      document.removeEventListener('pointerdown', outside)
+      removeEventListener('scroll', close, true)
+      removeEventListener('resize', close)
+    }
+  }, [open, floating])
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (!open) return
-    const list = items()
-    const i = list.indexOf(document.activeElement as HTMLElement)
-    const to = ({ ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: list.length - 1 } as Record<string, number>)[e.key]
+    const all = items()
+    const i = all.indexOf(document.activeElement as HTMLElement)
+    const to = ({ ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: all.length - 1 } as Record<string, number>)[e.key]
     if (to !== undefined) {
       e.preventDefault()
-      list[(to + list.length) % list.length]?.focus()
+      all[(to + all.length) % all.length]?.focus()
     } else if (e.key === 'Escape') {
       e.preventDefault()
       setOpen(false)
       button.current?.focus()
-    } else if (e.key === 'Tab') setOpen(false)
+    } else if (e.key === 'Tab') {
+      setOpen(false)
+      if (floating) {
+        // 挂在 body 下的菜单在文档末尾：Tab 回到按钮后面，不跳到页面最后
+        e.preventDefault()
+        button.current?.focus()
+      }
+    }
   }
+  const menu = open && (
+    <div
+      ref={list}
+      id={id}
+      role="menu"
+      aria-label={label}
+      onClick={() => setOpen(false)}
+      // React 的事件沿组件树冒泡：挂到 body 下的菜单，按键照样交给 onKeyDown
+      onKeyDown={floating ? onKeyDown : undefined}
+      style={floating ? place ?? { visibility: 'hidden' } : undefined}
+      className={cx(
+        'z-20 min-w-44 rounded-md border border-line bg-surface py-1 shadow-[0_8px_24px_rgb(0_0_0/0.12)]',
+        floating ? 'fixed z-40 max-h-[calc(100dvh-1rem)] overflow-y-auto' : 'absolute right-0 top-full mt-1',
+      )}
+    >
+      {children}
+    </div>
+  )
   return (
-    <div ref={root} className={cx('relative', className)} onKeyDown={onKeyDown}>
+    <div ref={root} className={cx('relative', className)} onKeyDown={floating ? undefined : onKeyDown}>
       <button
         ref={button}
         type="button"
@@ -381,23 +435,18 @@ export function Menu({ label, children, className, buttonClassName }: { label: s
             setOpen(true)
           }
         }}
-        className={cx(buttonClass('secondary', 'icon'), open && 'bg-hover', buttonClassName)}
+        className={cx(buttonClass(variant, size), open && 'bg-hover', buttonClassName)}
       >
         <Ellipsis aria-hidden />
       </button>
-      {open && (
-        <div
-          id={id}
-          role="menu"
-          aria-label={label}
-          onClick={() => setOpen(false)}
-          className="absolute right-0 top-full z-20 mt-1 min-w-44 rounded-md border border-line bg-surface py-1 shadow-[0_8px_24px_rgb(0_0_0/0.12)]"
-        >
-          {children}
-        </div>
-      )}
+      {floating ? menu && createPortal(menu, document.body) : menu}
     </div>
   )
+}
+
+/** 菜单里的分组线 */
+export function MenuSeparator() {
+  return <div role="separator" className="my-1 h-px bg-line" />
 }
 
 export const menuItemClass =

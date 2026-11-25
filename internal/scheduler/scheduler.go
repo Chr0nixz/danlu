@@ -80,6 +80,10 @@ type JobStore interface {
 	JobBySubmitKey(string) (*store.Job, error)
 	JobsByStatus(string) ([]*store.Job, error)
 	JobsWithPendingRecipe() ([]*store.Job, error)
+	// 排队任务的修改：只改 status='queued' 的行，一批里有一个不在排队就整批回滚（store.NotQueuedError）
+	EditQueued([]*store.Job, ...*store.Event) error
+	SetQueueOrder([]store.QueueOrder, ...*store.Event) error
+	SetHeld([]int64, bool, ...*store.Event) error
 	TouchWorkdir(string)
 	InsertReservation(*store.Reservation) error
 	SaveReservation(*store.Reservation, ...*store.Event) error
@@ -233,13 +237,30 @@ func (m *Manager) strictReadyLocked() bool {
 }
 
 // ValidationError 表示请求本身有问题（API 返回 400）。Code/Params 供前端本地化，Msg 仍是中文原文。
+// Conflict 为 true 时是任务的状态不允许这个操作，比如要改的排队任务已经开始（API 返回 409）。
 type ValidationError struct {
-	Msg    string
-	Code   string
-	Params map[string]any
+	Msg      string
+	Code     string
+	Params   map[string]any
+	Conflict bool
 }
 
 func (e *ValidationError) Error() string { return e.Msg }
+
+// conflict 把 invalid 生成的错误标成状态冲突。码仍写在 invalid 的字面量里，catalog_test 按它扫描调用点
+func conflict(err error) error {
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		ve.Conflict = true
+	}
+	return err
+}
+
+// IsConflict：任务的状态不允许这个操作（API 返回 409）。
+func IsConflict(err error) bool {
+	var ve *ValidationError
+	return errors.As(err, &ve) && ve.Conflict
+}
 
 // invalid 生成带机器码的校验错误；没有插值参数时 params 传 nil。
 func invalid(code string, params map[string]any, format string, a ...any) error {
@@ -365,81 +386,14 @@ func normalizeGPUs(n int, pinned []int) (int, []int) {
 }
 
 func (m *Manager) submit(req SubmitReq) (*store.Job, error) {
-	if err := ValidateMemo(req.Memo); err != nil {
+	req, pinned, err := m.validate(req)
+	if err != nil {
 		return nil, err
-	}
-	if req.Workdir == "" || !strings.HasPrefix(req.Workdir, "/") {
-		return nil, invalid("job_workdir_abs", nil, "工作目录必须是服务器上的绝对路径")
-	}
-	if req.CodeFrom != nil {
-		source, err := m.st.GetJob(*req.CodeFrom)
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, invalid("job_code_from_missing", map[string]any{"id": *req.CodeFrom}, "源任务 #%d 不存在", *req.CodeFrom)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if filepath.Clean(req.Workdir) != filepath.Clean(source.Workdir) {
-			return nil, invalid("job_code_from_workdir", nil, "使用快照重跑时，工作目录必须与源任务一致")
-		}
-		req.Workdir = source.Workdir
-	} else if fi, err := os.Stat(req.Workdir); err != nil || !fi.IsDir() {
-		return nil, invalid("job_workdir_missing", map[string]any{"path": req.Workdir}, "工作目录不存在: %s", req.Workdir)
-	}
-	if req.Cmd == "" {
-		return nil, invalid("job_cmd_empty", nil, "命令不能为空")
-	}
-	if req.Name == "" {
-		// 先截短目录名再拼时间，目录名很长时也不会超过任务名长度限制
-		suffix := "-" + time.Now().Format("0102-1504")
-		base := []rune(filepath.Base(req.Workdir))
-		if limit := maxNameLen - len([]rune(suffix)); len(base) > limit {
-			base = base[:limit]
-		}
-		req.Name = string(base) + suffix
-	}
-	if len([]rune(req.Name)) > maxNameLen {
-		return nil, invalid("job_name_too_long", nil, "任务名太长")
-	}
-	for k := range req.Env {
-		if !envKeyRe.MatchString(k) {
-			return nil, invalid("job_env_name_invalid", map[string]any{"name": k}, "环境变量名不合法: %q", k)
-		}
-		if runner.ReservedEnv(k) {
-			return nil, invalid("job_env_reserved", map[string]any{"name": k}, "环境变量 %s 由 danlu 管理，不能自定义", k)
-		}
-		if strings.ContainsRune(req.Env[k], 0) {
-			// 严格任务的环境文件按 NUL 分隔，取值里的 NUL 会拆出一条新变量，盖过保留变量
-			return nil, invalid("job_env_value_nul", map[string]any{"name": k}, "环境变量 %s 的值不能包含空字符", k)
-		}
-	}
-	var pinned []int
-	req.GPUs, pinned = normalizeGPUs(req.GPUs, req.PinnedGPUs)
-	if req.GPUs < 0 || req.GPUs > 64 {
-		return nil, invalid("job_gpus_invalid", nil, "GPU 数量不合法")
-	}
-	if gpus, _, err := m.gpus.Latest(); err == nil && len(gpus) > 0 {
-		if req.GPUs > len(gpus) {
-			return nil, invalid("job_gpus_exceed", map[string]any{"n": req.GPUs, "total": len(gpus)}, "需要 %d 张卡，但这台机器只有 %d 张", req.GPUs, len(gpus))
-		}
-		for _, p := range pinned {
-			if !slices.ContainsFunc(gpus, func(g gpu.GPU) bool { return g.Index == p }) {
-				return nil, invalid("gpu_missing", map[string]any{"gpu": p}, "GPU %d 不存在", p)
-			}
-		}
-	}
-	if req.RerunOf != nil {
-		if _, err := m.st.GetJob(*req.RerunOf); err != nil {
-			req.RerunOf = nil
-		}
-	}
-	if req.Env == nil {
-		req.Env = map[string]string{}
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	j := &store.Job{Name: req.Name, Memo: req.Memo, NotifyDone: req.NotifyDone, Workdir: req.Workdir, CondaEnv: strings.TrimSpace(req.CondaEnv), Cmd: req.Cmd,
+	j := &store.Job{Name: req.Name, Memo: req.Memo, NotifyDone: req.NotifyDone, Workdir: req.Workdir, CondaEnv: req.CondaEnv, Cmd: req.Cmd,
 		Env: req.Env, InheritBashrc: req.InheritBashrc, GPUsReq: req.GPUs, GPUsPinned: pinned,
 		Status: store.StatusQueued, RerunOf: req.RerunOf, CodeFrom: req.CodeFrom, SubmitKey: req.SubmitKey}
 	if err := m.st.InsertJob(j); err != nil {
@@ -451,6 +405,87 @@ func (m *Manager) submit(req SubmitReq) (*store.Job, error) {
 	m.st.TouchWorkdir(req.Workdir)
 	m.Wake()
 	return j, nil
+}
+
+// validate 校验并规范化提交表单上的字段，提交和修改排队任务（Edit）共用。返回规范化后的请求和去重排好的指定卡号。
+// 要 stat 工作目录、读源任务，可能慢，调用方在锁外调用。
+func (m *Manager) validate(req SubmitReq) (SubmitReq, []int, error) {
+	req.Workdir = strings.TrimSpace(req.Workdir)
+	req.Cmd = strings.TrimSpace(req.Cmd)
+	req.Name = strings.TrimSpace(req.Name)
+	req.CondaEnv = strings.TrimSpace(req.CondaEnv)
+	if err := ValidateMemo(req.Memo); err != nil {
+		return req, nil, err
+	}
+	if req.Workdir == "" || !strings.HasPrefix(req.Workdir, "/") {
+		return req, nil, invalid("job_workdir_abs", nil, "工作目录必须是服务器上的绝对路径")
+	}
+	if req.CodeFrom != nil {
+		source, err := m.st.GetJob(*req.CodeFrom)
+		if errors.Is(err, store.ErrNotFound) {
+			return req, nil, invalid("job_code_from_missing", map[string]any{"id": *req.CodeFrom}, "源任务 #%d 不存在", *req.CodeFrom)
+		}
+		if err != nil {
+			return req, nil, err
+		}
+		if filepath.Clean(req.Workdir) != filepath.Clean(source.Workdir) {
+			return req, nil, invalid("job_code_from_workdir", nil, "使用快照重跑时，工作目录必须与源任务一致")
+		}
+		req.Workdir = source.Workdir
+	} else if fi, err := os.Stat(req.Workdir); err != nil || !fi.IsDir() {
+		return req, nil, invalid("job_workdir_missing", map[string]any{"path": req.Workdir}, "工作目录不存在: %s", req.Workdir)
+	}
+	if req.Cmd == "" {
+		return req, nil, invalid("job_cmd_empty", nil, "命令不能为空")
+	}
+	if req.Name == "" {
+		// 先截短目录名再拼时间，目录名很长时也不会超过任务名长度限制
+		suffix := "-" + time.Now().Format("0102-1504")
+		base := []rune(filepath.Base(req.Workdir))
+		if limit := maxNameLen - len([]rune(suffix)); len(base) > limit {
+			base = base[:limit]
+		}
+		req.Name = string(base) + suffix
+	}
+	if len([]rune(req.Name)) > maxNameLen {
+		return req, nil, invalid("job_name_too_long", nil, "任务名太长")
+	}
+	for k := range req.Env {
+		if !envKeyRe.MatchString(k) {
+			return req, nil, invalid("job_env_name_invalid", map[string]any{"name": k}, "环境变量名不合法: %q", k)
+		}
+		if runner.ReservedEnv(k) {
+			return req, nil, invalid("job_env_reserved", map[string]any{"name": k}, "环境变量 %s 由 danlu 管理，不能自定义", k)
+		}
+		if strings.ContainsRune(req.Env[k], 0) {
+			// 严格任务的环境文件按 NUL 分隔，取值里的 NUL 会拆出一条新变量，盖过保留变量
+			return req, nil, invalid("job_env_value_nul", map[string]any{"name": k}, "环境变量 %s 的值不能包含空字符", k)
+		}
+	}
+	var pinned []int
+	req.GPUs, pinned = normalizeGPUs(req.GPUs, req.PinnedGPUs)
+	if req.GPUs < 0 || req.GPUs > 64 {
+		return req, nil, invalid("job_gpus_invalid", nil, "GPU 数量不合法")
+	}
+	if gpus, _, err := m.gpus.Latest(); err == nil && len(gpus) > 0 {
+		if req.GPUs > len(gpus) {
+			return req, nil, invalid("job_gpus_exceed", map[string]any{"n": req.GPUs, "total": len(gpus)}, "需要 %d 张卡，但这台机器只有 %d 张", req.GPUs, len(gpus))
+		}
+		for _, p := range pinned {
+			if !slices.ContainsFunc(gpus, func(g gpu.GPU) bool { return g.Index == p }) {
+				return req, nil, invalid("gpu_missing", map[string]any{"gpu": p}, "GPU %d 不存在", p)
+			}
+		}
+	}
+	if req.RerunOf != nil {
+		if _, err := m.st.GetJob(*req.RerunOf); err != nil {
+			req.RerunOf = nil
+		}
+	}
+	if req.Env == nil {
+		req.Env = map[string]string{}
+	}
+	return req, pinned, nil
 }
 
 func (m *Manager) Cancel(id int64) (*store.Job, error) {
@@ -799,7 +834,8 @@ func (m *Manager) failQueued(j *store.Job, reason string) {
 	m.transition(j, store.StatusFailed, reason)
 }
 
-// schedule 严格按提交顺序：队首放不下就停，后面的任务不插队。预约已经收下的卡不分配。
+// schedule 严格按队列顺序（queue_order, id）：队首放不下就停，后面的任务不插队。预约已经收下的卡不分配。
+// 暂缓的任务跳过，不算队首，也不挡后面的任务。
 func (m *Manager) schedule(gpus []gpu.GPU, gpuErr error) {
 	if err := m.checkDiskGuardLocked(); err != nil {
 		if m.diskError != err.Error() {
@@ -863,6 +899,9 @@ func (m *Manager) schedule(gpus []gpu.GPU, gpuErr error) {
 	// 读不到预约时不知道哪些卡被占着，需要 GPU 的任务都先等着
 	gpuKnown := gpuErr == nil && len(gpus) > 0 && m.resReady
 	for _, j := range queued {
+		if j.Held {
+			continue // 暂缓：留在原位，等恢复
+		}
 		if _, unsaved := m.pending[j.ID]; unsaved {
 			return // 重新排队等事件先落库，再启动下一次准备
 		}

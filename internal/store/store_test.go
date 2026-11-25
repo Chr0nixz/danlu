@@ -446,3 +446,86 @@ func TestSubmitKeyUnique(t *testing.T) {
 		t.Fatalf("没有的 key 应返回 ErrNotFound，得到 %v", err)
 	}
 }
+
+// 队列顺序（FEATURES 3.2）：升级时旧任务的 queue_order 等于 id；新任务插入时也等于 id；
+// 只筛排队任务的升序列表按 queue_order 排
+func TestQueueOrderMigrationAndListing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	full := migrations
+	base := slices.IndexFunc(full, func(m string) bool { return strings.Contains(m, "ADD COLUMN queue_order") })
+	if base < 1 {
+		t.Fatal("缺少队列顺序迁移")
+	}
+	withMigrations(t, full[:base])
+	s := openAt(t, path)
+	for _, id := range []int{1, 2, 3} {
+		if _, err := s.db.Exec("INSERT INTO jobs(id,name,workdir,cmd,status,created_at) VALUES (?,'old','/w','x','queued',0)", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	migrations = full
+	s = openAt(t, path)
+	for _, id := range []int64{1, 2, 3} {
+		if j, err := s.GetJob(id); err != nil || j.QueueOrder != id || j.Held {
+			t.Fatalf("迁移后 #%d: %+v %v", id, j, err)
+		}
+	}
+	j := &Job{Name: "new", Workdir: "/w", Cmd: "x", Status: StatusQueued}
+	if err := s.InsertJob(j); err != nil || j.QueueOrder != j.ID || j.ID != 4 {
+		t.Fatalf("新任务: %+v %v", j, err)
+	}
+	if got, _ := s.GetJob(4); got.QueueOrder != 4 {
+		t.Fatalf("库里的 queue_order = %d", got.QueueOrder)
+	}
+	if err := s.SetQueueOrder([]QueueOrder{{ID: 3, Order: 1}, {ID: 1, Order: 2}, {ID: 2, Order: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	ids := func(jobs []*Job) []int64 {
+		var out []int64
+		for _, j := range jobs {
+			out = append(out, j.ID)
+		}
+		return out
+	}
+	queued, _ := s.JobsByStatus(StatusQueued)
+	if got := ids(queued); !slices.Equal(got, []int64{3, 1, 2, 4}) {
+		t.Fatalf("JobsByStatus 顺序 %v", got)
+	}
+	list, _, _ := s.ListJobs(JobFilter{Statuses: []string{StatusQueued}, Ascending: true})
+	if got := ids(list); !slices.Equal(got, []int64{3, 1, 2, 4}) {
+		t.Fatalf("ListJobs 顺序 %v", got)
+	}
+	// 混着别的状态时仍按 id
+	list, _, _ = s.ListJobs(JobFilter{Statuses: []string{StatusQueued, StatusRunning}, Ascending: true})
+	if got := ids(list); !slices.Equal(got, []int64{1, 2, 3, 4}) {
+		t.Fatalf("混合状态的升序应按 id: %v", got)
+	}
+}
+
+// 只剩暂缓的排队任务时，收尾记排空
+func TestDrainIgnoresHeldJobs(t *testing.T) {
+	s := openTest(t)
+	running := &Job{Name: "r", Workdir: "/w", Cmd: "x", Status: StatusQueued}
+	held := &Job{Name: "h", Workdir: "/w", Cmd: "x", Status: StatusQueued}
+	for _, j := range []*Job{running, held} {
+		if err := s.InsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetHeld([]int64{held.ID}, true); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	running.Status, running.EndedAt = StatusSucceeded, &now
+	id := running.ID
+	finish := &Event{Kind: EventJobFinished, JobID: &id, DedupeKey: "f"}
+	drain := &Event{Kind: EventQueueDrained, DedupeKey: "d"}
+	if err := s.Transition(running, finish, drain); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := s.EventsAfter(0, 10)
+	if len(events) != 2 || events[1].Kind != EventQueueDrained {
+		t.Fatalf("只剩暂缓任务时应记排空: %+v", events)
+	}
+}

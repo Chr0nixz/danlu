@@ -453,3 +453,55 @@ func TestTailFollowUnfinishedLine(t *testing.T) {
 		t.Fatalf("tail: %q", out)
 	}
 }
+
+// 暂缓、恢复、挪位置（FEATURES 3.2）：几个任务要么都改要么都不改；队首说的是第一个没有暂缓的
+func TestHoldReleaseMove(t *testing.T) {
+	env := startLocal(t, os.Geteuid())
+	dir := t.TempDir()
+	for range 3 {
+		if _, err := run(t, cmdSubmit, "-C", dir, "-g", "1", "--", "python", "train.py"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hold := func(args []string) error { return cmdHold(args, true) }
+	if out, err := run(t, hold, "1", "2"); err != nil || !strings.Contains(out, "已暂缓 #1") || !strings.Contains(out, "已暂缓 #2") {
+		t.Fatalf("hold: %v %q", err, out)
+	}
+	if out, err := run(t, hold, "1"); err != nil || !strings.Contains(out, "#1 已经是暂缓的") {
+		t.Fatalf("重复 hold: %v %q", err, out)
+	}
+	if out, err := run(t, cmdGpus); err != nil || !strings.Contains(out, "暂缓 2 个") || !strings.Contains(out, "队首 #3") {
+		t.Fatalf("gpus 的队首应跳过暂缓的任务: %v %q", err, out)
+	}
+	out, err := run(t, cmdHoldRelease, "--json", "2")
+	var res struct {
+		Action string `json:"action"`
+		Items  []struct {
+			ID      int64 `json:"id"`
+			Changed bool  `json:"changed"`
+		} `json:"items"`
+	}
+	if mustJSON(t, out, &res); err != nil || res.Action != "release" || len(res.Items) != 1 || !res.Items[0].Changed {
+		t.Fatalf("release --json: %v %s", err, out)
+	}
+	if out, err := run(t, cmdMove, "3", "top"); err != nil || !strings.Contains(out, "#3 现在排第 1 位") {
+		t.Fatalf("move: %v %q", err, out)
+	}
+	if _, err := run(t, cmdMove, "3", "left"); func() bool { e, _ := exitOf(err); return e != exitUsage }() {
+		t.Fatalf("无效位置应是用法错误: %v", err)
+	}
+	if _, err := run(t, hold, "2", "99"); func() bool { e, c := exitOf(err); return e != exitNotFound || c != "job_not_found" }() {
+		t.Fatalf("不存在的任务应退出码 4: %v", err)
+	}
+	if j, _ := env.st.GetJob(2); j.Held {
+		t.Fatal("整批失败时 #2 不应被暂缓")
+	}
+	if _, err := run(t, cmdCancel, "2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, hold, "--json", "2"); func() bool { e, c := exitOf(err); return e != exitErr || c != "job_not_queued" }() {
+		t.Fatalf("已结束的任务不能暂缓: %v", err)
+	}
+}
+
+func cmdHoldRelease(args []string) error { return cmdHold(args, false) }

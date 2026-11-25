@@ -150,6 +150,9 @@ struct JobLite {
     gpus_pinned: Vec<i64>,
     #[serde(default)]
     queue_pos: Option<i64>,
+    /// 暂缓的排队任务留在原位，但不算队首（服务器的调度和告警都跳过它）
+    #[serde(default)]
+    held: bool,
     #[serde(default)]
     error_line: Option<String>,
 }
@@ -538,7 +541,8 @@ fn evaluate(
         }
 
         // 外部进程或未知显存占用挡住队首：没有这些占用时本来能跑。预约的卡和任务的卡一样算自有占用
-        if let Some(head) = jobs.iter().filter(|j| j.status == "queued").min_by_key(|j| j.queue_pos.unwrap_or(i64::MAX))
+        if let Some(head) =
+            jobs.iter().filter(|j| j.status == "queued" && !j.held).min_by_key(|j| j.queue_pos.unwrap_or(i64::MAX))
         {
             let owned = |g: &GpuLite| g.job.is_some() || g.reservation.is_some();
             let busy_external: HashSet<i64> = gpus

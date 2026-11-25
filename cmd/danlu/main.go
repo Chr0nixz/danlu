@@ -59,6 +59,8 @@ const usage = `danlu — GPU 服务器训练任务管理面板
   tail <id>         任务日志尾部；-f 跟到任务结束
   wait <id>…        等任务结束：成功 0，失败 10，取消 11，超时 124
   cancel <id>…      取消任务
+  hold <id>…        暂缓排队任务：留在原位，先不跑，也不挡后面的任务；release <id>… 恢复
+  move <id> <位置>  调整排队顺序：top、up、down、bottom
   rerun <id>        按原参数重跑；--snapshot 用原任务的代码快照
   gpus              每张卡的占用和队首在等什么
   api <方法> <路径>  直接调用 /api 接口
@@ -115,6 +117,12 @@ func main() {
 		err = cmdWait(args)
 	case "cancel":
 		err = cmdCancel(args)
+	case "hold":
+		err = cmdHold(args, true)
+	case "release":
+		err = cmdHold(args, false)
+	case "move":
+		err = cmdMove(args)
 	case "rerun":
 		err = cmdRerun(args)
 	case "gpus":
